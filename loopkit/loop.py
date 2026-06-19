@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from . import durability, safety
 from .agent import Agent
@@ -20,6 +21,11 @@ from .gate import AlwaysPass, Gate, ShellGate
 from .log import get_logger
 from .prompt import build_prompt
 from .stops import BudgetCeiling, LoopState, NoProgress, StopReason, first_triggered
+
+if TYPE_CHECKING:
+    # Typing-only import: the core never depends on an extension at runtime — the hook is
+    # duck-called. Continuous review is opt-in (Ch 8), so a None hook keeps v1 behaviour exact.
+    from .extensions.review import ReviewHook
 
 
 @dataclass
@@ -41,7 +47,8 @@ class _DryResult:
 
 
 def run_loop(config, agent: Agent, *, iteration_gate: Gate | None = None,
-             acceptance_gate: Gate | None = None, dry_run: bool = False) -> RunResult:
+             acceptance_gate: Gate | None = None, review_hook: "ReviewHook | None" = None,
+             dry_run: bool = False) -> RunResult:
     """Drive the agent toward `config.goal` until a terminal is reached. Returns the terminal."""
     repo = config.repo_path()
     run_id = durability.state_signature(repo)[:8]
@@ -83,29 +90,45 @@ def run_loop(config, agent: Agent, *, iteration_gate: Gate | None = None,
             return RunResult(StopReason.SAFETY, i, cost,
                              detail=f"touched protected path {violations[0]}")
 
-        committed = durability.commit_progress(repo, f"loopkit: tick {i} on {config.branch}")
+        commit_msg = f"loopkit: tick {i} on {config.branch}"
+        committed = durability.commit_progress(repo, commit_msg)
         signature = durability.state_signature(repo)
         signatures.append(signature)
         tick.info("tick.commit", committed=committed, sig=signature)
         state = LoopState(iteration=i, cost_usd=cost, signature=signature, signatures=signatures)
 
-        # DONE first: the iteration gate, then the held-out acceptance gate (Ch 9).
-        gate = iteration_gate.check(repo)
-        tick.info("gate.iteration", passed=gate.passed)
-        if gate.passed:
-            acc = acceptance_gate.check(repo)
-            tick.info("gate.acceptance", passed=acc.passed)
-            if acc.passed:
-                tick.info("run.done", iterations=i, costUsd=round(cost, 4))
-                return RunResult(StopReason.DONE, i, cost)
-            # Overfit: passed what it saw, failed what it didn't. Feed that back (Ch 9).
-            overfit = True
-            tick.warn("gate.overfit", detail="iteration_pass_acceptance_fail")
-            feedback = ("The visible checks pass but the held-out acceptance checks fail: you "
-                        "have fit the visible tests, not solved the goal. Make the behaviour "
-                        "correct.\n" + (acc.feedback or ""))
-        else:
-            feedback = gate.feedback
+        # Continuous review (Ch 8): review the fresh commit before it can count as done. A clean
+        # review is a precondition for the done-check below; a failing one feeds straight back so
+        # the agent fixes it next tick, while the producing context is fresh (the roborev loop).
+        # Only on a real commit — no new diff means nothing new to review. None => v1 behaviour.
+        review_ok = True
+        if review_hook is not None and committed:
+            review = review_hook.review(repo, commit_msg)
+            tick.info("gate.review", passed=review.passed)
+            if not review.passed:
+                review_ok = False
+                feedback = ("A review of your last change found issues to fix before it can be "
+                            "accepted:\n" + (review.feedback or ""))
+
+        # DONE next: the iteration gate, then the held-out acceptance gate (Ch 9). Skipped when
+        # the review failed, so unreviewed-but-green work can never be declared done.
+        if review_ok:
+            gate = iteration_gate.check(repo)
+            tick.info("gate.iteration", passed=gate.passed)
+            if gate.passed:
+                acc = acceptance_gate.check(repo)
+                tick.info("gate.acceptance", passed=acc.passed)
+                if acc.passed:
+                    tick.info("run.done", iterations=i, costUsd=round(cost, 4))
+                    return RunResult(StopReason.DONE, i, cost)
+                # Overfit: passed what it saw, failed what it didn't. Feed that back (Ch 9).
+                overfit = True
+                tick.warn("gate.overfit", detail="iteration_pass_acceptance_fail")
+                feedback = ("The visible checks pass but the held-out acceptance checks fail: you "
+                            "have fit the visible tests, not solved the goal. Make the behaviour "
+                            "correct.\n" + (acc.feedback or ""))
+            else:
+                feedback = gate.feedback
 
         # Hard stops, in precedence order (budget > no-progress). Cap is the loop bound below.
         reason = first_triggered(hard_stops, state)

@@ -50,6 +50,14 @@ controller attach points. **Do not rewrite the core contracts — attach at the 
      the 0.9 "solver" that passes held-out).
 2. **Continuous review (Ch 8)** — `extensions/review.py`. A `ReviewHook` called after each
    commit; add an `after_commit` hook point to `run_loop`. The roborev fix→re-review loop.
+   - ✅ **Done** (Ch 8 scenario + 6 tests, 27 total green). `ReviewHook` Protocol +
+     `CallableReviewHook` / `ShellReviewHook` (mirror `CallableGate`/`ShellGate`). `run_loop`
+     gained `review_hook=None` (typing-only import, duck-called — core keeps no runtime dep on
+     the extension) and the attach point: after `commit_progress`, **only on a real commit**, a
+     failing review sets `feedback` and makes `review_ok=False`, which *skips the entire
+     iteration/acceptance gate block* — so green-but-unreviewed work can never be declared done,
+     and the findings reach the next tick's prompt. `Stage.run` forwards `review_hook` for
+     scenarios. Verified in `demo 8`: tick 1 review fails → gates skipped → tick 2 clears → done.
 3. **Skills + write-back flywheel (Ch 17)** — `extensions/skills.py`. A `SkillRegistry`
    rendered into the prompt (attach in `prompt.build_prompt`) + `write_back` after DONE (attach
    in `loop.run_loop`'s done path). Gated — never ungated write-back.
@@ -69,18 +77,23 @@ controller attach points. **Do not rewrite the core contracts — attach at the 
 
 ## Suggested next step
 
-Orchestration (Ch 10–12) is done — both strategies, fan-out and evolutionary. Next is
-**continuous review (Ch 8)** — `extensions/review.py`. The seam is already typed there: a
-`ReviewHook.review(workspace, commit_message) -> GateResult`. Add an `after_commit` attach
-point to `run_loop` (right after `durability.commit_progress`, before the iteration gate), call
-the hook there, and feed a failing review back into the next tick's `feedback` — the roborev
-fix→re-review loop, run while the context that produced the diff is still fresh. Add a `Ch 8`
-scenario + MockAgent tests (a review that flags tick 1 and clears once fixed). After that:
-skills + write-back flywheel (Ch 17), then the Tilt deployable fleet.
+Orchestration (Ch 10–12) and continuous review (Ch 8) are done. Next is the **skills +
+write-back flywheel (Ch 17)** — `extensions/skills.py`. The seam is typed: a `SkillRegistry`
+with `render() -> str` (skills injected into the prompt) and `write_back(run_result)` (distill
+a successful run into a named skill). Two attach points in the core: read in
+`prompt.build_prompt` (render the registry into the assembled prompt — add an optional
+`skills: str` arg threaded from `run_loop`, kept None for v1), and write in `run_loop`'s DONE
+path (call `write_back` after the acceptance gate passes). **Gated, never ungated** (Ch 17/19):
+write-back must run through a gate/review before a run can mint a reusable skill, or the
+flywheel learns junk. Add a `Ch 17` scenario + MockAgent tests (a skill rendered into the
+prompt changes behaviour; a successful gated run writes one back; an ungated/failed run does
+not). After that: the Tilt deployable fleet (Ch ?, the last Part II item).
 
-Wiring note for evolution: `Supervisor.evolve` re-validates *survivors only* (high-score-first,
-stops at the first pass). If you later want every candidate's held-out verdict surfaced (e.g. a
-richer dashboard), that's the place to widen it — today non-survivors show no held-out result.
+Wiring notes carried forward:
+- `Supervisor.evolve` re-validates *survivors only* (high-score-first, stops at first pass).
+  Widen here if you ever want every candidate's held-out verdict surfaced (e.g. a dashboard).
+- `run_loop`'s `review_hook` runs **only on a real commit** and gates the done-check; a None
+  hook is exact v1 behaviour. The skills read-attach should follow the same opt-in shape.
 
 ## Gotchas already paid for (keep the fixes)
 
