@@ -10,8 +10,12 @@ dependencies = [
     "pydantic>=2.7",
 ]
 
+# The core stays thin (typer + rich + pydantic). The deployable fleet (Ch 12) is the one place
+# that needs a wire: a thin Redis client, kept optional so `pip install loopkit` never pulls it.
+# The worker image installs `.[fleet]`; tests use fakeredis (no server) via the dev extra.
 [project.optional-dependencies]
-dev = ["pytest>=8.0"]
+fleet = ["redis>=5.0"]
+dev = ["pytest>=8.0", "fakeredis>=2.21"]
 
 [project.scripts]
 loopkit = "loopkit.cli:main"

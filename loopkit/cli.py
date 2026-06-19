@@ -2,8 +2,10 @@
 
 Thin by design: the CLI validates and renders; all behaviour lives in the library modules so
 the same loop is drivable from Python, a cron trigger, or the orchestration supervisor
-(`extensions/orchestrate.py`) without going through argv. The supervisor has no CLI surface yet
-— fan-out and evolution are Python-API only for now.
+(`extensions/orchestrate.py`) without going through argv. The `fleet` sub-app is the coordinator
++ worker entrypoints for the deployable fleet (Ch 12): `fleet worker` is the container entrypoint,
+`fleet run`/`fleet evolve` drive the fleet over Redis. The `redis` import is deferred into those
+commands, so the core CLI loads without the optional `[fleet]` dependency.
 """
 from __future__ import annotations
 
@@ -24,8 +26,13 @@ from .stops import StopReason
 
 app = typer.Typer(add_completion=False, no_args_is_help=True,
                   help="A self-governed coding loop you can point at any repository.")
+fleet_app = typer.Typer(add_completion=False, no_args_is_help=True,
+                        help="Run the loop as a queue-driven fleet of workers (Chapter 12).")
+app.add_typer(fleet_app, name="fleet")
 console = Console()
 err = Console(stderr=True)
+
+DEFAULT_REDIS_URL = "redis://localhost:6379"
 
 DEFAULT_CONFIG = Path("loopkit.toml")
 
@@ -172,6 +179,100 @@ def learn(chapter: int | None = typer.Argument(None, help="Course chapter number
         _list_scenarios()
         return
     scenarios.play(chapter, console, live=live, pause=True)
+
+
+@fleet_app.command("worker")
+def fleet_worker(
+        redis_url: str = typer.Option(DEFAULT_REDIS_URL, "--redis-url", envvar="REDIS_URL",
+                                      help="Redis the worker drains tasks from."),
+        adapter: str = typer.Option("mock", "--adapter",
+                                    help="Agent the worker runs: mock (no tokens) | claude-code."),
+        max_iter: int = typer.Option(6, "--max-iter", help="Per-task iteration cap."),
+        name: str = typer.Option("worker", "--name", help="Worker name (rides logs as a tag).")) -> None:
+    """The container entrypoint: BRPOP a task, run the loop in an isolated clone, HSET the result.
+
+    Long-lived — this is what a worker pod runs. Ctrl-C / pod termination stops it. The default
+    `mock` adapter solves the demo-repo with no tokens, so `tilt up` brings a green fleet for free.
+    """
+    from .extensions.fleet import RedisQueue, Worker, make_demo_runner
+    queue = RedisQueue.from_url(redis_url)
+    console.print(Panel.fit(f"worker [bold]{name}[/] · adapter {adapter} · {redis_url}",
+                            title="loopkit fleet worker"))
+    runner = make_demo_runner(adapter=adapter, max_iter=max_iter)
+    try:
+        Worker(queue, runner, name=name).run_forever()
+    except KeyboardInterrupt:
+        console.print("[yellow]worker stopped[/]")
+
+
+@fleet_app.command("run")
+def fleet_run(
+        tasks: int = typer.Option(3, "--tasks", "-n", help="How many independent tasks to fan out."),
+        redis_url: str = typer.Option(DEFAULT_REDIS_URL, "--redis-url", envvar="REDIS_URL"),
+        goal: str | None = typer.Option(None, "--goal", help="Override the per-task goal.")) -> None:
+    """Coordinator — blind fan-out: enqueue N tasks, collect their outcomes into a FleetResult."""
+    from .extensions.fleet import PRICING_GOAL, Coordinator, RedisQueue
+    queue = RedisQueue.from_url(redis_url)
+    task_list = [{"slug": f"t{i}", "branch": f"loopkit/run-t{i}", "goal": goal or PRICING_GOAL}
+                 for i in range(tasks)]
+    console.print(Panel.fit(f"fan out [bold]{tasks}[/] tasks · {redis_url}", title="loopkit fleet run"))
+    result = Coordinator(queue).run_fleet(task_list)
+    console.print(_fleet_table(result))
+    raise typer.Exit(0 if result.workers and not result.failed else 2)
+
+
+@fleet_app.command("evolve")
+def fleet_evolve(
+        generations: int = typer.Option(2, "--generations", "-g"),
+        population: int = typer.Option(4, "--population", "-p"),
+        keep: int = typer.Option(2, "--keep", "-k"),
+        redis_url: str = typer.Option(DEFAULT_REDIS_URL, "--redis-url", envvar="REDIS_URL")) -> None:
+    """Coordinator — evolutionary search: keep top-k, re-validate survivors, reseed the winner.
+
+    The Ch 9 selection-inflation guard runs at fleet scale: a candidate only reseeds the next
+    generation after passing a held-out gate (computed in the worker) it never competed on.
+    """
+    from .extensions.fleet import PRICING_GOAL, Coordinator, RedisQueue
+    queue = RedisQueue.from_url(redis_url)
+    console.print(Panel.fit(
+        f"evolve · {generations} gen × {population} pop, keep {keep} · {redis_url}",
+        title="loopkit fleet evolve"))
+    result = Coordinator(queue).evolve({"goal": PRICING_GOAL}, generations=generations,
+                                       population=population, keep=keep)
+    console.print(_evolution_table(result))
+    winner = result.winner
+    console.print(f"winner: [green]{winner.branch}[/]" if winner else "[yellow]no validated winner[/]")
+    raise typer.Exit(0 if winner else 2)
+
+
+def _fleet_table(fleet) -> Table:
+    table = Table(title="fleet result", header_style="bold")
+    table.add_column("task")
+    table.add_column("branch")
+    table.add_column("terminal")
+    table.add_column("iters", justify="right")
+    for worker in fleet.workers:
+        reason = worker.result.reason.value if worker.result else (worker.error or "error")
+        color = "green" if worker.done else "yellow"
+        iters = str(worker.result.iterations) if worker.result else "-"
+        table.add_row(str(worker.task.get("slug", worker.task.get("id", "?"))),
+                      worker.branch, f"[{color}]{reason}[/]", iters)
+    return table
+
+
+def _evolution_table(result) -> Table:
+    table = Table(title="evolution result", header_style="bold")
+    table.add_column("gen", justify="right")
+    table.add_column("best (score)")
+    table.add_column("confirmed")
+    table.add_column("inflation")
+    for gen in result.generations:
+        best = (f"{gen.survivors[0].branch} ({gen.survivors[0].score:.2f})"
+                if gen.survivors else "-")
+        confirmed = gen.confirmed.branch if gen.confirmed else "-"
+        flag = "[yellow]caught[/]" if gen.inflated else "[green]clean[/]"
+        table.add_row(str(gen.index), best, confirmed, flag)
+    return table
 
 
 def _list_scenarios() -> None:

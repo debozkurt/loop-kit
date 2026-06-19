@@ -157,10 +157,11 @@ class Scenario:
 def _registry() -> dict[int, Scenario]:
     # Imported lazily so chapter modules can import helpers from this package without a cycle.
     from . import (ch05_context, ch07_feedback, ch08_review, ch09_held_out, ch10_orchestration,
-                   ch11_evolution, ch13_hard_stops, ch16_safety, ch17_skills)
+                   ch11_evolution, ch12_fleet, ch13_hard_stops, ch16_safety, ch17_skills)
     items = [ch05_context.SCENARIO, ch07_feedback.SCENARIO, ch08_review.SCENARIO,
              ch09_held_out.SCENARIO, ch10_orchestration.SCENARIO, ch11_evolution.SCENARIO,
-             ch13_hard_stops.SCENARIO, ch16_safety.SCENARIO, ch17_skills.SCENARIO]
+             ch12_fleet.SCENARIO, ch13_hard_stops.SCENARIO, ch16_safety.SCENARIO,
+             ch17_skills.SCENARIO]
     return {s.chapter: s for s in items}
 
 
