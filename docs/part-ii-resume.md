@@ -3,14 +3,16 @@
 **Read this first when picking up loopkit Part II.** It is the single source of truth for the
 next phase; the auto-memory `project_loopkit` only points here.
 
-> **Current state (2026-06-19):** **All four Part II workstreams are done.** Orchestration
-> (fan-out + evolutionary), continuous review, the skill write-back flywheel, **and now the Tilt
-> deployable fleet (#4)** are implemented, tested, and committed on `main` — **49 tests green**,
-> all five `demo 8/10/11/12/17` clean. The fleet's deterministic core (queue + coordinator +
-> worker + the Ch 9 guard at fleet scale) is proven against fakeredis + MockAgent (no cluster, no
-> tokens); the kind/Tilt/k8s shell is built + static-validated, with `tilt up` as the one manual
-> bring-up. Last 2 commits: `613bb7c` fleet library/CLI/scenario · `472fac4` fleet deploy shell
-> (kind + Tilt + k8s). Part II is feature-complete.
+> **Current state (2026-06-19):** **All four Part II workstreams are done AND the fleet has been
+> run live.** Orchestration (fan-out + evolutionary), continuous review, the skill write-back
+> flywheel, and the Tilt deployable fleet (#4) are implemented, tested, and committed on `main` —
+> **49 tests green**, all five `demo 8/10/11/12/17` clean. The deterministic core is proven against
+> fakeredis + MockAgent; the full kind/Tilt/k8s fleet was **brought up live and verified** on the
+> isolated `kind-loopkit` cluster: `tilt up` (UI :10350, redis :16379, 3 worker pods) → `make
+> fleet-run` (tasks DONE on isolated branches) → `make fleet-evolve` (2 gens, reseed, winner
+> confirmed). Host `~/.kube/config` byte-identical throughout; the other clusters never touched.
+> Commits: `613bb7c` library/CLI/scenario · `472fac4` deploy shell · `076aadd` docs · `4833f69`
+> bring-up fixes (Docker-29 + 16379). **Part II is complete.**
 
 ## Where v1 left off (done)
 
@@ -97,12 +99,17 @@ seams.** Items 1–3 are done (details + commit ids inline); item 4 is the remai
      core CLI loads without the `[fleet]` extra). `make_demo_runner` is the container's real runner
      (clone demo-repo → `run_loop` → real pytest gates); `--adapter mock` solves it with **zero
      tokens**, so the fleet goes green on `tilt up` without credentials.
-   - **Deploy shell (the thin outer layer, manual via `tilt up`):** `Makefile` exports a repo-local
+   - **Deploy shell (brought up live + verified, commit `4833f69`):** `Makefile` exports a repo-local
      `KUBECONFIG` for every recipe (the isolation guarantee — `~/.kube/config` never touched);
      `Tiltfile` pins `allow_k8s_contexts('kind-loopkit')` + a `fail()` guard; `k8s/redis.yaml`
      (namespace + queue) + `k8s/worker.yaml` (3 pods, `WORKER_NAME` from the pod name). redis is an
-     optional `[fleet]` dep; fakeredis is dev-only. **Not yet brought up live** — `make fleet-up &&
-     tilt up` is the remaining manual verification (heavy on Colima — see the plan's gotchas).
+     optional `[fleet]` dep; fakeredis is dev-only. **Two sharp edges paid for during the live run:**
+     (a) Tilt's `docker_build` → `kind load docker-image` fails on Docker 29's containerd image
+     store ("content digest … not found"); the Tiltfile uses a `custom_build` that flattens to one
+     platform (`docker save --platform linux/arm64` → `kind load image-archive`) — redis is
+     side-loaded the same way. (b) redis forwards to **localhost:16379** (not 6379) because this
+     host runs a local `redis-server` on 6379; `make fleet-run/evolve` pass `--redis-url` to match,
+     and use `.venv/bin/loopkit`.
 
 ## Constraints to preserve (don't regress these)
 
@@ -116,22 +123,25 @@ seams.** Items 1–3 are done (details + commit ids inline); item 4 is the remai
 
 ## Suggested next step
 
-> **Part II is feature-complete (2026-06-19).** All four workstreams done; 49 tests green; demos
-> 8/10/11/12/17 clean. The fleet's deterministic core is proven (fakeredis + MockAgent); the
-> kind/Tilt/k8s shell is built + static-validated. **The single remaining action is the live
-> bring-up:** `make fleet-up && tilt up`, then `make fleet-run` / `make fleet-evolve`. It's heavy
-> on Colima (kind cluster + image build + redis) — see [`tilt-fleet-plan.md`](tilt-fleet-plan.md)
-> gotchas; tear down with `make fleet-down` when done.
+> **Part II is COMPLETE (2026-06-19).** All four workstreams done; 49 tests green; demos
+> 8/10/11/12/17 clean; **the fleet has been brought up live and verified** on the isolated
+> `kind-loopkit` cluster (`tilt up` → `make fleet-run`/`fleet-evolve`, host kubeconfig untouched).
+> Nothing required remains — only enhancements (dashboard, tree-level reseed v2, arbitrary repos).
+> Re-run the live fleet any time with the checklist below; tear down with `make fleet-down`.
 
-**Live bring-up checklist** (the one thing not yet exercised):
+**Live bring-up checklist** (verified working — re-runnable; heavy on Colima):
 1. `make fleet-up` — creates the isolated `kind-loopkit` cluster against the repo-local
    `KUBECONFIG`; verifies nodes with the real kubectl binary. Confirm `~/.kube/config` untouched.
-2. `export KUBECONFIG=$PWD/.kube/loopkit.yaml && tilt up` — the Tiltfile's `fail()` guard refuses
-   any context but `kind-loopkit`. Watch redis + 3 workers go green; the mock adapter needs no
-   tokens. Confirm logs show `[loopkit][worker]` lines tagged with each pod's `WORKER_NAME`.
-3. `make fleet-run` (fan-out) / `make fleet-evolve` (generational) on the host — the coordinator
-   talks to redis via Tilt's `6379` port-forward. Expect every shard DONE on its own branch.
-4. `make fleet-down` to reclaim Colima resources (`colima ssh -- sudo fstrim -v /` if disk tight).
+2. **Side-load redis** (the kind node can't pull from Docker Hub here — corp CA / TLS):
+   `export KUBECONFIG=$PWD/.kube/loopkit.yaml` then
+   `docker save --platform linux/arm64 redis:7-alpine -o /tmp/r.tar && kind load image-archive /tmp/r.tar --name loopkit`.
+   (The worker image's `custom_build` does this build+save+load itself; only redis needs the manual step.)
+3. `tilt up` — the Tiltfile's `fail()` guard refuses any context but `kind-loopkit`. Watch redis +
+   3 workers go green (UI at http://localhost:10350); the mock adapter needs no tokens. Logs show
+   `[loopkit][worker]` lines tagged with each pod's `WORKER_NAME`. redis forwards to **:16379**.
+4. `make fleet-run` (fan-out) / `make fleet-evolve` (generational) on the host — the coordinator
+   talks to redis via Tilt's `:16379` port-forward. Expect every shard/candidate DONE on its branch.
+5. `make fleet-down` to reclaim Colima resources (`colima ssh -- sudo fstrim -v /` if disk tight).
 
 After that, the only open items are **enhancements**, not gaps:
 - **Dashboard (Phase 5, optional).** A thin read-only pod over Redis rendering

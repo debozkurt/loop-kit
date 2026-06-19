@@ -1,14 +1,19 @@
 # loopkit Tilt fleet — build plan (Part II, item #4)
 
-> **STATUS: BUILT (2026-06-19).** Phases 0–4 are implemented, tested, and committed on `main`
-> (`613bb7c` library/CLI/scenario, `472fac4` deploy shell). 12 fleet tests + 49 total green;
-> `demo 12` clean. The deterministic core (queue + coordinator + worker + the Ch 9 guard) is
-> proven against fakeredis + MockAgent. **Not yet exercised:** the live cluster bring-up
-> (`make fleet-up && tilt up`) and Phase 5 (the optional dashboard). What actually shipped vs.
-> the plan: **revalidation runs in the worker** (it holds the candidate's tree), not in the
-> coordinator — the `evolve` *outcome* is identical, only the gate's location moved; the demo
-> runner's selection score is **coarse** (1.0 done / 1.0+unrevalidated overfit / 0.0 else), with
-> the nuanced inflation case proven in `tests/test_fleet.py` + the Ch 11 scenario.
+> **STATUS: BUILT + RUN LIVE (2026-06-19).** Phases 0–4 implemented, tested, committed on `main`
+> (`613bb7c` library/CLI/scenario, `472fac4` deploy shell, `076aadd` docs, `4833f69` bring-up
+> fixes). 12 fleet tests + 49 total green; `demo 12` clean. The deterministic core (queue +
+> coordinator + worker + the Ch 9 guard) is proven against fakeredis + MockAgent, **and the full
+> fleet was brought up live** on the isolated `kind-loopkit` cluster: `tilt up` (UI :10350, redis
+> :16379, 3 worker pods) → `make fleet-run` (tasks DONE on isolated branches) → `make fleet-evolve`
+> (2 gens, reseed off the gen-0 winner, winner confirmed). Host `~/.kube/config` byte-identical
+> throughout. **Only Phase 5 (the optional dashboard) is unbuilt.** What shipped vs. the plan:
+> **revalidation runs in the worker** (it holds the candidate's tree), not the coordinator — the
+> `evolve` *outcome* is identical, only the gate's location moved; the demo runner's selection
+> score is **coarse** (1.0 done / 1.0+unrevalidated overfit / 0.0 else), the nuanced inflation case
+> proven in `tests/test_fleet.py` + the Ch 11 scenario. **Live-run sharp edges (see Gotchas):**
+> Docker-29 containerd image store breaks `kind load docker-image` → `custom_build` flattens to one
+> platform; redis forwards to :16379 to dodge a local `redis-server` on 6379.
 
 **Read this after `part-ii-resume.md`.** It scoped the last Part II item: graduating the
 in-process `Supervisor` into a multi-container fleet — worker loops as containers, a Redis task
@@ -184,8 +189,19 @@ gate relocated — proven by `test_evolve_catches_selection_inflation_over_the_q
   clusters are heavy — `kind delete cluster --name loopkit` when done.
 - **Broken kubectl wrapper** (`_kube_guard_enforce` not found) → use `/opt/homebrew/bin/kubectl`,
   `--context=` equals form. Repo-local `KUBECONFIG` makes even that loopkit-only.
-- **Tilt → kind images** load automatically (Tilt detects kind); still pin
-  `allow_k8s_contexts('kind-loopkit')` + the `fail()` assertion.
+- **Tilt → kind image load is BROKEN on Docker 29 (containerd image store).** `kind load
+  docker-image` (Tilt's default for `docker_build`) fails with `content digest … not found` —
+  Docker's OCI multi-arch export isn't ingestible by the node's `ctr import --all-platforms
+  --digests`. Fix (in the Tiltfile): a `custom_build` that flattens to one platform — `docker build`
+  → `docker save --platform linux/arm64` → `kind load image-archive` — with `skips_local_docker`.
+  redis (not a Tilt build target) is side-loaded the same way; the kind node also can't pull from
+  Docker Hub directly here (corp CA / TLS: `x509: certificate signed by unknown authority`), so the
+  host pulls + side-loads. Still pin `allow_k8s_contexts('kind-loopkit')` + the `fail()` assertion.
+- **Port 6379 is taken by a local `redis-server` on this host.** Tilt forwards the cluster's redis
+  to **localhost:16379**; `make fleet-run/evolve` pass `--redis-url redis://localhost:16379`. Never
+  let the coordinator default to 6379 here — that's the developer's personal redis, not the fleet's.
+- **`make fleet-run/evolve` call `.venv/bin/loopkit`** (`$(LOOPKIT)`), not a bare `loopkit` — the
+  CLI isn't on the global PATH.
 - **demo-repo packaging:** the worker image bundles it via the Dockerfile + `LOOPKIT_DEMO_REPO`;
   the fleet operates on demo-repo for the teaching scenario. Arbitrary external repos = a later
   extension (needs repo delivery into the worker — clone-from-remote or a shared volume).
