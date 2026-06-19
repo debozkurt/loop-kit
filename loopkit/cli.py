@@ -14,7 +14,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
-from . import safety
+from . import safety, scenarios
 from .agent import build_agent
 from .config import Config, load_config
 from .loop import RunResult, run_loop
@@ -144,6 +144,39 @@ def run(config: Path = typer.Option(DEFAULT_CONFIG, "--config", "-c"),
     result = run_loop(cfg, agent, dry_run=dry_run)
     _render(result)
     raise typer.Exit(0 if result.reason is StopReason.DONE else 2)
+
+
+@app.command()
+def demo(chapter: int | None = typer.Argument(None, help="Course chapter number, e.g. 9. Omit to list."),
+         live: bool = typer.Option(False, "--live", help="Use the real claude-code agent where supported.")) -> None:
+    """Run a chapter's scenario straight through (the loop's logs are the play-by-play)."""
+    if chapter is None:
+        _list_scenarios()
+        return
+    scenarios.play(chapter, console, live=live, pause=False)
+
+
+@app.command()
+def learn(chapter: int | None = typer.Argument(None, help="Course chapter number. Omit to list."),
+          live: bool = typer.Option(False, "--live", help="Use the real claude-code agent where supported.")) -> None:
+    """Walk a chapter's scenario with narration and a pause between beats."""
+    if chapter is None:
+        _list_scenarios()
+        return
+    scenarios.play(chapter, console, live=live, pause=True)
+
+
+def _list_scenarios() -> None:
+    table = Table(title="loopkit scenarios", header_style="bold")
+    table.add_column("chapter")
+    table.add_column("topic")
+    table.add_column("teaches", overflow="fold")
+    table.add_column("mode")
+    for scenario in scenarios.available():
+        table.add_row(str(scenario.chapter), scenario.title, scenario.teaches,
+                      "live or scripted" if scenario.live_supported else "scripted")
+    console.print(table)
+    console.print("Run one with [bold]loopkit demo <chapter>[/] or [bold]loopkit learn <chapter>[/].")
 
 
 def _load(config: Path) -> Config:
