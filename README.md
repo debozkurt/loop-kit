@@ -180,6 +180,65 @@ require_clean_tree = true
 allow_branches = ["loopkit/*"]
 ```
 
+## Use it on your own repo
+
+loopkit isn't tied to the demo — point it at any project, sync the result to a forge, and let
+issues feed the fleet. Full walkthrough: [`docs/USING-ON-YOUR-REPO.md`](docs/USING-ON-YOUR-REPO.md).
+
+**1 · Target any repo on your machine.** The loop runs against whatever `repo` points at:
+```bash
+cd ~/code/my-project
+loopkit init .                 # writes loopkit.toml + PROMPT.md (never overwrites)
+$EDITOR loopkit.toml           # set the 4 things that matter (below)
+loopkit doctor                 # preflight: branch safe? agent on PATH? gates set?
+loopkit run --dry-run          # rehearse the control flow — no agent, no tokens
+loopkit run                    # real run (adapter="claude-code" → solves it)
+# or, without cd-ing in:  loopkit run -c ~/code/my-project/loopkit.toml --repo ~/code/my-project
+```
+The four fields that define a run: `goal`, `gate.iteration`, `gate.acceptance`, `safety.protected_paths`.
+
+**2 · Sync the result to GitHub / GitLab.** Add a `[remote]` block — the loop pushes *its own
+branch* (never `main`) and opens a **draft** PR/MR when it's done:
+```toml
+[remote]
+enabled  = true        # nothing leaves your machine unless this is true
+name     = "origin"
+open_pr  = true        # open a PR/MR after pushing
+provider = "auto"      # auto-detects github / gitlab from the remote URL
+pr_base  = "main"
+draft    = true        # a human reviews + merges
+```
+Requires `gh` (GitHub) or `glab` (GitLab) installed and authenticated. A finished `loopkit run`
+then prints `pushed loopkit/run → origin` and the PR URL. The forbidden-branch guard (Ch 16) holds
+at this outward edge: a misconfigured run *cannot* push to `main`, and it never force-pushes.
+
+**3 · Drive the fleet from issues.** Label a backlog (e.g. `loopkit`), point workers at the repo,
+and the queue turns each open issue into a task on its own branch:
+```bash
+# workers operate on YOUR repo (host processes shown; pods are the same with a secret mount):
+loopkit fleet worker --target ~/code/my-project --adapter claude-code   # run a few
+# coordinator: open issues -> tasks  (issue #N -> branch loopkit/issue-N -> a PR that closes it)
+loopkit fleet run --from-issues --target ~/code/my-project --label loopkit
+```
+The queue is the *trigger* seam (Ch 12) — a cron or webhook pushing a task drives the same loop.
+
+## Steering files: the `.md` control surface
+
+Every worthwhile behaviour is steered by a file you can read and edit. Deep dive:
+[`docs/CONTROL-FILES.md`](docs/CONTROL-FILES.md).
+
+| File | Steers | Chapter |
+|---|---|---|
+| `loopkit.toml` | the whole run: goal, gates, stops, safety, `[remote]` (the master switch) | Ch 18 |
+| `PROMPT.md` | the task spec in prose — reloaded into a **fresh context every tick** | Ch 4–5 |
+| `CLAUDE.md` / `AGENTS.md` | standing conventions + guardrails the agent must obey, anchored each tick | Ch 16–17 |
+| `tests/seen/` vs `tests/holdout/` | the **two gates** — the in-sample check vs the held-out spec | Ch 6–7, 9 |
+| `<skill>.md` (skills dir) | lessons distilled from solved runs, rendered back into future prompts | Ch 17 |
+
+The leverage order: most steering happens in `PROMPT.md` (what to do) and the **gates** (what "done"
+means) — they are the loop's goal and its grader. `CLAUDE.md`/`AGENTS.md` hold the rules that apply
+to *every* task; skills accumulate what past runs learned.
+
 ## Safety defaults (Chapter 16)
 
 loopkit is safe-by-default. It refuses to run on `main`/`master`, wants a clean tree on an
@@ -200,10 +259,85 @@ the gate runs the *target project's* toolchain, so a real run against your repo 
 toolchain (and, for a live agent, the agent binary + credentials) available in the container —
 extend the image for your stack. See the Dockerfile.
 
+## Command reference
+
+Everything `loopkit` exposes. Run any command with `--help` for the live version.
+
+### Core — one loop
+
+**`loopkit init [PATH]`** — scaffold a starter `loopkit.toml` + `PROMPT.md` in `PATH` (default `.`;
+never overwrites).
+
+**`loopkit doctor`** — preflight: is this repo safe to point the loop at? (branch, agent on PATH,
+gates). Exits non-zero if preflight fails.
+- `-c, --config PATH` — config file (default `loopkit.toml`).
+
+**`loopkit run`** — run the loop until it reaches a terminal (DONE / a hard stop).
+- `-c, --config PATH` — config file (default `loopkit.toml`).
+- `--repo TEXT` — override the target repo (the config's `repo`).
+- `--dry-run` — exercise the control flow with no agent (no tokens).
+- `--max-iter INTEGER` — override `stops.max_iter`.
+- `--force` — run even if preflight fails.
+- `--sandbox` — run inside the loopkit Docker container (OS-level containment, Ch 16).
+- *With `[remote] enabled`*, a DONE run then pushes its branch + opens a PR/MR.
+
+**`loopkit demo [CHAPTER]`** — run a chapter's scenario straight through (omit `CHAPTER` to list).
+- `--live` — use the real claude-code agent where the scenario supports it.
+
+**`loopkit learn [CHAPTER]`** — the same scenarios, narrated, with a pause between beats.
+- `--live` — as above.
+
+Scenarios available: `5, 7, 8, 9, 10, 11, 12, 13, 16, 17` (try `loopkit demo 9` and `loopkit demo 12`).
+
+### Fleet — many loops (Chapter 12)
+
+**`loopkit fleet worker`** — the executor: BRPOP a task, run the loop in an isolated clone, HSET the
+result. Long-lived (a pod or a host process). No `--target` → the bundled demo-repo, token-free.
+- `--redis-url TEXT` — Redis to drain (env `REDIS_URL`, default `redis://localhost:6379`).
+- `--adapter TEXT` — `mock` (no tokens) | `claude-code` | `codex` (default `mock`).
+- `--max-iter INTEGER` — per-task iteration cap (default 6).
+- `--target TEXT` — repo path/URL to operate on (env `LOOPKIT_TARGET`; default demo-repo).
+- `--gate-iteration TEXT` / `--gate-acceptance TEXT` — override the target's gates.
+- `--name TEXT` — worker tag in logs (env `WORKER_NAME`; pods set it from the pod name).
+
+**`loopkit fleet run`** — coordinator: enqueue tasks and collect a `FleetResult`.
+- `-n, --tasks INTEGER` — how many independent tasks to fan out (default 3).
+- `--redis-url TEXT` — env `REDIS_URL`, default `redis://localhost:6379`.
+- `--goal TEXT` — override the per-task goal.
+- `--from-issues` — source one task per open GitHub/GitLab issue.
+- `--target TEXT` — repo to read issues from (default cwd; used with `--from-issues`).
+- `--label TEXT` — only issues with this label become tasks.
+- `--provider TEXT` — `auto` | `github` | `gitlab` (default `auto`).
+
+**`loopkit fleet evolve`** — coordinator: evolutionary search with the Ch 9 selection-inflation
+guard (keep top-k → re-validate survivors on a held-out gate → reseed only a validated winner).
+- `-g, --generations INTEGER` (default 2), `-p, --population INTEGER` (default 4),
+  `-k, --keep INTEGER` (default 2), `--redis-url TEXT`.
+
+### `make` targets — cluster lifecycle (Tiltfile + kind)
+
+The fleet runs on a **dedicated, isolated** local kind cluster; the Makefile exports a repo-local
+`KUBECONFIG` for every recipe, so your other clusters are never touched.
+
+| Target | What |
+|---|---|
+| `make fleet-up` | create the isolated `kind-loopkit` cluster, show its nodes |
+| `make tilt-up` / `make tilt-down` | `tilt up` / `tilt down` (build + deploy redis + workers; UI on :10350) |
+| `make fleet-run` | coordinator fan-out over the cluster (redis on `localhost:16379`) |
+| `make fleet-evolve` | coordinator evolutionary search |
+| `make fleet-nodes` | show the cluster's nodes (verifies context + repo-local kubeconfig) |
+| `make fleet-down` | delete the cluster (host `~/.kube/config` was never written) |
+| `make test` | the unit suite (fakeredis + MockAgent — no cluster, no tokens) |
+| `make demo` | the fleet teaching scenario (`loopkit demo 12`) |
+| `make help` | list targets |
+
+Full cluster walkthrough: [`docs/tilt-fleet-plan.md`](docs/tilt-fleet-plan.md). Using it on your own
+repo: [`docs/USING-ON-YOUR-REPO.md`](docs/USING-ON-YOUR-REPO.md).
+
 ## Develop
 
 ```bash
-pip install -e ".[dev]"
+pip install -e ".[dev]"          # core + pytest + fakeredis;  add [fleet] for the redis client
 pytest -q                        # MockAgent-driven; no coding-agent binary, no tokens
 ```
 

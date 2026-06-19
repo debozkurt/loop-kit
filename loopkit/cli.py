@@ -209,8 +209,9 @@ def fleet_worker(
 
     Long-lived — runs as a pod or a host process. With no `--target` it runs the bundled demo-repo
     token-free (the `tilt up` smoke test). With `--target /path/or/url` it operates on YOUR repo:
-    gates come from that repo's loopkit.toml unless overridden, and `[remote]` there controls
-    whether a solved branch is pushed + a PR opened. Use `--adapter claude-code` for real solves.
+    gates come from that repo's loopkit.toml unless overridden, and the repo's remote config there
+    controls whether a solved branch is pushed + a PR opened. Use `--adapter claude-code` for real
+    solves.
     """
     from .extensions.fleet import RedisQueue, Worker, make_demo_runner, make_repo_runner
     queue = RedisQueue.from_url(redis_url)
