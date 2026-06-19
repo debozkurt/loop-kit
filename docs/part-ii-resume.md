@@ -3,6 +3,13 @@
 **Read this first when picking up loopkit Part II.** It is the single source of truth for the
 next phase; the auto-memory `project_loopkit` only points here.
 
+> **Current state (2026-06-19):** Part II library is **feature-complete**. Orchestration
+> (fan-out + evolutionary), continuous review, and the skill write-back flywheel are all
+> implemented, tested, and committed on `main` — 8 commits, **37 tests green**, all four
+> `demo 8/10/11/17` clean. **Only item #4, the Tilt deployable fleet, remains** (it's infra,
+> not library). Jump to [Suggested next step](#suggested-next-step). Last 4 commits:
+> `1c23220` fan-out · `c2cd335` evolutionary · `c2cb6da` review · `0abae94` skills.
+
 ## Where v1 left off (done)
 
 The **single-agent core is complete, tested, and containerized** — 4 commits on `main`,
@@ -22,10 +29,10 @@ held-out acceptance gate → hard stops`. Terminal precedence
 Run it: `source .venv/bin/activate && pytest -q`; `loopkit demo|learn <ch>`;
 `docker build -t loopkit . && docker run --rm loopkit demo 9`.
 
-## What Part II adds (the seams already exist)
+## Part II workstreams (status log)
 
-Interfaces are defined in `loopkit/extensions/`; Part II implements them and adds the marked
-controller attach points. **Do not rewrite the core contracts — attach at the seams.**
+The four extension seams and their status. **Do not rewrite the core contracts — attach at the
+seams.** Items 1–3 are done (details + commit ids inline); item 4 is the remaining work.
 
 1. **Orchestration (Ch 10–12)** — `extensions/orchestrate.py`. A `Supervisor` over worker
    loops in **git worktrees** (isolation); `run_loop` becomes the worker body unchanged. Two

@@ -1,8 +1,9 @@
 """loopkit command line — set up a loop (init), check it (doctor), run it (run).
 
 Thin by design: the CLI validates and renders; all behaviour lives in the library modules so
-the same loop is drivable from Python, a cron trigger, or a future supervisor without going
-through argv.
+the same loop is drivable from Python, a cron trigger, or the orchestration supervisor
+(`extensions/orchestrate.py`) without going through argv. The supervisor has no CLI surface yet
+— fan-out and evolution are Python-API only for now.
 """
 from __future__ import annotations
 
