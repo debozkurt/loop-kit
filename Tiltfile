@@ -12,26 +12,39 @@
 # (see the Makefile), the only cluster this can ever touch is kind-loopkit.
 allow_k8s_contexts('kind-loopkit')
 if k8s_context() != 'kind-loopkit':
-    fail("refusing to run: expected context 'kind-loopkit', got '%s'. "
-         "Run `make fleet-up` and `export KUBECONFIG=$PWD/.kube/loopkit.yaml` first." % k8s_context())
+    # Starlark does not concatenate adjacent string literals — join with '+'.
+    fail(("refusing to run: expected context 'kind-loopkit', got '%s'. " +
+          "Run `make fleet-up` and `export KUBECONFIG=$PWD/.kube/loopkit.yaml` first.") % k8s_context())
 
 # --- Worker image -----------------------------------------------------------------------------
 # One image is both the sandbox runtime and the worker: it bundles the demo-repo (via
-# LOOPKIT_DEMO_REPO in the Dockerfile) and installs the [fleet] extra (the redis client). The
-# editable install means a code change is picked up by syncing the source — see live_update.
-docker_build(
-    'loopkit-worker', '.',
-    dockerfile='Dockerfile',
-    live_update=[sync('./loopkit', '/opt/loopkit/loopkit')],
+# LOOPKIT_DEMO_REPO in the Dockerfile) and installs the [fleet] extra (the redis client).
+#
+# Standard kind setups use a plain `docker_build(...)` and let Tilt `kind load` the image. THIS
+# host runs Docker with the containerd image store (Docker 29), whose OCI multi-arch export
+# breaks `kind load docker-image` ("content digest … not found"). The portable workaround, baked
+# into a custom_build: build, `docker save --platform <arch>` to flatten the OCI index to one
+# platform, then `kind load image-archive`. skips_local_docker=True tells Tilt we deliver the
+# image into the cluster ourselves. ARCH is the node's arch (arm64 on Apple Silicon / Colima).
+ARCH = 'linux/arm64'
+custom_build(
+    'loopkit-worker',
+    command=('docker build -t $EXPECTED_REF . && ' +
+             'docker save --platform ' + ARCH + ' $EXPECTED_REF -o /tmp/loopkit-worker-img.tar && ' +
+             'kind load image-archive /tmp/loopkit-worker-img.tar --name loopkit'),
+    deps=['./loopkit', './pyproject.toml', './README.md', './examples', './Dockerfile'],
+    skips_local_docker=True,
 )
 
 # --- Manifests --------------------------------------------------------------------------------
 k8s_yaml(['k8s/redis.yaml', 'k8s/worker.yaml'])
 
-# Redis: the queue + results store. Port-forward 6379 so the host coordinator can reach it.
+# Redis: the queue + results store. Forward it to localhost:16379 (NOT 6379) so it can't collide
+# with a local redis-server a developer may already be running on the default port — the host
+# coordinator reaches the cluster's redis at redis://localhost:16379 (see the Makefile targets).
 k8s_resource(
     'redis',
-    port_forwards='6379:6379',
+    port_forwards='16379:6379',
     labels=['fleet'],
 )
 
@@ -43,5 +56,5 @@ k8s_resource(
     labels=['fleet'],
 )
 
-print("loopkit fleet: context OK (kind-loopkit). `tilt up` → redis + workers; "
+print("loopkit fleet: context OK (kind-loopkit). `tilt up` -> redis + workers; " +
       "then `make fleet-run` / `make fleet-evolve` on the host.")

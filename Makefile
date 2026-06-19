@@ -19,6 +19,8 @@ KUBECONFIG_FILE := $(CURDIR)/.kube/loopkit.yaml
 # The shell kubectl wrapper is broken here (_kube_guard_enforce: command not found in
 # non-interactive shells), so call the real binary. Override on another machine: make KUBECTL=...
 KUBECTL         ?= /opt/homebrew/bin/kubectl
+# The loopkit CLI from the project venv (matches the test/demo targets). Override: make LOOPKIT=loopkit
+LOOPKIT         ?= .venv/bin/loopkit
 
 # Exported to every recipe's environment — this is the isolation guarantee, not a per-command flag.
 export KUBECONFIG = $(KUBECONFIG_FILE)
@@ -53,11 +55,15 @@ tilt-up: # build images + deploy redis + workers on the cluster; port-forward re
 tilt-down: # tear down everything Tilt deployed (leaves the cluster)
 	@tilt down
 
-fleet-run: # coordinator: blind fan-out over the queue (requires `make tilt-up` for redis:6379)
-	@loopkit fleet run
+# The coordinator talks to the cluster's redis via Tilt's port-forward at localhost:16379 (16379,
+# not 6379, so it never touches a local redis-server on the default port). Requires `tilt up`.
+REDIS_LOCAL := redis://localhost:16379
+
+fleet-run: # coordinator: blind fan-out over the queue (requires `make tilt-up` / `tilt up`)
+	@$(LOOPKIT) fleet run --redis-url $(REDIS_LOCAL)
 
 fleet-evolve: # coordinator: evolutionary search over the queue
-	@loopkit fleet evolve
+	@$(LOOPKIT) fleet evolve --redis-url $(REDIS_LOCAL)
 
 test: # run the unit suite (fakeredis + MockAgent — no cluster, no tokens)
 	@.venv/bin/python -m pytest -q
