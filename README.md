@@ -85,8 +85,9 @@ Terminal precedence: `DONE ▸ SAFETY ▸ BUDGET_CEILING ▸ NO_PROGRESS ▸ ITE
 
 ## Beyond one loop
 
-The `extensions/` layer scales the single loop up without touching its contracts. Each is a
-Python API today (no CLI surface yet) and is `None`-safe — supply it or don't.
+The `extensions/` layer scales the single loop up without touching its contracts. The in-process
+orchestration/review/skills hooks are `None`-safe Python APIs — supply them or don't; the
+deployable fleet (below) adds a `loopkit fleet` CLI surface.
 
 **Orchestration — `Supervisor`.** Runs many worker loops over independent tasks, each in its
 own **git worktree**: a separate working directory backed by the one object store, so parallel
@@ -121,6 +122,39 @@ fleet = run_fleet(cfg, tasks=[{"goal": "...", "slug": "a"}, {"goal": "...", "slu
                   make_agent=lambda task: build_agent(cfg.agent), max_workers=4)
 print(len(fleet.done), "of", len(fleet.workers), "reached done")
 ```
+
+## The deployable fleet (Chapter 12)
+
+The same `Supervisor` graduated off the single process: each worker becomes its own **container**
+(isolation goes from logical — git worktrees — to **physical**: its own filesystem, clone, and
+branch), and the in-memory handoff becomes a **Redis queue**. The coordinator `LPUSH`es tasks and
+polls a results hash; workers `BRPOP` a task, run `run_loop`, and `HSET` the outcome. The queue is
+also the *trigger* seam — a worker is indifferent to what woke it, so a cron, a webhook, or a human
+pushing one task drives the same loop.
+
+`extensions/fleet.py` reuses the orchestrator's result shapes (`WorkerResult` / `FleetResult` /
+`Candidate` / `Generation` / `EvolutionResult`) as the wire format, and **preserves the Ch 9
+selection-inflation guard** at fleet scale: `evolve` keeps best-of-N, then confirms the highest-
+scoring survivor that *also* passed a held-out check it never competed on (run in the worker, since
+only it has the candidate's tree). Only a re-validated winner reseeds, so a lucky overfit can't
+compound. The coordinator/worker logic is fully testable with **no cluster and no tokens** — against
+`fakeredis` (or an `InMemoryQueue`) + a `MockAgent`.
+
+```bash
+# Local, isolated kind cluster (repo-local kubeconfig — never touches ~/.kube/config):
+make fleet-up                 # create the kind-loopkit cluster
+tilt up                       # build + deploy redis + 3 worker pods; port-forward redis
+make fleet-run                # coordinator: blind fan-out over the queue
+make fleet-evolve             # coordinator: evolutionary search (the Ch 9 guard, deployed)
+make fleet-down               # delete the cluster
+
+loopkit demo 12               # the fleet, in-process (no cluster): the teaching scenario
+```
+
+The worker's default `--adapter mock` solves the bundled demo-repo with **zero tokens**, so the
+fleet goes green on `tilt up` without credentials. Swap to `claude-code` (plus a mounted key) for a
+live fleet. Redis is the one optional dependency (`pip install 'loopkit[fleet]'`); the core stays
+`typer + rich + pydantic`.
 
 ## Configuration (`loopkit.toml`)
 
@@ -175,9 +209,10 @@ pytest -q                        # MockAgent-driven; no coding-agent binary, no 
 
 ## Roadmap
 
-The Part II library is done — the supervisor (fan-out + evolutionary, Ch 10–12), continuous
-review (Ch 8), and the skill write-back flywheel (Ch 17) are all implemented and tested. The one
-piece still ahead is a **deployable fleet**: worker loops as containers behind a task queue,
-with Tilt for multi-service live-reload and an optional dashboard over `FleetResult` /
-`EvolutionResult`. A `loopkit fleet` / `evolve` CLI surface (the supervisor is Python-API only
-today) is the natural smaller follow-on.
+Part II is feature-complete — the supervisor (fan-out + evolutionary, Ch 10–12), continuous review
+(Ch 8), the skill write-back flywheel (Ch 17), and the **deployable fleet** (Ch 12: Redis queue,
+worker containers, Tilt on an isolated kind cluster, `loopkit fleet` CLI) are all implemented and
+tested. Open enhancements, not gaps: an optional **dashboard** over `FleetResult` /
+`EvolutionResult`; **tree-level reseed** for `fleet evolve` (today's reseed is prompt-level —
+tree-level needs the winner's tree on a shared volume); and **arbitrary target repos** in workers
+(today they bundle the demo-repo).

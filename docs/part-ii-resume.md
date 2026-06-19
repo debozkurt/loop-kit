@@ -3,12 +3,14 @@
 **Read this first when picking up loopkit Part II.** It is the single source of truth for the
 next phase; the auto-memory `project_loopkit` only points here.
 
-> **Current state (2026-06-19):** Part II library is **feature-complete**. Orchestration
-> (fan-out + evolutionary), continuous review, and the skill write-back flywheel are all
-> implemented, tested, and committed on `main` — 8 commits, **37 tests green**, all four
-> `demo 8/10/11/17` clean. **Only item #4, the Tilt deployable fleet, remains** (it's infra,
-> not library). Jump to [Suggested next step](#suggested-next-step). Last 4 commits:
-> `1c23220` fan-out · `c2cd335` evolutionary · `c2cb6da` review · `0abae94` skills.
+> **Current state (2026-06-19):** **All four Part II workstreams are done.** Orchestration
+> (fan-out + evolutionary), continuous review, the skill write-back flywheel, **and now the Tilt
+> deployable fleet (#4)** are implemented, tested, and committed on `main` — **49 tests green**,
+> all five `demo 8/10/11/12/17` clean. The fleet's deterministic core (queue + coordinator +
+> worker + the Ch 9 guard at fleet scale) is proven against fakeredis + MockAgent (no cluster, no
+> tokens); the kind/Tilt/k8s shell is built + static-validated, with `tilt up` as the one manual
+> bring-up. Last 2 commits: `613bb7c` fleet library/CLI/scenario · `472fac4` fleet deploy shell
+> (kind + Tilt + k8s). Part II is feature-complete.
 
 ## Where v1 left off (done)
 
@@ -78,9 +80,29 @@ seams.** Items 1–3 are done (details + commit ids inline); item 4 is the remai
      learns nothing. Pluggable `Distiller` (default = provenance only; real one asks the agent).
      `demo 17` is the two-run flywheel: run A learns the boundary in 2 ticks + writes it back,
      run B reads the skill and nails it in 1.
-4. **Tilt + deployable fleet** — worker loops as containers, a queue, optionally a dashboard.
-   This is where Tilt earns its keep (multiple live-reloaded services). Honor the global
-   kubectl/context-safety rules if any k8s lands.
+4. **Tilt + deployable fleet (Ch 12)** — `extensions/fleet.py` + `Tiltfile` + `k8s/` + `Makefile`.
+   - ✅ **Done** (commits `613bb7c` library/CLI/scenario, `472fac4` deploy shell; Ch 12 scenario +
+     12 tests, 49 total green). The in-process `Supervisor` graduates to a queue-driven fleet:
+     isolation goes from logical (worktrees) to **physical** (each worker its own container/repo),
+     and the in-memory `Future` becomes a **Redis queue** (`Queue` Protocol → `RedisQueue` lazy
+     redis import + `InMemoryQueue` dep-free fake). `WorkerOutcome` is the flat JSON wire form of
+     the reused `WorkerResult`/`Candidate` shapes. `Worker` = `pop → run_loop → put` (task id as
+     correlation id, one crash contained to an `error` outcome). `Coordinator.run_fleet` (fan-out)
+     + `Coordinator.evolve` (generational). **The Ch 9 selection-inflation guard is preserved**:
+     the held-out check runs **in the worker** (only it has the candidate's tree) and rides back as
+     `WorkerOutcome.revalidated`; the coordinator confirms the first survivor high-score-first that
+     passed it — identical *outcome* to `Supervisor.evolve`, only *where* the gate runs moves.
+     **v1 reseed is prompt-level**; tree-level (branch off the winner) needs a shared volume = v2.
+   - **CLI:** `loopkit fleet worker|run|evolve` over `REDIS_URL` (redis deferred into the commands;
+     core CLI loads without the `[fleet]` extra). `make_demo_runner` is the container's real runner
+     (clone demo-repo → `run_loop` → real pytest gates); `--adapter mock` solves it with **zero
+     tokens**, so the fleet goes green on `tilt up` without credentials.
+   - **Deploy shell (the thin outer layer, manual via `tilt up`):** `Makefile` exports a repo-local
+     `KUBECONFIG` for every recipe (the isolation guarantee — `~/.kube/config` never touched);
+     `Tiltfile` pins `allow_k8s_contexts('kind-loopkit')` + a `fail()` guard; `k8s/redis.yaml`
+     (namespace + queue) + `k8s/worker.yaml` (3 pods, `WORKER_NAME` from the pod name). redis is an
+     optional `[fleet]` dep; fakeredis is dev-only. **Not yet brought up live** — `make fleet-up &&
+     tilt up` is the remaining manual verification (heavy on Colima — see the plan's gotchas).
 
 ## Constraints to preserve (don't regress these)
 
@@ -94,26 +116,43 @@ seams.** Items 1–3 are done (details + commit ids inline); item 4 is the remai
 
 ## Suggested next step
 
-Three of the four Part II workstreams are done — orchestration (Ch 10–12), continuous review
-(Ch 8), and skills + write-back (Ch 17). The library is feature-complete for the curriculum;
-all four extension seams are now real. The **last item is the Tilt deployable fleet** (#4
-below): worker loops as containers, a queue feeding tasks, optionally a dashboard reading
-`FleetResult`/`EvolutionResult`. This is the one piece that leaves the single-process model —
-honor the global kubectl/context-safety rules if any k8s lands, and lean on Tilt for the
-multi-service live-reload. It's more infra than library, so scope it deliberately; the
-single-binary core is done and shouldn't need changes to be containerized (`loopkit run` already
-runs sandboxed — see `cli.py` `_run_sandboxed`).
+> **Part II is feature-complete (2026-06-19).** All four workstreams done; 49 tests green; demos
+> 8/10/11/12/17 clean. The fleet's deterministic core is proven (fakeredis + MockAgent); the
+> kind/Tilt/k8s shell is built + static-validated. **The single remaining action is the live
+> bring-up:** `make fleet-up && tilt up`, then `make fleet-run` / `make fleet-evolve`. It's heavy
+> on Colima (kind cluster + image build + redis) — see [`tilt-fleet-plan.md`](tilt-fleet-plan.md)
+> gotchas; tear down with `make fleet-down` when done.
 
-If not doing the fleet next, the highest-value library polish is a `loopkit fleet`/`evolve` CLI
-surface (today orchestration is Python-API only) so the supervisor is drivable from argv like
-`run`/`demo`.
+**Live bring-up checklist** (the one thing not yet exercised):
+1. `make fleet-up` — creates the isolated `kind-loopkit` cluster against the repo-local
+   `KUBECONFIG`; verifies nodes with the real kubectl binary. Confirm `~/.kube/config` untouched.
+2. `export KUBECONFIG=$PWD/.kube/loopkit.yaml && tilt up` — the Tiltfile's `fail()` guard refuses
+   any context but `kind-loopkit`. Watch redis + 3 workers go green; the mock adapter needs no
+   tokens. Confirm logs show `[loopkit][worker]` lines tagged with each pod's `WORKER_NAME`.
+3. `make fleet-run` (fan-out) / `make fleet-evolve` (generational) on the host — the coordinator
+   talks to redis via Tilt's `6379` port-forward. Expect every shard DONE on its own branch.
+4. `make fleet-down` to reclaim Colima resources (`colima ssh -- sudo fstrim -v /` if disk tight).
+
+After that, the only open items are **enhancements**, not gaps:
+- **Dashboard (Phase 5, optional).** A thin read-only pod over Redis rendering
+  `FleetResult`/`EvolutionResult`. Skipped for the first green fleet by design.
+- **Tree-level reseed (evolve v2).** Today's fleet `evolve` reseeds *prompt-level* (the winner's
+  note rides the next goal). Tree-level (gen+1 branches off the winner's code) needs the winner's
+  tree on a shared volume/remote the next generation clones from — a real volume + a clone step.
+- **Arbitrary repos.** The worker bundles demo-repo; external repos need clone-from-remote or a
+  shared volume into the pod.
+- Carried library backlog: package demo-repo as data for PyPI; richer no-progress signal
+  (test-pass-count delta); real per-adapter cost parsing so the budget stop bites on live runs.
 
 Wiring notes carried forward (load-bearing seams, don't regress):
-- `run_loop` keyword-only opt-ins, each None = exact v1: `review_hook` (Ch 8, gates done, runs
-  only on a real commit), `skills` (Ch 17, rendered each tick + gated write-back on DONE). Any
-  new core attach point should follow the same shape: typing-only import, duck-called, None-safe.
-- `Supervisor.evolve` re-validates *survivors only* (high-score-first, stops at first pass).
-  Widen here if you ever want every candidate's held-out verdict surfaced (e.g. a dashboard).
+- `run_loop` keyword-only opt-ins, each None = exact v1: `review_hook` (Ch 8), `skills` (Ch 17).
+  Any new core attach point follows the same shape: typing-only import, duck-called, None-safe.
+- `Supervisor.evolve` re-validates *survivors only* (high-score-first, stops at first pass). The
+  fleet `Coordinator.evolve` preserves the same *outcome* but moves the held-out check **into the
+  worker** (`WorkerOutcome.revalidated`) because the candidate's tree lives in the pod, not the
+  coordinator. Widen here if you ever want every candidate's verdict surfaced (e.g. a dashboard).
+- The fleet adds two new log components — `[loopkit][fleet]` (coordinator) and `[loopkit][worker]`
+  (pods) — with the **task id as the correlation id** on every line a task touches.
 
 ## Gotchas already paid for (keep the fixes)
 
