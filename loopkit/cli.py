@@ -188,7 +188,8 @@ def fleet_worker(
         adapter: str = typer.Option("mock", "--adapter",
                                     help="Agent the worker runs: mock (no tokens) | claude-code."),
         max_iter: int = typer.Option(6, "--max-iter", help="Per-task iteration cap."),
-        name: str = typer.Option("worker", "--name", help="Worker name (rides logs as a tag).")) -> None:
+        name: str = typer.Option("worker", "--name", envvar="WORKER_NAME",
+                                 help="Worker name (rides logs as a tag; set from the pod name).")) -> None:
     """The container entrypoint: BRPOP a task, run the loop in an isolated clone, HSET the result.
 
     Long-lived — this is what a worker pod runs. Ctrl-C / pod termination stops it. The default

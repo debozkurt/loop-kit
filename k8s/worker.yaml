@@ -1,0 +1,45 @@
+# The worker pool — N long-lived pods, each running `loopkit fleet worker`: BRPOP a task off the
+# queue, run the loop in an isolated clone of the demo-repo, HSET the outcome. Replicas are the
+# only knob between a trickle and a swarm; Redis is the work-stealing dispatcher, so adding pods
+# adds throughput with no coordinator change. The pods are the *physical* isolation that replaces
+# the in-process worktrees of Chapter 10 — each has its own filesystem, so collisions are
+# structurally impossible.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: loopkit-worker
+  namespace: loopkit
+  labels:
+    app: loopkit-worker
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: loopkit-worker
+  template:
+    metadata:
+      labels:
+        app: loopkit-worker
+    spec:
+      containers:
+        - name: worker
+          image: loopkit-worker
+          # ENTRYPOINT is `loopkit`; these args make it `loopkit fleet worker --adapter mock`.
+          # The mock adapter solves the demo-repo with zero tokens, so the fleet goes green on
+          # `tilt up` without credentials. Swap to claude-code (+ a mounted key) for a live fleet.
+          args: ["fleet", "worker", "--adapter", "mock"]
+          env:
+            - name: REDIS_URL
+              value: "redis://redis:6379"          # the in-namespace Service DNS
+            # The pod name rides every worker log line as the correlation tag (greppable per pod).
+            - name: WORKER_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi

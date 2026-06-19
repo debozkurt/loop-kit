@@ -19,3 +19,8 @@ env/
 # Local
 *.log
 .DS_Store
+
+# Fleet: the repo-local kubeconfig — the primary cluster-isolation guarantee. kind writes the
+# loopkit cluster's credentials ONLY here (KUBECONFIG points at it), so ~/.kube/config is never
+# touched, merged, or put at risk. Never commit it.
+.kube/
