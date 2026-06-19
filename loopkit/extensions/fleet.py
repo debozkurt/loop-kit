@@ -43,8 +43,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Callable, Protocol
 
-from ..agent import Agent, ClaudeCodeAdapter, MockAgent
-from ..config import AgentConfig, Config, GateConfig, SafetyConfig, StopsConfig
+from ..agent import Agent, MockAgent, build_agent
+from ..config import AgentConfig, Config, GateConfig, RemoteConfig, SafetyConfig, StopsConfig
 from ..gate import ShellGate
 from ..log import get_logger
 from ..loop import RunResult, run_loop
@@ -426,7 +426,8 @@ class Coordinator:
 
 
 # --------------------------------------------------------------------------------------------
-# Demo runner — the container's task runner for the teaching fleet (the loopkit demo-repo).
+# Repo runners — the container's task runner. make_repo_runner works on ANY repo; the demo
+# runner is a thin wrapper that pins it to the bundled demo-repo.
 # --------------------------------------------------------------------------------------------
 PRICING_GOAL = ("Implement line_total in pricing.py so a 10% bulk discount applies at "
                 "quantity >= 10, per PROMPT.md.")
@@ -449,67 +450,101 @@ def _demo_src() -> Path:
     return Path(env) if env else Path(__file__).resolve().parents[2] / "examples" / "demo-repo"
 
 
-def _git(repo: Path, *args: str) -> None:
-    subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True, text=True)
+def _git(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess:
+    return subprocess.run(["git", *args], cwd=repo, check=check, capture_output=True, text=True)
 
 
-def _clone_demo(dest: Path) -> Path:
-    """A fresh git-seeded copy of demo-repo — the worker's *physical* isolation (its own tree)."""
-    repo = dest / "demo"
-    shutil.copytree(_demo_src(), repo)
-    _git(repo, "init", "-q")
-    _git(repo, "branch", "-m", "main")
-    _git(repo, "config", "user.email", "fleet@loopkit")
-    _git(repo, "config", "user.name", "loopkit-fleet")
-    _git(repo, "add", "-A")
-    _git(repo, "commit", "-qm", "seed demo")
+def _source_origin(src: str) -> str | None:
+    """The `origin` push URL of a local source repo, so a clone can push back to the real forge."""
+    path = Path(src).expanduser()
+    if not path.exists():
+        return None                         # src is itself a URL — the clone already points at it
+    out = _git(path, "remote", "get-url", "origin", check=False)
+    return out.stdout.strip() or None if out.returncode == 0 else None
+
+
+def _prepare_repo(src: str, scratch: Path, *, mode: str) -> Path:
+    """Materialise the target repo in the worker's own filesystem (the physical isolation).
+
+    `mode="clone"` (real repos / URLs): `git clone src`, then rewire `origin` to the *source's*
+    origin so a later push reaches the real forge — a local clone otherwise points origin at the
+    local path. `mode="copy"` (the bundled demo-repo, which isn't its own git repo): copy + git
+    init + a seed commit.
+    """
+    repo = scratch / "work"
+    if mode == "copy":
+        shutil.copytree(src, repo)
+        _git(repo, "init", "-q")
+        _git(repo, "branch", "-m", "main")
+        _git(repo, "config", "user.email", "fleet@loopkit")
+        _git(repo, "config", "user.name", "loopkit-fleet")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-qm", "seed")
+    else:
+        _git(scratch, "clone", "--quiet", src, str(repo))
+        origin = _source_origin(src)
+        if origin:
+            _git(repo, "remote", "set-url", "origin", origin)
+        _git(repo, "config", "user.email", "loopkit@local")
+        _git(repo, "config", "user.name", "loopkit")
     return repo
 
 
-def _demo_agent(adapter: str) -> Agent:
-    """`mock` solves the pricing bug with no tokens (the cluster smoke test); `claude-code` is live."""
-    if adapter == "mock":
-        def write_solution(workspace: Path) -> str:
-            (workspace / "pricing.py").write_text(_CORRECT_PRICING)
-            return "wrote pricing.py"
-        return MockAgent(behaviors=[write_solution])
-    return ClaudeCodeAdapter()
+def _grade(result: RunResult) -> tuple[float, bool]:
+    """Coarse selection score + held-out verdict from a terminal — enough for the Ch 9 guard.
 
-
-def make_demo_runner(*, adapter: str = "mock", max_iter: int = 6) -> TaskRunner:
-    """A `TaskRunner` that solves the loopkit demo-repo pricing task in an isolated clone.
-
-    This is what a worker pod runs: clone demo-repo into the pod's own filesystem, drive `run_loop`
-    on the task's branch, then derive the selection score and held-out verdict from the terminal —
-    `DONE` means both gates passed (score 1.0, revalidated True); `overfit` means it fit the visible
-    tests but failed held-out (score 1.0, revalidated False); anything else scores 0. Those ride
-    back on the outcome so the coordinator's `evolve` can apply the Ch 9 guard without the tree.
+    DONE = both gates passed (1.0, revalidated). overfit = fit the visible tests but failed
+    held-out (1.0, NOT revalidated — the inflated candidate). anything else = 0. A finer score
+    (e.g. fraction of held-out tests passing) is a drop-in here.
     """
-    py = sys.executable
+    if result.reason is StopReason.DONE:
+        return 1.0, True
+    if result.overfit:
+        return 1.0, False
+    return 0.0, False
+
+
+def make_repo_runner(repo_source: str, *, gate_iteration: str, gate_acceptance: str,
+                     protected_paths=("tests/",), adapter: str = "claude-code", max_iter: int = 8,
+                     mode: str = "clone", agent_factory: "Callable[[dict], Agent] | None" = None,
+                     remote: RemoteConfig | None = None,
+                     branch_prefix: str = "loopkit") -> TaskRunner:
+    """A `TaskRunner` for an arbitrary repo: materialise it, run the loop on the task's branch,
+    grade the terminal, and (if `remote.enabled`) push + open a PR.
+
+    This is the generalisation of the demo runner: the gates, protected paths, adapter, and repo
+    source are parameters instead of the pricing constants, and the goal comes from each task (an
+    issue body, a CLI goal, …). The agent defaults to the configured adapter; pass `agent_factory`
+    to script it (the demo does this for a token-free solve).
+    """
+    remote = remote or RemoteConfig()
 
     def run_task(task: dict) -> WorkerOutcome:
         task_id = str(task["id"])
-        branch = task.get("branch") or f"loopkit/run-{task_id}"
+        branch = task.get("branch") or f"{branch_prefix}/run-{task_id}"
         scratch = Path(tempfile.mkdtemp(prefix="loopkit-worker-"))
         try:
-            repo = _clone_demo(scratch)
+            repo = _prepare_repo(repo_source, scratch, mode=mode)
             cfg = Config(
-                goal=task.get("goal", PRICING_GOAL), repo=str(repo), branch=branch,
-                gate=GateConfig(iteration=f"{py} -m pytest tests/seen -q",
-                                acceptance=f"{py} -m pytest tests/holdout -q"),
+                goal=task.get("goal") or "(no goal provided)", repo=str(repo), branch=branch,
+                gate=GateConfig(iteration=gate_iteration, acceptance=gate_acceptance),
                 agent=AgentConfig(adapter=adapter, max_cost_usd=5.0),
                 stops=StopsConfig(max_iter=max_iter, no_progress_after=3),
-                safety=SafetyConfig(protected_paths=["tests/"], require_clean_tree=False,
-                                    allow_branches=["loopkit/*"]))
-            result = run_loop(cfg, _demo_agent(adapter),
-                              iteration_gate=ShellGate(cfg.gate.iteration),
-                              acceptance_gate=ShellGate(cfg.gate.acceptance))
-            if result.reason is StopReason.DONE:
-                score, revalidated = 1.0, True
-            elif result.overfit:
-                score, revalidated = 1.0, False           # fit the visible tests, failed held-out
-            else:
-                score, revalidated = 0.0, False
+                safety=SafetyConfig(protected_paths=list(protected_paths), require_clean_tree=False,
+                                    allow_branches=[f"{branch_prefix}/*"]),
+                remote=remote)
+            agent = agent_factory(task) if agent_factory else build_agent(cfg.agent)
+            result = run_loop(cfg, agent, iteration_gate=ShellGate(gate_iteration),
+                              acceptance_gate=ShellGate(gate_acceptance))
+            score, revalidated = _grade(result)
+            # Outward edge: a solved branch is pushed + (optionally) a PR opened, only when the
+            # repo's [remote] is enabled. The issue number rides through so the PR closes it.
+            if cfg.remote.enabled and result.reason is StopReason.DONE:
+                from .remote import sync_done
+                sync = sync_done(cfg, repo, title=f"loopkit: {task.get('title') or task_id}",
+                                 issue=task.get("issue"))
+                get_logger("worker").bind(task=task_id).info(
+                    "remote.sync", pushed=sync["pushed"], pr=sync["pr_url"] or "-")
             return WorkerOutcome(task_id=task_id, branch=branch, reason=result.reason.value,
                                  iterations=result.iterations, cost_usd=result.cost_usd,
                                  overfit=result.overfit, score=score, revalidated=revalidated)
@@ -517,3 +552,28 @@ def make_demo_runner(*, adapter: str = "mock", max_iter: int = 6) -> TaskRunner:
             shutil.rmtree(scratch, ignore_errors=True)
 
     return run_task
+
+
+def _demo_agent(adapter: str) -> Agent:
+    """`mock` solves the pricing bug with no tokens (the cluster smoke test); else the real adapter."""
+    if adapter == "mock":
+        def write_solution(workspace: Path) -> str:
+            (workspace / "pricing.py").write_text(_CORRECT_PRICING)
+            return "wrote pricing.py"
+        return MockAgent(behaviors=[write_solution])
+    return build_agent(AgentConfig(adapter=adapter))
+
+
+def make_demo_runner(*, adapter: str = "mock", max_iter: int = 6) -> TaskRunner:
+    """The teaching runner: `make_repo_runner` pinned to the bundled demo-repo + its pytest gates.
+
+    `copy` mode (demo-repo isn't its own git repo) and a scripted mock agent that solves the
+    pricing bug token-free, so the fleet goes green on `tilt up` without credentials.
+    """
+    py = sys.executable
+    return make_repo_runner(
+        str(_demo_src()), mode="copy", adapter=adapter, max_iter=max_iter,
+        gate_iteration=f"{py} -m pytest tests/seen -q",
+        gate_acceptance=f"{py} -m pytest tests/holdout -q",
+        protected_paths=("tests/",), branch_prefix="loopkit",
+        agent_factory=lambda task: _demo_agent(adapter))

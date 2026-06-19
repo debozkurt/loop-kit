@@ -52,6 +52,25 @@ class SafetyConfig(BaseModel):
     forbid_branches: list[str] = Field(default_factory=lambda: ["main", "master"])
 
 
+class RemoteConfig(BaseModel):
+    """Sync the loop's branch to a git remote after a run reaches DONE — opt-in, never `main`.
+
+    The loop is always durable locally (commit every tick, Ch 15); this is the *outward* edge:
+    push that branch to GitHub/GitLab and optionally open a PR/MR for a human to review. Every
+    field defaults to the safe choice — `enabled=False` (nothing leaves your machine unless you
+    ask), draft PRs (a human merges), and the loop's own branch only (the forbid_branches guard
+    still applies, so a misconfigured run can't push to `main`).
+    """
+
+    enabled: bool = False                 # master switch — no push/PR happens unless this is True
+    name: str = "origin"                  # the git remote to push to
+    push: bool = True                     # push the loop branch when the run reaches DONE
+    open_pr: bool = False                 # after pushing, open a PR/MR via gh/glab
+    provider: str = "auto"                # auto (detect from remote URL) | github | gitlab
+    pr_base: str = "main"                 # the base branch a PR/MR targets
+    draft: bool = True                    # open the PR/MR as a draft (a human reviews + merges)
+
+
 class Config(BaseModel):
     """The whole loop as one object. `goal` and `gate.iteration` are the only required fields."""
 
@@ -63,6 +82,7 @@ class Config(BaseModel):
     gate: GateConfig
     stops: StopsConfig = Field(default_factory=StopsConfig)
     safety: SafetyConfig = Field(default_factory=SafetyConfig)
+    remote: RemoteConfig = Field(default_factory=RemoteConfig)
 
     @field_validator("goal")
     @classmethod

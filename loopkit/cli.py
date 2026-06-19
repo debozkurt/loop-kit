@@ -130,13 +130,16 @@ def doctor(config: Path = typer.Option(DEFAULT_CONFIG, "--config", "-c")) -> Non
 
 @app.command()
 def run(config: Path = typer.Option(DEFAULT_CONFIG, "--config", "-c"),
+        repo: str | None = typer.Option(None, "--repo", help="Override the target repo (config `repo`)."),
         dry_run: bool = typer.Option(False, "--dry-run", help="Run the control flow, skip the agent."),
         max_iter: int | None = typer.Option(None, "--max-iter", help="Override stops.max_iter."),
         force: bool = typer.Option(False, "--force", help="Run even if preflight fails."),
         sandbox: bool = typer.Option(False, "--sandbox",
                                      help="Run the loop inside the loopkit Docker container (Ch 16).")) -> None:
-    """Run the loop until it reaches a terminal."""
+    """Run the loop until it reaches a terminal. Point it at any repo via `repo` (or `--repo`)."""
     cfg = _load(config)
+    if repo is not None:
+        cfg.repo = repo
     if max_iter is not None:
         cfg.stops.max_iter = max_iter
 
@@ -153,11 +156,19 @@ def run(config: Path = typer.Option(DEFAULT_CONFIG, "--config", "-c"),
 
     agent = build_agent(cfg.agent)
     console.print(Panel.fit(
-        f"[bold]{cfg.goal}[/]\nbranch {cfg.branch} · adapter {cfg.agent.adapter} · "
+        f"[bold]{cfg.goal}[/]\nrepo {cfg.repo} · branch {cfg.branch} · adapter {cfg.agent.adapter} · "
         f"budget ${cfg.agent.max_cost_usd}",
         title="loopkit run"))
     result = run_loop(cfg, agent, dry_run=dry_run)
     _render(result)
+    # Outward edge (Ch 16): push the solved branch + open a PR, only if [remote] is enabled.
+    if not dry_run and result.reason is StopReason.DONE and cfg.remote.enabled:
+        from .extensions.remote import sync_done
+        sync = sync_done(cfg, cfg.repo_path(), title=f"loopkit: {cfg.goal[:60]}")
+        if sync["pushed"]:
+            console.print(f"[green]pushed[/] {cfg.branch} → {cfg.remote.name}")
+        if sync["pr_url"]:
+            console.print(f"[green]opened PR[/] {sync['pr_url']}")
     raise typer.Exit(0 if result.reason is StopReason.DONE else 2)
 
 
@@ -188,18 +199,38 @@ def fleet_worker(
         adapter: str = typer.Option("mock", "--adapter",
                                     help="Agent the worker runs: mock (no tokens) | claude-code."),
         max_iter: int = typer.Option(6, "--max-iter", help="Per-task iteration cap."),
+        target: str | None = typer.Option(None, "--target", envvar="LOOPKIT_TARGET",
+                                          help="Target repo path/URL to operate on (default: bundled demo-repo)."),
+        gate_iteration: str | None = typer.Option(None, "--gate-iteration", help="Override the iteration gate."),
+        gate_acceptance: str | None = typer.Option(None, "--gate-acceptance", help="Override the acceptance gate."),
         name: str = typer.Option("worker", "--name", envvar="WORKER_NAME",
                                  help="Worker name (rides logs as a tag; set from the pod name).")) -> None:
-    """The container entrypoint: BRPOP a task, run the loop in an isolated clone, HSET the result.
+    """The executor: BRPOP a task, run the loop in an isolated clone of the target, HSET the result.
 
-    Long-lived — this is what a worker pod runs. Ctrl-C / pod termination stops it. The default
-    `mock` adapter solves the demo-repo with no tokens, so `tilt up` brings a green fleet for free.
+    Long-lived — runs as a pod or a host process. With no `--target` it runs the bundled demo-repo
+    token-free (the `tilt up` smoke test). With `--target /path/or/url` it operates on YOUR repo:
+    gates come from that repo's loopkit.toml unless overridden, and `[remote]` there controls
+    whether a solved branch is pushed + a PR opened. Use `--adapter claude-code` for real solves.
     """
-    from .extensions.fleet import RedisQueue, Worker, make_demo_runner
+    from .extensions.fleet import RedisQueue, Worker, make_demo_runner, make_repo_runner
     queue = RedisQueue.from_url(redis_url)
-    console.print(Panel.fit(f"worker [bold]{name}[/] · adapter {adapter} · {redis_url}",
-                            title="loopkit fleet worker"))
-    runner = make_demo_runner(adapter=adapter, max_iter=max_iter)
+    if target:
+        tcfg = _maybe_target_config(target)
+        iteration = gate_iteration or (tcfg.gate.iteration if tcfg else "python -m pytest -q")
+        acceptance = gate_acceptance or (tcfg.gate.acceptance if tcfg and tcfg.gate.acceptance else "true")
+        runner = make_repo_runner(
+            target, mode="clone", adapter=adapter, max_iter=max_iter,
+            gate_iteration=iteration, gate_acceptance=acceptance,
+            protected_paths=tuple(tcfg.safety.protected_paths) if tcfg else ("tests/",),
+            remote=tcfg.remote if tcfg else None)
+        console.print(Panel.fit(
+            f"worker [bold]{name}[/] · target {target} · adapter {adapter} · {redis_url}\n"
+            f"gates: {iteration!r} / {acceptance!r} · remote {'on' if tcfg and tcfg.remote.enabled else 'off'}",
+            title="loopkit fleet worker"))
+    else:
+        runner = make_demo_runner(adapter=adapter, max_iter=max_iter)
+        console.print(Panel.fit(f"worker [bold]{name}[/] · demo-repo · adapter {adapter} · {redis_url}",
+                                title="loopkit fleet worker"))
     try:
         Worker(queue, runner, name=name).run_forever()
     except KeyboardInterrupt:
@@ -210,16 +241,52 @@ def fleet_worker(
 def fleet_run(
         tasks: int = typer.Option(3, "--tasks", "-n", help="How many independent tasks to fan out."),
         redis_url: str = typer.Option(DEFAULT_REDIS_URL, "--redis-url", envvar="REDIS_URL"),
-        goal: str | None = typer.Option(None, "--goal", help="Override the per-task goal.")) -> None:
-    """Coordinator — blind fan-out: enqueue N tasks, collect their outcomes into a FleetResult."""
+        goal: str | None = typer.Option(None, "--goal", help="Override the per-task goal."),
+        from_issues: bool = typer.Option(False, "--from-issues",
+                                         help="Source tasks from open GitHub/GitLab issues."),
+        target: str | None = typer.Option(None, "--target",
+                                          help="Repo to read issues from (default: cwd). Used with --from-issues."),
+        label: str | None = typer.Option(None, "--label", help="Only issues with this label become tasks."),
+        provider: str = typer.Option("auto", "--provider", help="auto | github | gitlab.")) -> None:
+    """Coordinator — enqueue tasks (N goals, or one per open issue) and collect a FleetResult.
+
+    The queue decouples *what to do* (here) from *how to do it* (the workers). Make sure your
+    workers were started with a matching `--target` so they operate on the same repo the issues
+    came from.
+    """
     from .extensions.fleet import PRICING_GOAL, Coordinator, RedisQueue
     queue = RedisQueue.from_url(redis_url)
-    task_list = [{"slug": f"t{i}", "branch": f"loopkit/run-t{i}", "goal": goal or PRICING_GOAL}
-                 for i in range(tasks)]
-    console.print(Panel.fit(f"fan out [bold]{tasks}[/] tasks · {redis_url}", title="loopkit fleet run"))
+    if from_issues:
+        from .extensions.issues import fetch_issues, issues_to_tasks
+        src = Path(target or ".").expanduser()
+        issues = fetch_issues(src, provider=provider, label=label)
+        task_list = issues_to_tasks(issues)
+        if not task_list:
+            err.print(f"[yellow]no open issues found[/]"
+                      f"{f' with label {label}' if label else ''} in {src}")
+            raise typer.Exit(1)
+        console.print(Panel.fit(
+            f"enqueue [bold]{len(task_list)}[/] issue task(s) from {src}"
+            f"{f' (label {label})' if label else ''} · {redis_url}",
+            title="loopkit fleet run --from-issues"))
+    else:
+        task_list = [{"slug": f"t{i}", "branch": f"loopkit/run-t{i}", "goal": goal or PRICING_GOAL}
+                     for i in range(tasks)]
+        console.print(Panel.fit(f"fan out [bold]{tasks}[/] tasks · {redis_url}", title="loopkit fleet run"))
     result = Coordinator(queue).run_fleet(task_list)
     console.print(_fleet_table(result))
     raise typer.Exit(0 if result.workers and not result.failed else 2)
+
+
+def _maybe_target_config(target: str) -> Config | None:
+    """Load a target repo's loopkit.toml for its gates/safety/remote, or None if it has none."""
+    toml = Path(target).expanduser() / "loopkit.toml"
+    if not toml.exists():
+        return None
+    try:
+        return load_config(toml)
+    except Exception:                              # noqa: BLE001 — a malformed target toml -> use defaults
+        return None
 
 
 @fleet_app.command("evolve")
