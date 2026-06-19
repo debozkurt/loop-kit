@@ -7,6 +7,7 @@ through argv.
 from __future__ import annotations
 
 import shutil
+import subprocess
 from pathlib import Path
 
 import typer
@@ -123,11 +124,17 @@ def doctor(config: Path = typer.Option(DEFAULT_CONFIG, "--config", "-c")) -> Non
 def run(config: Path = typer.Option(DEFAULT_CONFIG, "--config", "-c"),
         dry_run: bool = typer.Option(False, "--dry-run", help="Run the control flow, skip the agent."),
         max_iter: int | None = typer.Option(None, "--max-iter", help="Override stops.max_iter."),
-        force: bool = typer.Option(False, "--force", help="Run even if preflight fails.")) -> None:
+        force: bool = typer.Option(False, "--force", help="Run even if preflight fails."),
+        sandbox: bool = typer.Option(False, "--sandbox",
+                                     help="Run the loop inside the loopkit Docker container (Ch 16).")) -> None:
     """Run the loop until it reaches a terminal."""
     cfg = _load(config)
     if max_iter is not None:
         cfg.stops.max_iter = max_iter
+
+    if sandbox:
+        _run_sandboxed(cfg, config, dry_run=dry_run, max_iter=max_iter, force=force)
+        return
 
     pf = safety.preflight(cfg)
     if not pf.ok and not force:
@@ -177,6 +184,25 @@ def _list_scenarios() -> None:
                       "live or scripted" if scenario.live_supported else "scripted")
     console.print(table)
     console.print("Run one with [bold]loopkit demo <chapter>[/] or [bold]loopkit learn <chapter>[/].")
+
+
+def _run_sandboxed(cfg: Config, config_path: Path, *, dry_run: bool, max_iter: int | None,
+                   force: bool) -> None:
+    """Re-invoke `loopkit run` inside the container, with the repo bind-mounted at /work (Ch 16)."""
+    if shutil.which("docker") is None:
+        err.print("[red]sandbox[/] docker not found on PATH (build the image: docker build -t loopkit .)")
+        raise typer.Exit(1)
+    repo = cfg.repo_path()
+    inner = ["loopkit", "run", "-c", config_path.name]
+    if dry_run:
+        inner.append("--dry-run")
+    if max_iter is not None:
+        inner += ["--max-iter", str(max_iter)]
+    if force:
+        inner.append("--force")
+    cmd = ["docker", "run", "--rm", "-v", f"{repo}:/work", "-w", "/work", "loopkit", *inner[1:]]
+    console.print(Panel.fit(" ".join(cmd), title="loopkit run --sandbox"))
+    raise typer.Exit(subprocess.call(cmd))
 
 
 def _load(config: Path) -> Config:

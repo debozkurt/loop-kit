@@ -10,6 +10,7 @@ Defining the Scenario once here is what makes the guided `learn` mode nearly fre
 """
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import sys
@@ -27,9 +28,20 @@ from ..config import AgentConfig, Config, GateConfig, SafetyConfig, StopsConfig
 from ..gate import Gate, ShellGate
 from ..loop import RunResult, run_loop
 
-_DEMO_SRC = Path(__file__).resolve().parent.parent.parent / "examples" / "demo-repo"
+def demo_src() -> Path:
+    """Locate the demo-repo: an explicit env path (set in the container), else a source checkout.
 
-PRICING_GOAL = ("Implement line_total in pricing.py so a 10% bulk discount applies at "
+    `examples/` lives at the repo root, not inside the package, so a non-editable install (e.g.
+    the Docker image) can't reach it by a package-relative path — the image sets
+    LOOPKIT_DEMO_REPO instead.
+    """
+    env = os.environ.get("LOOPKIT_DEMO_REPO")
+    if env:
+        return Path(env)
+    return Path(__file__).resolve().parent.parent.parent / "examples" / "demo-repo"
+
+
+PRICING_GOAL =("Implement line_total in pricing.py so a 10% bulk discount applies at "
                 "quantity >= 10, per PROMPT.md.")
 
 CORRECT_PRICING = '''\
@@ -96,7 +108,7 @@ class Stage:
         """A fresh git-initialized copy of the demo-repo in a temp dir (cleaned after the run)."""
         tmp = Path(tempfile.mkdtemp(prefix="loopkit-demo-"))
         repo = tmp / "demo"
-        shutil.copytree(_DEMO_SRC, repo)
+        shutil.copytree(demo_src(), repo)
         _git(repo, "init", "-q")
         _git(repo, "branch", "-m", "main")
         _git(repo, "config", "user.email", "demo@loopkit")

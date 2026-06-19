@@ -1,17 +1,13 @@
 """Ch 5 — context reset: a fresh, fixed context each tick beats a growing, rotting one."""
 from __future__ import annotations
 
-from pathlib import Path
-
 from ..config import Config, GateConfig
 from ..prompt import build_prompt
-from . import PRICING_GOAL, Scenario, Stage
-
-_SRC = Path(__file__).resolve().parent.parent.parent / "examples" / "demo-repo"
+from . import PRICING_GOAL, Scenario, Stage, demo_src
 
 
 def run(stage: Stage) -> None:
-    cfg = Config(goal=PRICING_GOAL, repo=str(_SRC), gate=GateConfig(iteration="x"))
+    cfg = Config(goal=PRICING_GOAL, repo=str(demo_src()), gate=GateConfig(iteration="x"))
     stage.beat("The ralph discipline rebuilds the prompt from anchors + the last feedback every "
                "tick, so context stays a fixed size instead of growing with history.")
 
