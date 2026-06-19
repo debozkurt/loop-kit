@@ -33,16 +33,21 @@ controller attach points. **Do not rewrite the core contracts — attach at the 
    reseed winners into the next generation's prompts). Carry the **selection-inflation** guard
    from Ch 9: when keeping best-of-N, re-validate the winner on the held-out gate it never
    competed on.
-   - ✅ **Fan-out done** (Ch 10 scenario + 7 MockAgent tests, 17 total green). `make_worktree`/
+   - ✅ **Fan-out done** (commit `1c23220`; Ch 10 scenario + 7 tests). `make_worktree`/
      `remove_worktree` (serialized creation via `_WORKTREE_LOCK`, branch survives teardown),
      `Supervisor.run_fleet` (bounded `ThreadPoolExecutor`, one crash contained per
      `WorkerResult.error`), `run_fleet` convenience, `WorkerResult`/`FleetResult` (`.done` /
-     `.failed`). Per-worker config via `base_config.model_copy`. Not committed yet.
-   - ⏭️ **Next: evolutionary strategy** — `Supervisor.evolve(task, generations, k)`: run a
-     generation of N attempts at the *same* goal, score them (the held-out gate is the scorer),
-     keep top-k, reseed winners' diffs into the next generation's prompt. The
-     **selection-inflation re-validation** is the load-bearing part: the kept winner must pass a
-     held-out gate it never competed on, or best-of-N just overfits to gate noise.
+     `.failed`). Per-worker config via `base_config.model_copy`.
+   - ✅ **Evolutionary done** (Ch 11 scenario + 4 tests, 21 total green). `Supervisor.evolve(
+     base_task, *, generations, population, keep, score, revalidate, candidate_task)`. Per
+     generation: `_dispatch` N attempts at the same goal → `Scorer` ranks → keep top-k →
+     `_first_revalidated` walks survivors high-score-first and confirms the first to pass the
+     held-out `RevalidateFactory` gate. **Only a re-validated winner reseeds** the next
+     generation (tree-level: next gen branches off the winner; prompt-level: seed note appended
+     to the goal). `Candidate`/`Generation`/`EvolutionResult` with `.winner`, `.inflated`,
+     `.inflation_caught`. The selection-inflation guard is proved by
+     `test_selection_inflation_is_caught_by_revalidation` (the 1.0-score "memorizer" loses to
+     the 0.9 "solver" that passes held-out).
 2. **Continuous review (Ch 8)** — `extensions/review.py`. A `ReviewHook` called after each
    commit; add an `after_commit` hook point to `run_loop`. The roborev fix→re-review loop.
 3. **Skills + write-back flywheel (Ch 17)** — `extensions/skills.py`. A `SkillRegistry`
@@ -64,12 +69,18 @@ controller attach points. **Do not rewrite the core contracts — attach at the 
 
 ## Suggested next step
 
-Fan-out (the original first step) is done. Next: the **evolutionary strategy** on top of the
-same `Supervisor` — `evolve()` over generations of same-goal attempts, score by the held-out
-gate, keep top-k, reseed winners into the next prompt, and re-validate the kept winner on a
-fresh held-out gate (the Ch 9 selection-inflation guard). Add a `Ch 11/12` scenario + MockAgent
-tests that prove a seeded "lucky overfit" winner gets caught by the re-validation. After that:
-continuous review (Ch 8), then skills + write-back (Ch 17).
+Orchestration (Ch 10–12) is done — both strategies, fan-out and evolutionary. Next is
+**continuous review (Ch 8)** — `extensions/review.py`. The seam is already typed there: a
+`ReviewHook.review(workspace, commit_message) -> GateResult`. Add an `after_commit` attach
+point to `run_loop` (right after `durability.commit_progress`, before the iteration gate), call
+the hook there, and feed a failing review back into the next tick's `feedback` — the roborev
+fix→re-review loop, run while the context that produced the diff is still fresh. Add a `Ch 8`
+scenario + MockAgent tests (a review that flags tick 1 and clears once fixed). After that:
+skills + write-back flywheel (Ch 17), then the Tilt deployable fleet.
+
+Wiring note for evolution: `Supervisor.evolve` re-validates *survivors only* (high-score-first,
+stops at the first pass). If you later want every candidate's held-out verdict surfaced (e.g. a
+richer dashboard), that's the place to widen it — today non-survivors show no held-out result.
 
 ## Gotchas already paid for (keep the fixes)
 

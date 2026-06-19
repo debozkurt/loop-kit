@@ -40,6 +40,17 @@ from ..stops import StopReason
 AgentFactory = Callable[[dict], Agent]
 GateFactory = Callable[[dict, Path], tuple[Gate | None, Gate | None]]
 
+# Evolutionary search adds two more callables. A Scorer ranks a finished candidate's worktree
+# (higher = fitter) — this is the *selection* signal. A RevalidateFactory yields a *held-out*
+# gate the candidate never optimized or was selected against — the Ch 9 guard that catches a
+# winner whose high selection score was luck (selection inflation) rather than skill.
+Scorer = Callable[[dict, Path], float]
+RevalidateFactory = Callable[[dict, Path], Gate]
+# Build one candidate's task from (base_task, generation, candidate_index, seed_branch). The
+# default carries the prior winner forward both ways: tree-level (the worktree branches off
+# seed_branch) and prompt-level (a seed note appended to the goal, for live agents).
+CandidateTaskFactory = Callable[[dict, int, int, "str | None"], dict]
+
 
 @dataclass
 class WorkerResult:
@@ -71,6 +82,64 @@ class FleetResult:
     def failed(self) -> list[WorkerResult]:
         """Workers that halted on any non-DONE terminal, or crashed before reaching one."""
         return [w for w in self.workers if not w.done]
+
+
+@dataclass
+class Candidate:
+    """One attempt in an evolutionary generation: a worker plus its selection score."""
+
+    task: dict
+    branch: str
+    worktree: Path
+    result: RunResult | None
+    score: float                        # the Scorer's fitness (-inf if it never finished)
+    error: str | None = None
+
+    @property
+    def done(self) -> bool:
+        return self.result is not None and self.result.reason is StopReason.DONE
+
+
+@dataclass
+class Generation:
+    """One round: every candidate (ranked by score), the survivors kept, and the confirmed best.
+
+    `confirmed` is the highest-scoring survivor that *also* passed re-validation — the held-out
+    check it never competed on. It is what seeds the next generation, so a lucky overfit can't
+    propagate. `inflated` is the tell: the top scorer was not the one that survived re-validation.
+    """
+
+    index: int
+    candidates: list[Candidate]         # sorted by score, descending
+    survivors: list[Candidate]          # the top-k kept
+    confirmed: Candidate | None         # best survivor that passed re-validation (the seed)
+
+    @property
+    def inflated(self) -> bool:
+        """True when the top-scoring survivor failed re-validation — selection inflation caught."""
+        if not self.survivors:
+            return False
+        return self.confirmed is None or self.confirmed.branch != self.survivors[0].branch
+
+
+@dataclass
+class EvolutionResult:
+    """The whole run: every generation, with the final validated winner surfaced."""
+
+    generations: list[Generation] = field(default_factory=list)
+
+    @property
+    def winner(self) -> Candidate | None:
+        """The most recent generation's confirmed (re-validated) best, if any."""
+        for generation in reversed(self.generations):
+            if generation.confirmed is not None:
+                return generation.confirmed
+        return None
+
+    @property
+    def inflation_caught(self) -> bool:
+        """True if re-validation ever overruled a generation's top-scoring candidate."""
+        return any(generation.inflated for generation in self.generations)
 
 
 def _git(repo: Path, *args: str, check: bool = False) -> subprocess.CompletedProcess:
@@ -139,28 +208,38 @@ class Supervisor:
         root = Path(tempfile.mkdtemp(prefix="loopkit-fleet-"))
         self._log.info("fleet.start", tasks=len(tasks), maxWorkers=self.max_workers,
                        base=self.base, root=str(root))
-        slots: list[WorkerResult | None] = [None] * len(tasks)
-        with ThreadPoolExecutor(max_workers=self.max_workers) as pool:
-            futures = {pool.submit(self._run_worker, task, i, root): i
-                       for i, task in enumerate(tasks)}
-            for fut in as_completed(futures):
-                slots[futures[fut]] = fut.result()
-        result = FleetResult(workers=[w for w in slots if w is not None])
+        workers = self._dispatch(tasks, root, self.base)
+        result = FleetResult(workers=workers)
 
         if not self.keep_worktrees:
-            self._teardown(result, root)
+            self._teardown(workers, root)
         self._log.info("fleet.done", done=len(result.done), failed=len(result.failed),
                        total=len(tasks))
         return result
 
-    def _run_worker(self, task: dict, index: int, root: Path) -> WorkerResult:
+    def _dispatch(self, tasks: list[dict], root: Path, base: str) -> list[WorkerResult]:
+        """Run `tasks` concurrently (bounded pool), each in its own worktree off `base`.
+
+        The shared engine under both strategies: blind fan-out calls it once; evolution calls it
+        once per generation, varying `base` to branch each generation off the prior winner.
+        """
+        slots: list[WorkerResult | None] = [None] * len(tasks)
+        with ThreadPoolExecutor(max_workers=self.max_workers) as pool:
+            futures = {pool.submit(self._run_worker, task, i, root, base): i
+                       for i, task in enumerate(tasks)}
+            for fut in as_completed(futures):
+                slots[futures[fut]] = fut.result()
+        return [w for w in slots if w is not None]
+
+    def _run_worker(self, task: dict, index: int, root: Path, base: str) -> WorkerResult:
         """Run one task to a terminal in its own worktree. Never raises — failures are returned."""
         branch = task.get("branch") or f"{self.base_config.branch}-{task.get('slug', index)}"
         worktree = root / branch.replace("/", "-")
         wlog = self._log.bind(task=index, branch=branch)
         try:
-            make_worktree(self._repo, branch, worktree, base=self.base)
-            wlog.info("worker.start", worktree=str(worktree), goalLen=len(task["goal"]))
+            make_worktree(self._repo, branch, worktree, base=base)
+            wlog.info("worker.start", worktree=str(worktree), base=base,
+                      goalLen=len(task["goal"]))
             # Derive a per-worker config: same envelope, this task's goal, pointed at the
             # isolated worktree and branch. Nested config models are shared read-only.
             cfg = self.base_config.model_copy(update={
@@ -176,11 +255,117 @@ class Supervisor:
             wlog.error("worker.error", error=type(exc).__name__, detail=str(exc)[:200])
             return WorkerResult(task=task, branch=branch, worktree=worktree, error=str(exc))
 
-    def _teardown(self, result: FleetResult, root: Path) -> None:
-        for worker in result.workers:
-            if worker.worktree.exists():
-                remove_worktree(self._repo, worker.worktree)
+    def _teardown(self, units: list, root: Path) -> None:
+        """Remove each unit's worktree checkout (branches persist), then the temp root."""
+        for unit in units:
+            if unit.worktree.exists():
+                remove_worktree(self._repo, unit.worktree)
         shutil.rmtree(root, ignore_errors=True)
+
+    def evolve(self, base_task: dict, *, generations: int, population: int, keep: int,
+               score: Scorer, revalidate: RevalidateFactory,
+               candidate_task: CandidateTaskFactory | None = None) -> EvolutionResult:
+        """Evolutionary search: N attempts per generation, keep the validated best, reseed it.
+
+        Each generation fans `population` attempts at the *same* goal out to isolated workers,
+        scores them, keeps the top `keep`, and re-validates the survivors on a held-out gate to
+        find the one real winner. The next generation branches off that winner — its code carried
+        forward — so improvement compounds. But only *validated* improvement: re-validation gates
+        the seed, so a candidate whose high selection score was luck never becomes the seed and
+        its noise can't compound across generations. That guard is Ch 9 at the fleet scale —
+        best-of-N is itself a way to overfit, and a held-out check is the only honest defence.
+        """
+        builder = candidate_task or _default_candidate_task
+        root = Path(tempfile.mkdtemp(prefix="loopkit-evolve-"))
+        log = self._log.bind(mode="evolve")
+        log.info("evolve.start", generations=generations, population=population, keep=keep)
+        result = EvolutionResult()
+        seed_branch: str | None = None
+        try:
+            for g in range(generations):
+                base = seed_branch or self.base
+                tasks = [builder(base_task, g, i, seed_branch) for i in range(population)]
+                glog = log.bind(gen=g, base=base)
+                glog.info("generation.start", population=population)
+
+                workers = self._dispatch(tasks, root, base)
+                candidates = self._score_candidates(workers, score)
+                candidates.sort(key=lambda c: c.score, reverse=True)
+                survivors = candidates[:max(1, keep)]
+                confirmed = self._first_revalidated(survivors, revalidate, glog)
+
+                generation = Generation(index=g, candidates=candidates, survivors=survivors,
+                                        confirmed=confirmed)
+                result.generations.append(generation)
+                glog.info("generation.done",
+                          best=survivors[0].branch if survivors else "-",
+                          bestScore=round(survivors[0].score, 4) if survivors else None,
+                          confirmed=confirmed.branch if confirmed else "-",
+                          inflated=generation.inflated)
+
+                if confirmed is not None:
+                    seed_branch = confirmed.branch      # only a validated winner reseeds
+                if not self.keep_worktrees:             # branches persist; checkouts go
+                    for candidate in candidates:
+                        if candidate.worktree.exists():
+                            remove_worktree(self._repo, candidate.worktree)
+        finally:
+            if not self.keep_worktrees:
+                shutil.rmtree(root, ignore_errors=True)
+
+        winner = result.winner
+        log.info("evolve.done", winner=winner.branch if winner else "-",
+                 winnerScore=round(winner.score, 4) if winner else None,
+                 inflationCaught=result.inflation_caught)
+        return result
+
+    def _score_candidates(self, workers: list[WorkerResult], score: Scorer) -> list[Candidate]:
+        """Score each finished worker in its worktree; unfinished or unscored -> -inf (last)."""
+        candidates: list[Candidate] = []
+        for worker in workers:
+            value = float("-inf")
+            if worker.result is not None and worker.worktree.exists():
+                try:
+                    value = float(score(worker.task, worker.worktree))
+                except Exception as exc:   # noqa: BLE001 — a bad scorer must not sink the run
+                    self._log.warn("score.error", branch=worker.branch, error=type(exc).__name__)
+            candidates.append(Candidate(task=worker.task, branch=worker.branch,
+                                        worktree=worker.worktree, result=worker.result,
+                                        score=value, error=worker.error))
+        return candidates
+
+    def _first_revalidated(self, survivors: list[Candidate], revalidate: RevalidateFactory,
+                           glog) -> Candidate | None:
+        """Walk survivors high-score-first; return the first that passes the held-out gate."""
+        for candidate in survivors:
+            if not candidate.worktree.exists():
+                continue
+            verdict = revalidate(candidate.task, candidate.worktree).check(candidate.worktree)
+            glog.info("revalidate", branch=candidate.branch, score=round(candidate.score, 4),
+                      passed=verdict.passed)
+            if verdict.passed:
+                return candidate
+        return None
+
+
+def _default_candidate_task(base_task: dict, generation: int, candidate: int,
+                            seed_branch: str | None) -> dict:
+    """Derive a candidate's task: a unique slug per (generation, candidate), winner reseeded.
+
+    Tree-level reseeding is done in `_dispatch` (the worktree branches off `seed_branch`, so the
+    prior winner's code is the starting tree). Here we add the prompt-level half: a seed note
+    appended to the goal so a *live* agent is told to refine the prior best instead of starting
+    over. MockAgents ignore the prompt, so tests exercise the tree-level path; live runs get both.
+    """
+    task = dict(base_task)
+    task["slug"] = f"g{generation}-c{candidate}"
+    task["generation"] = generation
+    task["candidate"] = candidate
+    if seed_branch:
+        task["seed_branch"] = seed_branch
+        task["goal"] = (f"{base_task['goal']}\n\nYou are improving on a prior best attempt whose "
+                        "code is already in the working tree — refine it, do not start over.")
+    return task
 
 
 def run_fleet(base_config: Config, tasks: list[dict], *, make_agent: AgentFactory,
