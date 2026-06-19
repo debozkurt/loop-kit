@@ -343,10 +343,20 @@ pytest -q                        # MockAgent-driven; no coding-agent binary, no 
 
 ## Roadmap
 
-Part II is feature-complete — the supervisor (fan-out + evolutionary, Ch 10–12), continuous review
-(Ch 8), the skill write-back flywheel (Ch 17), and the **deployable fleet** (Ch 12: Redis queue,
-worker containers, Tilt on an isolated kind cluster, `loopkit fleet` CLI) are all implemented and
-tested. Open enhancements, not gaps: an optional **dashboard** over `FleetResult` /
-`EvolutionResult`; **tree-level reseed** for `fleet evolve` (today's reseed is prompt-level —
-tree-level needs the winner's tree on a shared volume); and **arbitrary target repos** in workers
-(today they bundle the demo-repo).
+**Done:** the single-agent core; the Part II library (supervisor fan-out + evolutionary Ch 10–12,
+continuous review Ch 8, skill write-back Ch 17); the **dev fleet** (Redis queue, worker containers,
+Tilt on an isolated kind cluster, verified live); and **real-target** support — `loopkit run --repo`
+/ `fleet worker --target` (any repo), `[remote]` push + draft PR via `gh`/`glab`, and
+`fleet run --from-issues` (GitHub/GitLab issues → tasks).
+
+**Next — a production, cloud-deployable system.** Round out the k8s env beyond the dev Tilt loop:
+**`Job`s** for one-shot fleet runs and **`CronJob`s** for scheduled/triggered runs (the Ch 12
+trigger idea as infra); push images to a **registry** and deploy to a **managed cloud cluster**
+(git-cred + API-key **Secrets** in pods, the target toolchain in the worker image); and run
+**multiple jobs in production** with per-job namespacing, budget ceilings, and real
+logging/metrics. Safety (Ch 16) must hold at cloud scale: least-privilege ServiceAccounts, the
+pre-tool-use hook, branch-only pushes. See `docs/part-ii-resume.md` → "Next milestone".
+
+Smaller enhancements: an optional **dashboard** over `FleetResult`/`EvolutionResult`; **tree-level
+reseed** for `fleet evolve` (today's is prompt-level — tree-level needs the winner's tree on a
+shared volume); finer fleet scoring (`_grade` → held-out pass fraction).

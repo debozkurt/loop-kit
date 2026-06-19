@@ -3,16 +3,22 @@
 **Read this first when picking up loopkit Part II.** It is the single source of truth for the
 next phase; the auto-memory `project_loopkit` only points here.
 
-> **Current state (2026-06-19):** **All four Part II workstreams are done AND the fleet has been
-> run live.** Orchestration (fan-out + evolutionary), continuous review, the skill write-back
-> flywheel, and the Tilt deployable fleet (#4) are implemented, tested, and committed on `main` —
-> **49 tests green**, all five `demo 8/10/11/12/17` clean. The deterministic core is proven against
-> fakeredis + MockAgent; the full kind/Tilt/k8s fleet was **brought up live and verified** on the
-> isolated `kind-loopkit` cluster: `tilt up` (UI :10350, redis :16379, 3 worker pods) → `make
-> fleet-run` (tasks DONE on isolated branches) → `make fleet-evolve` (2 gens, reseed, winner
-> confirmed). Host `~/.kube/config` byte-identical throughout; the other clusters never touched.
-> Commits: `613bb7c` library/CLI/scenario · `472fac4` deploy shell · `076aadd` docs · `4833f69`
-> bring-up fixes (Docker-29 + 16379). **Part II is complete.**
+> **Current state (2026-06-19):** **Part II is complete, the fleet has been run live, AND loopkit
+> now drives real repos (not just demo-repo).** All four Part II workstreams + the Tilt deployable
+> fleet are done — **60 tests green**, demos `8/10/11/12/17` clean. The full kind/Tilt/k8s fleet was
+> **brought up live and verified** on the isolated `kind-loopkit` cluster (`tilt up` → `make
+> fleet-run`/`fleet-evolve`; host `~/.kube/config` byte-identical throughout). On top of that,
+> **real-target capabilities** landed (commits `2861b77` code, `f59d5e6` docs): `loopkit run --repo`
+> / `fleet worker --target` (any repo via `make_repo_runner`), a `[remote]` section + post-DONE push
+> + draft PR/MR via `gh`/`glab` (`extensions/remote.py`, opt-in/off by default), and issue-sourced
+> tasks `fleet run --from-issues` (`extensions/issues.py`). Fleet commits: `613bb7c` · `472fac4` ·
+> `076aadd` · `4833f69` · `2861b77` · `f59d5e6`.
+>
+> **Next milestone — a production, cloud-deployable system**
+> ([details below](#next-milestone-production-cloud-deployable-fleet)). Round out the k8s env beyond
+> the dev Tilt loop (Jobs for one-shot fleet runs, CronJobs for scheduled/triggered runs), make it
+> extensible + deployable to a managed cloud cluster (image registry, git-cred Secrets in pods, the
+> target toolchain in the worker image), and run **multiple jobs in production**.
 
 ## Where v1 left off (done)
 
@@ -123,11 +129,41 @@ seams.** Items 1–3 are done (details + commit ids inline); item 4 is the remai
 
 ## Suggested next step
 
-> **Part II is COMPLETE (2026-06-19).** All four workstreams done; 49 tests green; demos
-> 8/10/11/12/17 clean; **the fleet has been brought up live and verified** on the isolated
-> `kind-loopkit` cluster (`tilt up` → `make fleet-run`/`fleet-evolve`, host kubeconfig untouched).
-> Nothing required remains — only enhancements (dashboard, tree-level reseed v2, arbitrary repos).
-> Re-run the live fleet any time with the checklist below; tear down with `make fleet-down`.
+> **Part II is COMPLETE + loopkit drives real repos + the dev fleet runs live (2026-06-19).**
+> 60 tests green; demos 8/10/11/12/17 clean; the kind/Tilt fleet verified live; `--repo` /
+> `--target` / `[remote]` / `--from-issues` make it work on any project. **The headline next step is
+> productionizing it — see [Next milestone](#next-milestone-production-cloud-deployable-fleet).**
+
+## Next milestone: production cloud-deployable fleet
+
+The dev loop (Tilt on a local kind cluster) is proven; the next phase turns loopkit into a system
+you **deploy to a managed cloud cluster and run many jobs on in production**. Scope to design next:
+
+- **k8s job primitives (round out the env).** Today: a long-lived worker `Deployment` + a host
+  coordinator. Production wants:
+  - **`Job`** — a one-shot fleet run (coordinator + a `parallelism` of worker pods) that runs to
+    completion and cleans up, instead of a host-run coordinator.
+  - **`CronJob`** — scheduled / triggered runs (the Ch 12 *trigger* idea as infrastructure): a
+    CronJob that enqueues issue-sourced tasks on a schedule; a webhook-driven `Job`.
+  - Decide: coordinator-as-`Job` vs an in-cluster controller/operator watching a queue or a CRD.
+- **Extensible + cloud-deployable.** Push the worker image to a **registry** (not `kind load`);
+  deploy to a managed cluster (EKS/GKE/… — the global kubectl context-safety rules apply: a real
+  cloud context is production-sensitive, never mutate without explicit confirmation); managed or
+  in-cluster Redis; the **target repo's toolchain** baked into the worker image (per stack); **git
+  credentials + agent API keys as k8s `Secret`s** mounted into pods (the host-process flow needs
+  none — pods do).
+- **Run multiple jobs in production.** Many concurrent runs / targets / schedules; per-job
+  namespacing, quotas, and **budget ceilings**; ship the `[loopkit][fleet]`/`[loopkit][worker]`
+  logs to a real log/metrics stack (the deferred Phase-5 dashboard becomes relevant here).
+- **Safety at cloud scale.** The Ch 16 envelope must hold on a shared cluster: least-privilege
+  ServiceAccounts, NetworkPolicy, the pre-tool-use hook in the image, budget caps, branch-only
+  pushes, draft PRs. Issue-sourced tasks widen the **prompt-injection** surface (untrusted issue
+  bodies) — least privilege is the defense.
+
+Think of this as **loopkit "Part III" (productionization)**, distinct from the now-done Part II
+library + dev fleet.
+
+## Reference — the dev fleet (done, re-runnable)
 
 **Live bring-up checklist** (verified working — re-runnable; heavy on Colima):
 1. `make fleet-up` — creates the isolated `kind-loopkit` cluster against the repo-local
@@ -149,10 +185,12 @@ After that, the only open items are **enhancements**, not gaps:
 - **Tree-level reseed (evolve v2).** Today's fleet `evolve` reseeds *prompt-level* (the winner's
   note rides the next goal). Tree-level (gen+1 branches off the winner's code) needs the winner's
   tree on a shared volume/remote the next generation clones from — a real volume + a clone step.
-- **Arbitrary repos.** The worker bundles demo-repo; external repos need clone-from-remote or a
-  shared volume into the pod.
+- **Arbitrary repos — ✅ DONE** (`make_repo_runner` + `fleet worker --target` + `[remote]` +
+  `--from-issues`). On a *pod*, this still needs the target toolchain in the image + git-cred
+  Secrets — folded into the production milestone above.
 - Carried library backlog: package demo-repo as data for PyPI; richer no-progress signal
-  (test-pass-count delta); real per-adapter cost parsing so the budget stop bites on live runs.
+  (test-pass-count delta); real per-adapter cost parsing so the budget stop bites on live runs;
+  finer `_grade` (held-out pass fraction) in the fleet runner.
 
 Wiring notes carried forward (load-bearing seams, don't regress):
 - `run_loop` keyword-only opt-ins, each None = exact v1: `review_hook` (Ch 8), `skills` (Ch 17).
