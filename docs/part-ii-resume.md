@@ -32,7 +32,17 @@ controller attach points. **Do not rewrite the core contracts — attach at the 
    strategies: blind **fan-out** (N independent tasks) and **evolutionary** (score, keep top-k,
    reseed winners into the next generation's prompts). Carry the **selection-inflation** guard
    from Ch 9: when keeping best-of-N, re-validate the winner on the held-out gate it never
-   competed on. Start here.
+   competed on.
+   - ✅ **Fan-out done** (Ch 10 scenario + 7 MockAgent tests, 17 total green). `make_worktree`/
+     `remove_worktree` (serialized creation via `_WORKTREE_LOCK`, branch survives teardown),
+     `Supervisor.run_fleet` (bounded `ThreadPoolExecutor`, one crash contained per
+     `WorkerResult.error`), `run_fleet` convenience, `WorkerResult`/`FleetResult` (`.done` /
+     `.failed`). Per-worker config via `base_config.model_copy`. Not committed yet.
+   - ⏭️ **Next: evolutionary strategy** — `Supervisor.evolve(task, generations, k)`: run a
+     generation of N attempts at the *same* goal, score them (the held-out gate is the scorer),
+     keep top-k, reseed winners' diffs into the next generation's prompt. The
+     **selection-inflation re-validation** is the load-bearing part: the kept winner must pass a
+     held-out gate it never competed on, or best-of-N just overfits to gate noise.
 2. **Continuous review (Ch 8)** — `extensions/review.py`. A `ReviewHook` called after each
    commit; add an `after_commit` hook point to `run_loop`. The roborev fix→re-review loop.
 3. **Skills + write-back flywheel (Ch 17)** — `extensions/skills.py`. A `SkillRegistry`
@@ -52,11 +62,14 @@ controller attach points. **Do not rewrite the core contracts — attach at the 
 - **Test-as-you-go with MockAgent (no tokens); log-as-you-go.** Add a scenario for each new
   concept (`scenarios/chNN_*.py`) so `demo`/`learn` keep pace.
 
-## Suggested first step
+## Suggested next step
 
-`extensions/orchestrate.py`: `make_worktree()` + `run_worker()` (wraps `run_loop`) +
-`run_fleet()` (bounded pool over independent tasks) + a `Ch 10` scenario + MockAgent tests.
-Then layer the evolutionary strategy and the selection-inflation re-validation on top.
+Fan-out (the original first step) is done. Next: the **evolutionary strategy** on top of the
+same `Supervisor` — `evolve()` over generations of same-goal attempts, score by the held-out
+gate, keep top-k, reseed winners into the next prompt, and re-validate the kept winner on a
+fresh held-out gate (the Ch 9 selection-inflation guard). Add a `Ch 11/12` scenario + MockAgent
+tests that prove a seeded "lucky overfit" winner gets caught by the re-validation. After that:
+continuous review (Ch 8), then skills + write-back (Ch 17).
 
 ## Gotchas already paid for (keep the fixes)
 
