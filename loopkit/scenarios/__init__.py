@@ -123,9 +123,9 @@ class Stage:
         return ClaudeCodeAdapter() if self.live else scripted
 
     def run(self, config: Config, agent: Agent, *, iteration_gate: Gate,
-            acceptance_gate: Gate, review_hook=None) -> RunResult:
+            acceptance_gate: Gate, review_hook=None, skills=None) -> RunResult:
         result = run_loop(config, agent, iteration_gate=iteration_gate,
-                          acceptance_gate=acceptance_gate, review_hook=review_hook)
+                          acceptance_gate=acceptance_gate, review_hook=review_hook, skills=skills)
         self.console.print(_result_panel(result))
         return result
 
@@ -157,10 +157,10 @@ class Scenario:
 def _registry() -> dict[int, Scenario]:
     # Imported lazily so chapter modules can import helpers from this package without a cycle.
     from . import (ch05_context, ch07_feedback, ch08_review, ch09_held_out, ch10_orchestration,
-                   ch11_evolution, ch13_hard_stops, ch16_safety)
+                   ch11_evolution, ch13_hard_stops, ch16_safety, ch17_skills)
     items = [ch05_context.SCENARIO, ch07_feedback.SCENARIO, ch08_review.SCENARIO,
              ch09_held_out.SCENARIO, ch10_orchestration.SCENARIO, ch11_evolution.SCENARIO,
-             ch13_hard_stops.SCENARIO, ch16_safety.SCENARIO]
+             ch13_hard_stops.SCENARIO, ch16_safety.SCENARIO, ch17_skills.SCENARIO]
     return {s.chapter: s for s in items}
 
 

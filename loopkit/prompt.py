@@ -34,13 +34,17 @@ def _read_one(path: Path, repo: Path) -> str:
     return f"# --- {path.relative_to(repo)} ---\n{text}"
 
 
-def build_prompt(config, feedback: str | None) -> str:
-    """Assemble the tick's prompt: goal + anchors + last feedback + rules. No history."""
+def build_prompt(config, feedback: str | None, skills: str | None = None) -> str:
+    """Assemble the tick's prompt: goal + anchors + skills + last feedback + rules. No history."""
     repo = config.repo_path()
     parts = [
         f"# Goal\n{config.goal}",
         read_anchors(repo, config.prompt.anchors),
     ]
+    if skills:
+        # Lessons distilled from past successful runs (the write-back flywheel, Ch 17). Already
+        # carries its own heading; placed before feedback so a learned skill frames the attempt.
+        parts.append(skills)
     if feedback:
         parts.append(
             "# Feedback from the last attempt (the gate failed — address this)\n"

@@ -23,9 +23,10 @@ from .prompt import build_prompt
 from .stops import BudgetCeiling, LoopState, NoProgress, StopReason, first_triggered
 
 if TYPE_CHECKING:
-    # Typing-only import: the core never depends on an extension at runtime — the hook is
-    # duck-called. Continuous review is opt-in (Ch 8), so a None hook keeps v1 behaviour exact.
+    # Typing-only imports: the core never depends on an extension at runtime — the hook and the
+    # registry are duck-called. Both are opt-in (Ch 8, Ch 17), so passing None keeps v1 exact.
     from .extensions.review import ReviewHook
+    from .extensions.skills import SkillRegistry
 
 
 @dataclass
@@ -48,7 +49,7 @@ class _DryResult:
 
 def run_loop(config, agent: Agent, *, iteration_gate: Gate | None = None,
              acceptance_gate: Gate | None = None, review_hook: "ReviewHook | None" = None,
-             dry_run: bool = False) -> RunResult:
+             skills: "SkillRegistry | None" = None, dry_run: bool = False) -> RunResult:
     """Drive the agent toward `config.goal` until a terminal is reached. Returns the terminal."""
     repo = config.repo_path()
     run_id = durability.state_signature(repo)[:8]
@@ -75,8 +76,11 @@ def run_loop(config, agent: Agent, *, iteration_gate: Gate | None = None,
     for i in range(1, config.stops.max_iter + 1):
         tick = log.bind(tick=i)
 
-        prompt = build_prompt(config, feedback)
-        tick.info("agent.invoke", promptLen=len(prompt))
+        # Read edge of the flywheel (Ch 17): render learned skills into this tick's prompt. None
+        # registry -> no block -> v1 prompt exactly.
+        skills_text = skills.render() if skills is not None else None
+        prompt = build_prompt(config, feedback, skills_text)
+        tick.info("agent.invoke", promptLen=len(prompt), skillsLen=len(skills_text or ""))
         result = _DryResult() if dry_run else agent.act(prompt, repo)
         cost += result.cost_usd
         tick.info("agent.done", ok=result.ok, costUsd=round(result.cost_usd, 4),
@@ -120,7 +124,14 @@ def run_loop(config, agent: Agent, *, iteration_gate: Gate | None = None,
                 tick.info("gate.acceptance", passed=acc.passed)
                 if acc.passed:
                     tick.info("run.done", iterations=i, costUsd=round(cost, 4))
-                    return RunResult(StopReason.DONE, i, cost)
+                    done = RunResult(StopReason.DONE, i, cost)
+                    # Write edge of the flywheel (Ch 17): distil this success into a skill — but
+                    # only through the registry's own gate, so a thin win can't mint a bad lesson.
+                    if skills is not None:
+                        minted = skills.write_back(done, repo, config.goal)
+                        tick.info("skill.write_back", minted=minted is not None,
+                                  name=minted.name if minted else "-")
+                    return done
                 # Overfit: passed what it saw, failed what it didn't. Feed that back (Ch 9).
                 overfit = True
                 tick.warn("gate.overfit", detail="iteration_pass_acceptance_fail")

@@ -61,6 +61,16 @@ controller attach points. **Do not rewrite the core contracts — attach at the 
 3. **Skills + write-back flywheel (Ch 17)** — `extensions/skills.py`. A `SkillRegistry`
    rendered into the prompt (attach in `prompt.build_prompt`) + `write_back` after DONE (attach
    in `loop.run_loop`'s done path). Gated — never ungated write-back.
+   - ✅ **Done** (Ch 17 scenario + 10 tests, 37 total green). `Skill` + `SkillRegistry` Protocol
+     + `InMemorySkillRegistry` / `FileSkillRegistry` (durable, one .md per skill) over a
+     `_BaseRegistry` whose `_vet` enforces the gate→distil→dedupe policy. Read edge:
+     `build_prompt(config, feedback, skills)` renders the block before feedback; `run_loop`
+     threads `skills.render()` each tick (`skillsLen` logged). Write edge: `run_loop`'s DONE path
+     calls `skills.write_back(done, repo, config.goal)`. **Gated via the registry's own
+     `write_back_gate`** — `test_write_back_is_gated_out_when_gate_fails` proves a failed gate
+     learns nothing. Pluggable `Distiller` (default = provenance only; real one asks the agent).
+     `demo 17` is the two-run flywheel: run A learns the boundary in 2 ticks + writes it back,
+     run B reads the skill and nails it in 1.
 4. **Tilt + deployable fleet** — worker loops as containers, a queue, optionally a dashboard.
    This is where Tilt earns its keep (multiple live-reloaded services). Honor the global
    kubectl/context-safety rules if any k8s lands.
@@ -77,23 +87,26 @@ controller attach points. **Do not rewrite the core contracts — attach at the 
 
 ## Suggested next step
 
-Orchestration (Ch 10–12) and continuous review (Ch 8) are done. Next is the **skills +
-write-back flywheel (Ch 17)** — `extensions/skills.py`. The seam is typed: a `SkillRegistry`
-with `render() -> str` (skills injected into the prompt) and `write_back(run_result)` (distill
-a successful run into a named skill). Two attach points in the core: read in
-`prompt.build_prompt` (render the registry into the assembled prompt — add an optional
-`skills: str` arg threaded from `run_loop`, kept None for v1), and write in `run_loop`'s DONE
-path (call `write_back` after the acceptance gate passes). **Gated, never ungated** (Ch 17/19):
-write-back must run through a gate/review before a run can mint a reusable skill, or the
-flywheel learns junk. Add a `Ch 17` scenario + MockAgent tests (a skill rendered into the
-prompt changes behaviour; a successful gated run writes one back; an ungated/failed run does
-not). After that: the Tilt deployable fleet (Ch ?, the last Part II item).
+Three of the four Part II workstreams are done — orchestration (Ch 10–12), continuous review
+(Ch 8), and skills + write-back (Ch 17). The library is feature-complete for the curriculum;
+all four extension seams are now real. The **last item is the Tilt deployable fleet** (#4
+below): worker loops as containers, a queue feeding tasks, optionally a dashboard reading
+`FleetResult`/`EvolutionResult`. This is the one piece that leaves the single-process model —
+honor the global kubectl/context-safety rules if any k8s lands, and lean on Tilt for the
+multi-service live-reload. It's more infra than library, so scope it deliberately; the
+single-binary core is done and shouldn't need changes to be containerized (`loopkit run` already
+runs sandboxed — see `cli.py` `_run_sandboxed`).
 
-Wiring notes carried forward:
+If not doing the fleet next, the highest-value library polish is a `loopkit fleet`/`evolve` CLI
+surface (today orchestration is Python-API only) so the supervisor is drivable from argv like
+`run`/`demo`.
+
+Wiring notes carried forward (load-bearing seams, don't regress):
+- `run_loop` keyword-only opt-ins, each None = exact v1: `review_hook` (Ch 8, gates done, runs
+  only on a real commit), `skills` (Ch 17, rendered each tick + gated write-back on DONE). Any
+  new core attach point should follow the same shape: typing-only import, duck-called, None-safe.
 - `Supervisor.evolve` re-validates *survivors only* (high-score-first, stops at first pass).
   Widen here if you ever want every candidate's held-out verdict surfaced (e.g. a dashboard).
-- `run_loop`'s `review_hook` runs **only on a real commit** and gates the done-check; a None
-  hook is exact v1 behaviour. The skills read-attach should follow the same opt-in shape.
 
 ## Gotchas already paid for (keep the fixes)
 
