@@ -9,6 +9,7 @@ Chapter 9).
 """
 from __future__ import annotations
 
+import os
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -33,7 +34,10 @@ class ShellGate:
         self._tail = feedback_tail
 
     def check(self, workspace: Path) -> GateResult:
-        proc = subprocess.run(self.command, cwd=workspace, shell=True,
+        # Don't let a python gate litter __pycache__ into the tree (it can fall under a
+        # protected path and trip the safety guard); the run's verdict is unaffected.
+        env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
+        proc = subprocess.run(self.command, cwd=workspace, shell=True, env=env,
                               capture_output=True, text=True)
         if proc.returncode == 0:
             return GateResult(True, None)
