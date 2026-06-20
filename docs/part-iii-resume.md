@@ -5,16 +5,19 @@ phase: state, locked decisions, the build sequence, sharp edges, and the next st
 system is built/designed*, read the architecture wiki: [`architecture/`](architecture/README.md).
 The auto-memory `project_loopkit` only points here.
 
-> **Current state (2026-06-19):** **Phase 0 is DONE; the rest of Part III is scoped, not yet built.**
+> **Current state (2026-06-19):** **Phases 0–1 built; Phase 1's live push awaits a GitHub remote.**
 > Part II (the extension library) and the dev kind/Tilt fleet are done and verified live (see
-> [`part-ii-resume.md`](part-ii-resume.md)). **Phase 0 landed the pure-library foundation:** the full
-> **2×2 adapter matrix** (`claude-api`/`openai-api` SDK adapters + `codex` alongside `claude-code`),
-> **real per-adapter cost parsing** (`pricing.py`) so the budget stop bites, and — added this phase —
-> a **full-tree LangSmith tracing layer** (`trace.py`, auto-on, `None`-safe, verified live against the
-> real backend). **81 tests green** (was 60); `demo 14` (the new Ch 14 economics scenario) clean. The
-> remaining phases turn loopkit into a **cloud-deployable system on DigitalOcean DOKS that runs many
-> jobs in production**. The architecture is decided in [`architecture/`](architecture/README.md); the
-> next step is **Phase 1** below.
+> [`part-ii-resume.md`](part-ii-resume.md)). **Phase 0** (committed, branch `phase-0-adapters-tracing`)
+> landed the pure-library foundation: the full **2×2 adapter matrix** (`claude-api`/`openai-api` SDK
+> adapters + `codex` alongside `claude-code`), **real per-adapter cost parsing** (`pricing.py`) so the
+> budget stop bites, and a **full-tree LangSmith tracing layer** (`trace.py`, auto-on, `None`-safe,
+> verified live). **81 tests green** (was 60). **Phase 1** added the **`worker-image` GitHub Actions
+> workflow** (buildx multi-arch `amd64` → GHCR, with an in-CI amd64 smoke test) + the `imagePullSecret`
+> recipe; the image build and smoke commands (`fleet worker`, `demo 12`, `demo 14`) are **verified
+> locally** in-container. **Gating item:** the repo has **no git remote**, so the workflow hasn't run
+> on Actions and nothing is in GHCR yet — pushing to GitHub is what makes the amd64 build + push live.
+> The architecture is decided in [`architecture/`](architecture/README.md); the next build step is
+> **Phase 2** below.
 
 ## Locked decisions
 
@@ -50,9 +53,13 @@ proven before the trigger surface is built on top of it.
   tracing layer** (`trace.py`) wired whole-system (run→tick→agent→llm/tool→gates, cost on every span),
   auto-on + `None`-safe, verified live. *Acceptance met:* 81 tests green (token-free); `demo 14`
   shows a real costed run reaching DONE and the budget stop biting; traces confirmed in LangSmith.
-- **Phase 1 — Image + registry.** Multi-arch **amd64** worker image (agent CLIs + target toolchain) →
-  **GHCR via GitHub Actions**; `imagePullSecret`. *Acceptance:* image pulls + runs `fleet worker` on
-  an amd64 node.
+- **Phase 1 — Image + registry ✅ BUILT (live push pending a remote).** The `worker-image` GitHub
+  Actions workflow builds the root `Dockerfile` via buildx → `linux/amd64` (+arm64), smoke-tests the
+  amd64 image on the runner (`fleet worker --help`, `demo 12`, `demo 14`), then pushes multi-arch to
+  **GHCR**; the `imagePullSecret` recipe is documented in
+  [`02`](architecture/02-cloud-architecture.md). *Acceptance:* the in-CI smoke step runs `fleet
+  worker` on an amd64 node — **proven locally** (native build + in-container run of the smoke commands);
+  the real amd64 build + GHCR push runs once the repo has a GitHub remote.
 - **Phase 2 — Cluster foundation.** DOKS cluster; `ns/loopkit-system`; **Redis StatefulSet (AOF +
   PVC)**; RBAC (`loopkit-control` SA); default-deny **NetworkPolicy** + egress allowlist; node pools;
   the **context-safety guard** in the CLI. *Acceptance:* Redis durable across pod restart; host
@@ -125,17 +132,34 @@ proven before the trigger surface is built on top of it.
 
 ## Next step
 
-**Start Phase 1 — Image + registry.** Phase 0 (adapters + cost + tracing) is done, so the next
-risk to retire is getting a real worker image onto a real node: a multi-arch **amd64** worker image
-(agent CLIs + target toolchain) built and pushed to **GHCR via GitHub Actions** (not `kind load` —
-the dev Tiltfile's arm64 pin must not leak to prod), plus an `imagePullSecret`. *Acceptance:* the
-image pulls and runs `fleet worker` on an amd64 node. Carry the invariants in
-[`../CLAUDE.md`](../CLAUDE.md): extend at the seams, `None`-safe, thin stack, test-as-you-go,
-log-as-you-go, **trace-as-you-go**. **Update this doc and the architecture wiki as each phase lands**
-(the documentation contract).
+**Phase 1 is built and locally smoke-verified; to make it live, push the repo to a GitHub remote** so
+the `worker-image` workflow runs on Actions' amd64 runners and pushes to GHCR. (The corp Zscaler proxy
+blocks the *emulated* amd64 cross-build locally — `x509: certificate signed by unknown authority` when
+the buildx `docker-container` driver pulls the base image; a known **dev-only** TLS edge, Actions has
+no such proxy. The native-arch build + in-container smoke already pass here.) That one step retires the
+last Phase-1 risk.
+
+**Then start Phase 2 — Cluster foundation:** the DOKS cluster; `ns/loopkit-system`; **Redis
+StatefulSet (AOF + PVC)**; RBAC (`loopkit-control` SA); default-deny **NetworkPolicy** + egress
+allowlist; node pools; and the **context-safety guard** in the CLI (pin the DOKS context, refuse any
+other — the `allow_k8s_contexts` + `fail()` pattern from the dev `Tiltfile`, extended to the cloud
+context). *Acceptance:* Redis durable across pod restart; host kubeconfig untouched; CLI refuses a
+wrong context. Carry the invariants in [`../CLAUDE.md`](../CLAUDE.md): extend at the seams, `None`-safe,
+thin stack, test-as-you-go, log-as-you-go, **trace-as-you-go**. **Update this doc and the architecture
+wiki as each phase lands** (the documentation contract).
 
 ## Changelog
 
+- **2026-06-19 — Phase 1 built (image + registry).** Added `.github/workflows/worker-image.yml`:
+  buildx multi-arch (`linux/amd64` +arm64) → GHCR, with an in-CI amd64 smoke test (`fleet worker
+  --help`, `demo 12`, `demo 14`) that *is* the Phase-1 acceptance, plus the `imagePullSecret` recipe in
+  the wiki ([`02`](architecture/02-cloud-architecture.md)). The root `Dockerfile` is reused unchanged —
+  its multi-arch base means the Tiltfile's arm64 pin never leaks. Image build + smoke **verified
+  locally** (native build; corp proxy blocks the emulated amd64 cross-build — dev-only TLS edge, Actions
+  unaffected). **Gating item:** no git remote yet, so the workflow hasn't run on Actions / nothing is in
+  GHCR. Phase 0 committed on branch `phase-0-adapters-tracing`. Also landed a docs convention —
+  command-listing code blocks now read like real shell (`#` comments, single-line); applied to the
+  CLI-surface block in `02`.
 - **2026-06-19 — Phase 0 done + tracing.** Built the 2×2 adapter matrix + `pricing.py` (budget stop
   now bites); added `trace.py` (full-tree LangSmith tracing, auto-on, `None`-safe, verified live —
   user-requested as a global AI-app convention, now in global `CLAUDE.md`). New `ch14_economics`

@@ -1,0 +1,101 @@
+# loopkit Part III — Phase 1: the worker image, built multi-arch and pushed to GHCR.
+#
+# Why GitHub Actions (not the dev Tiltfile's `kind load`): DO nodes are amd64; Apple Silicon is
+# arm64. The Tiltfile pins linux/arm64 and side-loads into kind — that pin MUST NOT reach prod.
+# This workflow builds the SAME root Dockerfile via buildx for linux/amd64 (+arm64 for dev parity)
+# and pushes to GHCR, the one registry a real cluster can pull from.
+#
+# Acceptance (Phase 1): the image runs `fleet worker` on an amd64 node. The smoke step below runs
+# the freshly-built amd64 image on the amd64 GitHub runner — so acceptance is proven in CI, before
+# the DOKS cluster (Phase 2) exists. Pulling into the cluster uses the imagePullSecret recipe in
+# docs/architecture/02-cloud-architecture.md.
+name: worker-image
+
+on:
+  push:
+    branches: ["main"]
+    tags: ["v*"]
+    # Don't rebuild when only docs/tests change — the image bakes neither.
+    paths-ignore: ["docs/**", "tests/**", "**/*.md"]
+  pull_request:
+    paths-ignore: ["docs/**", "tests/**", "**/*.md"]
+  workflow_dispatch: {}
+
+env:
+  # ghcr.io/<owner>/loopkit-worker — owner is auto-derived, so this needs no hand-edits per fork.
+  IMAGE: ghcr.io/${{ github.repository_owner }}/loopkit-worker
+
+jobs:
+  build:
+    runs-on: ubuntu-latest # amd64 — the same arch as DO nodes, so the smoke test is representative.
+    permissions:
+      contents: read
+      packages: write # required to push to GHCR via the built-in GITHUB_TOKEN.
+    steps:
+      - uses: actions/checkout@v4
+
+      # QEMU lets one amd64 runner also emit the arm64 layer; buildx drives the multi-arch build.
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      # Tags: branch name, PR ref, semver (on v* tags), the commit sha, and `latest` on main.
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      # Build amd64 only, load into the runner's docker, and prove it runs BEFORE we push anything.
+      # This is the Phase-1 acceptance: `fleet worker` (and a full mock loop) execute on amd64.
+      - name: Build amd64 for smoke test
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          load: true
+          push: false
+          tags: loopkit-worker:smoke
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke test the amd64 image
+        run: |
+          set -euxo pipefail
+          # Entrypoint resolves and the package imports cleanly on amd64.
+          docker run --rm loopkit-worker:smoke --help
+          # The worker subcommand the k8s pod runs (`loopkit fleet worker …`) is wired.
+          docker run --rm loopkit-worker:smoke fleet worker --help
+          # doctor exercises config/agent/budget/tracing readouts (no network, no tokens).
+          docker run --rm loopkit-worker:smoke doctor || true
+          # A real loop end-to-end with the mock adapter — zero tokens, no Redis, proves the
+          # whole tick → gate → commit path runs inside the amd64 image.
+          docker run --rm loopkit-worker:smoke demo 12
+          docker run --rm loopkit-worker:smoke demo 14
+
+      # GHCR login is only needed to push; skip it on PRs (which build + smoke but don't push).
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # The real artifact: multi-arch (amd64 for prod, arm64 for dev parity), pushed on non-PR
+      # events. Reuses the buildx cache from the smoke build, so the amd64 layers aren't rebuilt.
+      - name: Build and push multi-arch
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

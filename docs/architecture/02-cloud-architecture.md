@@ -161,16 +161,43 @@ Each run gets its own namespace (siloing chosen in scope: *separation now, tight
 - **Per-run Secrets**, scoped to the namespace and GC'd with it.
 - A future **admission gate** can cap max concurrent runs cluster-wide; ⚪ planned.
 
-## Image & registry pipeline
+## Image & registry pipeline  (Phase 1 — Built 🟢)
+
+The build path is the **`worker-image` GitHub Actions workflow**
+([`.github/workflows/worker-image.yml`](../../.github/workflows/worker-image.yml)): buildx →
+`linux/amd64` (+`arm64` for dev parity) → **GHCR**. It builds amd64 **first**, runs that image on the
+amd64 runner (`fleet worker --help`, then `demo 12` + `demo 14` — a full mock loop, zero tokens, no
+Redis), and only then pushes multi-arch. That smoke step **is** the Phase-1 acceptance ("the image
+runs `fleet worker` on an amd64 node"), proven in CI before the cluster (Phase 2) exists.
 
 - **Registry: GHCR** (GitHub-centric to match `gh`/issues/PRs). DOKS pulls via an `imagePullSecret`.
 - **⚠️ Multi-arch is a real gotcha.** DO nodes are **amd64**; the dev `Tiltfile` pins `linux/arm64`
-  (Apple Silicon / Colima) and side-loads via `kind load`. Production **must build `linux/amd64`**
-  (or multi-arch) and **push to GHCR via GitHub Actions** — not `kind load`. Do not let the arm64 pin
-  leak into prod.
+  (Apple Silicon / Colima) and side-loads via `kind load`. The arm64 pin lives **only in the
+  Tiltfile** — the same root `Dockerfile` (`FROM python:3.13-slim`, a multi-arch base) builds either
+  arch under buildx, so the workflow reuses it without that pin. Don't let arm64 leak into prod.
 - **The worker image bakes the target toolchain + the agent CLIs** you want available
-  (`claude`, `codex`, plus the stack's test runner). Image size is the cold-start cost; nodes cache
-  it after first pull. Per-stack images are the scaling answer if one image grows too large. ⚪
+  (`claude`, `codex`, plus the stack's test runner). The root `Dockerfile` ships the Python toolchain
+  (git + pytest) so the demo-repo gates and the mock loop work out of the box; bake the agent CLIs +
+  target stack on top (the Dockerfile header marks that seam). Image size is the cold-start cost;
+  nodes cache it after first pull. Per-stack images are the scaling answer if one grows too large. ⚪
+
+**Pulling a private GHCR package** — one `docker-registry` secret per namespace, referenced by the
+pod. v1 uses a GitHub PAT scoped `read:packages`; a **GitHub App** is the v2 answer (see
+[`03`](03-adapters-and-auth.md#the-pluggable-credential-model)). A *public* package needs no secret
+at all (simplest if the repo is public).
+
+```bash
+kubectl create secret docker-registry ghcr-pull --namespace <run-ns> --docker-server=ghcr.io --docker-username=<gh-user> --docker-password=$GHCR_READ_PACKAGES_PAT  # one paste-ready line
+```
+
+```yaml
+spec:
+  imagePullSecrets:
+    - name: ghcr-pull                                 # the secret created above
+  containers:
+    - name: worker
+      image: ghcr.io/<owner>/loopkit-worker:latest    # built + pushed by .github/workflows/worker-image.yml
+```
 
 ## Scaling
 
