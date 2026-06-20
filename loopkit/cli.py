@@ -33,6 +33,10 @@ app = typer.Typer(add_completion=False, no_args_is_help=True,
 fleet_app = typer.Typer(add_completion=False, no_args_is_help=True,
                         help="Run the loop as a queue-driven fleet of workers (Chapter 12).")
 app.add_typer(fleet_app, name="fleet")
+cloud_app = typer.Typer(add_completion=False, no_args_is_help=True,
+                        help="Drive the loop on a managed Kubernetes cluster (Part III). "
+                             "Pins the expected DOKS context and refuses any other.")
+app.add_typer(cloud_app, name="cloud")
 console = Console()
 err = Console(stderr=True)
 
@@ -379,6 +383,127 @@ def fleet_evolve(
     winner = result.winner
     console.print(f"winner: [green]{winner.branch}[/]" if winner else "[yellow]no validated winner[/]")
     raise typer.Exit(0 if winner else 2)
+
+
+# --------------------------------------------------------------------------------------------
+# loopkit cloud — the Part III control plane (Phase 2: context guard + bootstrap).
+# --------------------------------------------------------------------------------------------
+# `kubernetes` is the [cloud] extra. The cloud extension module imports it lazily, but the *read*
+# commands here still need it present to talk to a cluster — so guard with a clear install hint
+# rather than letting an ImportError surface raw.
+def _require_cloud_extra() -> None:
+    if importlib.util.find_spec("kubernetes") is None:
+        err.print("[red]cloud[/] the kubernetes client is not installed "
+                  r"(pip install 'loopkit\[cloud]').")
+        raise typer.Exit(1)
+
+
+@cloud_app.command("context")
+def cloud_context(
+        context: str | None = typer.Option(None, "--context", envvar="LOOPKIT_CLOUD_CONTEXT",
+                                            help="Expected cluster context to pin (allowlist; comma-separated)."),
+        kubeconfig: Path | None = typer.Option(None, "--kubeconfig", envvar="KUBECONFIG",
+                                                help="Kubeconfig file (default: KUBECONFIG / ~/.kube/config).")) -> None:
+    """Show the active kube context and whether the guard would allow a mutating command (read-only).
+
+    Safe to run against any cluster — it only *reads* the current context. Use it before `bootstrap`
+    to confirm you're pointed at the intended DOKS cluster.
+    """
+    _require_cloud_extra()
+    from .extensions import cloud
+    current = cloud.current_context(kubeconfig)
+    expected = cloud.resolve_expected(context)
+    try:
+        cloud.check_context(current, context)
+        status, detail = "[green]allowed[/]", f"context {current} is pinned"
+    except cloud.ContextError as exc:
+        status, detail = "[red]refused[/]", str(exc)
+    table = Table(title="loopkit cloud context", header_style="bold")
+    table.add_column("field")
+    table.add_column("value", overflow="fold")
+    table.add_row("current context", escape(str(current or "—")))
+    table.add_row("expected (pinned)", escape(", ".join(expected) or "— (nothing pinned)"))
+    table.add_row("guard", f"{status} {escape(detail)}")
+    console.print(table)
+
+
+@cloud_app.command("doctor")
+def cloud_doctor(
+        context: str | None = typer.Option(None, "--context", envvar="LOOPKIT_CLOUD_CONTEXT",
+                                            help="Expected cluster context to pin (allowlist; comma-separated)."),
+        kubeconfig: Path | None = typer.Option(None, "--kubeconfig", envvar="KUBECONFIG")) -> None:
+    """Pre-flight the cloud control plane: extra installed, kubeconfig readable, context pinned + matching."""
+    table = Table(title="loopkit cloud doctor", show_header=True, header_style="bold")
+    table.add_column("check")
+    table.add_column("status")
+    table.add_column("detail", overflow="fold")
+
+    have_extra = importlib.util.find_spec("kubernetes") is not None
+    table.add_row("kubernetes client", "[green]ok[/]" if have_extra else "[red]missing[/]",
+                  r"loopkit\[cloud] installed" if have_extra else r"pip install 'loopkit\[cloud]'")
+    if not have_extra:
+        console.print(table)
+        raise typer.Exit(1)
+
+    from .extensions import cloud
+    expected = cloud.resolve_expected(context)
+    table.add_row("expected context", "[green]pinned[/]" if expected else "[red]unpinned[/]",
+                  ", ".join(expected) or f"set --context or ${cloud.ENV_CONTEXT} (fail-closed)")
+    try:
+        current = cloud.current_context(kubeconfig)
+        table.add_row("kubeconfig", "[green]ok[/]", f"active context {current or '—'}")
+    except cloud.ContextError as exc:
+        table.add_row("kubeconfig", "[red]fail[/]", escape(str(exc)))
+        console.print(table)
+        raise typer.Exit(1)
+    try:
+        cloud.check_context(current, context)
+        table.add_row("context guard", "[green]ok[/]", f"{current} is pinned — mutations allowed")
+        ok = True
+    except cloud.ContextError as exc:
+        table.add_row("context guard", "[red]refused[/]", escape(str(exc)))
+        ok = False
+
+    manifests = sorted(p.name for p in cloud.DEFAULT_MANIFEST_DIR.glob("*.yaml"))
+    table.add_row("system manifests", "[green]ok[/]" if manifests else "[yellow]none[/]",
+                  f"{len(manifests)} in {cloud.DEFAULT_MANIFEST_DIR.name}/: {', '.join(manifests)}")
+    console.print(table)
+    raise typer.Exit(0 if ok else 1)
+
+
+@cloud_app.command("bootstrap")
+def cloud_bootstrap(
+        context: str | None = typer.Option(None, "--context", envvar="LOOPKIT_CLOUD_CONTEXT",
+                                            help="Expected cluster context to pin (allowlist; comma-separated)."),
+        kubeconfig: Path | None = typer.Option(None, "--kubeconfig", envvar="KUBECONFIG"),
+        yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt.")) -> None:
+    """One-time: apply ns/loopkit-system (Redis, RBAC, NetworkPolicy) — guarded by the context pin.
+
+    The context-safety guard runs first and refuses any context but the pinned one, so this can never
+    mutate the wrong cluster. Idempotent: re-running converges (already-present objects are skipped).
+    """
+    _require_cloud_extra()
+    from .extensions import cloud
+    # Show the target + guard verdict before doing anything; mutating a cloud cluster needs intent.
+    try:
+        current = cloud.check_context(cloud.current_context(kubeconfig), context)
+    except cloud.ContextError as exc:
+        err.print(f"[red]refused[/] {escape(str(exc))}")
+        raise typer.Exit(1)
+    console.print(Panel.fit(
+        f"apply [bold]ns/loopkit-system[/] (Redis · RBAC · NetworkPolicy)\n"
+        f"context [bold]{current}[/] · manifests {cloud.DEFAULT_MANIFEST_DIR}",
+        title="loopkit cloud bootstrap"))
+    if not yes and not typer.confirm(f"Apply system manifests to '{current}'?"):
+        err.print("[yellow]aborted[/]")
+        raise typer.Exit(1)
+    try:
+        result = cloud.bootstrap(expected=context, kubeconfig=str(kubeconfig) if kubeconfig else None)
+    except cloud.ContextError as exc:
+        err.print(f"[red]refused[/] {escape(str(exc))}")
+        raise typer.Exit(1)
+    console.print(f"[green]bootstrapped[/] {result.context} · applied {len(result.applied)} manifest(s): "
+                  f"{', '.join(result.applied)}")
 
 
 def _fleet_table(fleet) -> Table:

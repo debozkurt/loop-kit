@@ -25,7 +25,20 @@ LOOPKIT         ?= .venv/bin/loopkit
 # Exported to every recipe's environment — this is the isolation guarantee, not a per-command flag.
 export KUBECONFIG = $(KUBECONFIG_FILE)
 
-.PHONY: fleet-up fleet-down fleet-nodes tilt-up tilt-down fleet-run fleet-evolve test demo help
+# --- Part III cloud (DOKS) -------------------------------------------------------------------
+# The cloud control plane gets its OWN repo-local kubeconfig (same isolation property as the kind
+# fleet above): `doctl ... kubeconfig save --kubeconfig .kube/loopkit-cloud.yaml` writes there, NOT
+# into ~/.kube/config, so the host's personal contexts are never touched or merged. Every cloud
+# recipe overrides KUBECONFIG inline (the global export points at the kind cluster) and pins
+# LOOPKIT_CLOUD_CONTEXT so loopkit's context-safety guard refuses any other cluster.
+DO_CLUSTER       ?= loopkit-prod
+DO_REGION        ?= nyc1
+CLOUD_CONTEXT    ?= do-$(DO_REGION)-$(DO_CLUSTER)
+CLOUD_KUBECONFIG := $(CURDIR)/.kube/loopkit-cloud.yaml
+CLOUD_ENV         = KUBECONFIG=$(CLOUD_KUBECONFIG) LOOPKIT_CLOUD_CONTEXT=$(CLOUD_CONTEXT)
+
+.PHONY: fleet-up fleet-down fleet-nodes tilt-up tilt-down fleet-run fleet-evolve \
+        cloud-provision cloud-kubeconfig cloud-context cloud-doctor cloud-bootstrap test demo help
 
 help:
 	@grep -E '^[a-zA-Z_-]+:.*?# ' $(MAKEFILE_LIST) | sort | \
@@ -64,6 +77,27 @@ fleet-run: # coordinator: blind fan-out over the queue (requires `make tilt-up` 
 
 fleet-evolve: # coordinator: evolutionary search over the queue
 	@$(LOOPKIT) fleet evolve --redis-url $(REDIS_LOCAL)
+
+cloud-provision: # print the DOKS provisioning recipe (system + autoscaling worker node pools)
+	@echo "Provision a DOKS cluster (needs doctl + a DO token). Node pools per docs/architecture/02:"
+	@echo "  doctl kubernetes cluster create $(DO_CLUSTER) --region $(DO_REGION) \\"
+	@echo "    --node-pool 'name=system;size=s-2vcpu-4gb;count=1' \\"
+	@echo "    --node-pool 'name=worker;size=s-4vcpu-8gb;auto-scale=true;min-nodes=0;max-nodes=8' \\"
+	@echo "    --kubeconfig $(CLOUD_KUBECONFIG)        # repo-local — never ~/.kube/config"
+	@echo "Then: make cloud-doctor && make cloud-bootstrap"
+
+cloud-kubeconfig: .kube # fetch the DOKS kubeconfig into the repo-local file (host ~/.kube untouched)
+	@doctl kubernetes cluster kubeconfig save $(DO_CLUSTER) --kubeconfig $(CLOUD_KUBECONFIG)
+	@echo "wrote $(CLOUD_KUBECONFIG) (context $(CLOUD_CONTEXT)); host ~/.kube/config not modified"
+
+cloud-context: # show the active cloud context + whether the guard allows mutations (read-only)
+	@$(CLOUD_ENV) $(LOOPKIT) cloud context
+
+cloud-doctor: # pre-flight the cloud control plane (extra, kubeconfig, pinned + matching context)
+	@$(CLOUD_ENV) $(LOOPKIT) cloud doctor
+
+cloud-bootstrap: # apply ns/loopkit-system (Redis, RBAC, NetworkPolicy) — guarded by the context pin
+	@$(CLOUD_ENV) $(LOOPKIT) cloud bootstrap
 
 test: # run the unit suite (fakeredis + MockAgent — no cluster, no tokens)
 	@.venv/bin/python -m pytest -q

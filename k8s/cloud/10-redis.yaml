@@ -1,0 +1,123 @@
+# Redis — the only in-cluster *durable* state: the per-run task queue + results hash (Part III).
+#
+# This is the production counterpart to the dev fleet's ephemeral Redis (k8s/redis.yaml runs
+# `--save "" --appendonly no` because a dev queue is throwaway). Production MUST survive a Redis pod
+# restart: a run mid-flight has paid-for results in the hash, and dropping them would re-burn tokens.
+# So this is a StatefulSet with:
+#   * AOF on (`appendonly yes`, fsync every second) — the write-ahead log replays on restart.
+#   * a PersistentVolumeClaim (volumeClaimTemplate) — the AOF + data survive the pod, and the stable
+#     identity `redis-0` keeps the same PVC across reschedules.
+# One shared Redis serves every run; isolation is logical (per-run keyspace `{run-<id>}:tasks` /
+# `:results`, already implemented by RedisQueue(namespace=...)), so no cross-run data is mixed.
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: redis-config
+  namespace: loopkit-system
+  labels:
+    app: redis
+    app.kubernetes.io/part-of: loopkit
+data:
+  redis.conf: |
+    # AOF is the durability mechanism (RDB snapshots disabled): every write is appended to the log,
+    # fsync'd once per second — at most ~1s of writes lost on a hard crash, which for a work queue
+    # means a task may be re-run, never silently dropped.
+    appendonly yes
+    appendfsync everysec
+    save ""
+    dir /data
+    # Never evict queue/result keys to free memory — losing a task or a paid result is a correctness
+    # bug, not a cache miss. Size the PVC/limits so this can't be hit in practice.
+    maxmemory-policy noeviction
+---
+# Headless governing Service: gives the StatefulSet pod stable DNS. Clients connect to
+# `redis.loopkit-system.svc.cluster.local:6379` (in-cluster) — no port-forward, no :16379 collision
+# (that dev-only remap exists only because a laptop may run a local redis-server on 6379).
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: loopkit-system
+  labels:
+    app: redis
+    app.kubernetes.io/part-of: loopkit
+spec:
+  clusterIP: None
+  selector:
+    app: redis
+  ports:
+    - name: redis
+      port: 6379
+      targetPort: 6379
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: redis
+  namespace: loopkit-system
+  labels:
+    app: redis
+    app.kubernetes.io/part-of: loopkit
+spec:
+  serviceName: redis
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+        app.kubernetes.io/part-of: loopkit
+    spec:
+      securityContext:
+        # Redis runs as its image's non-root `redis` user (uid 999); fsGroup makes the mounted PVC
+        # group-writable by that user so AOF/data files are writable without running as root.
+        runAsNonRoot: true
+        runAsUser: 999
+        fsGroup: 999
+      containers:
+        - name: redis
+          image: redis:7-alpine
+          command: ["redis-server", "/etc/redis/redis.conf"]
+          ports:
+            - containerPort: 6379
+          volumeMounts:
+            - name: config
+              mountPath: /etc/redis
+              readOnly: true
+            - name: data
+              mountPath: /data
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          readinessProbe:
+            exec:
+              command: ["redis-cli", "ping"]   # returns PONG only once Redis is serving
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket:
+              port: 6379
+            initialDelaySeconds: 10
+            periodSeconds: 10
+      volumes:
+        - name: config
+          configMap:
+            name: redis-config
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]   # DO block storage is RWO — fine, exactly one Redis pod mounts it
+        # DOKS default block-storage class. (On kind/local, drop this line to use the default
+        # provisioner.) RWO is sufficient because only redis-0 ever mounts this volume.
+        storageClassName: do-block-storage
+        resources:
+          requests:
+            storage: 5Gi

@@ -1,0 +1,89 @@
+# NetworkPolicy — default-deny + explicit allowlist for ns/loopkit-system (Part III, see 04).
+#
+# The network layer answers "exfiltration / lateral movement": a pod can only talk to what is
+# explicitly allowed. We start from deny-all (both directions) and add back the minimum: DNS,
+# intra-namespace (so the control plane / listener can reach Redis), and outbound HTTPS (so the
+# control plane can reach the Kubernetes API + GitHub + the LLM API) while blocking the cloud
+# metadata endpoint (a classic SSRF/credential-theft target).
+#
+# NOTE: this protects the shared *system* namespace. Each per-run `ns/run-<id>` gets its OWN, tighter
+# policy in Phase 3 — workers may egress only to GitHub, the agent API, and GHCR, nothing else.
+# DOKS runs Cilium, so FQDN-based egress is available there to tighten the CIDR allow below later.
+---
+# 1. Default-deny everything. With this in place, any flow not matched by an allow rule is dropped.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: loopkit-system
+  labels:
+    app.kubernetes.io/part-of: loopkit
+spec:
+  podSelector: {}            # every pod in the namespace
+  policyTypes: ["Ingress", "Egress"]
+  # no ingress/egress rules => deny all of both
+---
+# 2. Allow DNS egress to kube-dns (CoreDNS in kube-system). Without this, nothing resolves names —
+# not Redis, not GitHub, not the API server.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns-egress
+  namespace: loopkit-system
+  labels:
+    app.kubernetes.io/part-of: loopkit
+spec:
+  podSelector: {}
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+---
+# 3. Allow intra-namespace traffic both ways, so the control plane / webhook listener can reach
+# Redis (6379) and Redis can answer. `podSelector: {}` under from/to means "same namespace".
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-internal
+  namespace: loopkit-system
+  labels:
+    app.kubernetes.io/part-of: loopkit
+spec:
+  podSelector: {}
+  policyTypes: ["Ingress", "Egress"]
+  ingress:
+    - from:
+        - podSelector: {}
+  egress:
+    - to:
+        - podSelector: {}
+---
+# 4. Allow outbound HTTPS so the control plane can reach the Kubernetes API server, GitHub, and the
+# agent API — but BLOCK the link-local cloud metadata endpoint (169.254.169.254), a credential-theft
+# target. The two `except` blocks carve the metadata + link-local ranges out of the allow.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-https-egress
+  namespace: loopkit-system
+  labels:
+    app.kubernetes.io/part-of: loopkit
+spec:
+  podSelector: {}
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 169.254.0.0/16     # link-local, incl. the 169.254.169.254 metadata service
+      ports:
+        - protocol: TCP
+          port: 443

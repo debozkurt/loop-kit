@@ -1,8 +1,15 @@
-# 04 — Security model: the Ch 16 envelope at cloud scale (Designed 🟡)
+# 04 — Security model: the Ch 16 envelope at cloud scale (Designed 🟡 · controls Built 🟢 Phase 2)
 
 The single-loop safety envelope ([`01`](01-system-today.md#safety-envelope-ch-16--safetypy)) is
 **extended, not replaced**, on a shared multi-tenant cluster. This page is the threat model and the
 defense-in-depth that answers it.
+
+> **Built 🟢 (Phase 2):** the **control-plane context guard**
+> ([`loopkit/extensions/cloud.py`](../../loopkit/extensions/cloud.py)), the **default-deny
+> NetworkPolicy** + egress allowlist ([`k8s/cloud/30-networkpolicy.yaml`](../../k8s/cloud/30-networkpolicy.yaml)),
+> and the **least-privilege RBAC** ([`k8s/cloud/20-rbac.yaml`](../../k8s/cloud/20-rbac.yaml) —
+> `loopkit-control` is the only SA that may create namespaces/Jobs/Secrets; workers get a no-API SA).
+> Per-run Secrets, the per-run-namespace policies, and webhook HMAC remain 🟡 until Phases 3–4.
 
 ## Threat model
 
@@ -30,13 +37,13 @@ ServiceAccount, NetworkPolicy, Secret, and budget allow.
 | Layer | Control | Answers |
 |---|---|---|
 | **Tenant isolation** | namespace per run; `ResourceQuota`/`LimitRange`; per-run Redis keyspace | cross-tenant blast radius |
-| **Network** | `NetworkPolicy` **default-deny** + egress allowlist (GitHub, `api.anthropic.com`/OpenAI, GHCR) — and *nothing else*; **workers get no cluster-API access** | exfiltration, lateral movement |
-| **Identity** | least-privilege ServiceAccounts: **only `loopkit-control` may create namespaces/Jobs/Secrets**; workers run a no-API-access SA | privilege escalation |
+| **Network** 🟢 | `NetworkPolicy` **default-deny** + egress allowlist (GitHub, `api.anthropic.com`/OpenAI, GHCR) — and *nothing else*; **workers get no cluster-API access** | exfiltration, lateral movement |
+| **Identity** 🟢 | least-privilege ServiceAccounts: **only `loopkit-control` may create namespaces/Jobs/Secrets**; workers run a no-API-access SA | privilege escalation |
 | **Secrets** | per-run, namespace-scoped, mounted into pods only, **GC'd with the namespace**; etcd encryption-at-rest (or sealed-secrets/SOPS; Vault ⚪) | secret theft, persistence |
 | **Code egress** | **branch-only pushes** (never `main`), **draft** PRs, refuses forbidden branches, never force | malicious merges |
 | **Filesystem** | protected-path guard (agent can't touch `tests/`) + the pre-tool-use hook baked into the image | gaming the gate, destructive edits |
 | **Cost** | per-run loopkit budget stop + provider Console spend limit (two independent backstops) | runaway / abusive spend |
-| **Control plane** | context-safety guard on the CLI/kubectl (pin DOKS context, confirm mutations) | wrong-cluster accidents |
+| **Control plane** 🟢 | context-safety guard on the CLI/kubectl (pin DOKS context, fail-closed, confirm mutations) | wrong-cluster accidents |
 
 These compose: defeating one layer (say, a prompt injection that hijacks the agent) still leaves the
 attacker boxed by the network policy, the least-privilege SA, the branch-only push rule, the
@@ -70,13 +77,20 @@ Two backstops, independent on purpose (one can fail without removing the other):
 ## Control-plane / kubectl safety
 
 A managed cloud context (DOKS) is **production-sensitive** under the global kubectl-safety rule. The
-`loopkit cloud` CLI and any kubectl/helm use **must**:
+`loopkit cloud` CLI and any kubectl/helm use **must** (all three **Built 🟢 Phase 2** —
+[`loopkit/extensions/cloud.py`](../../loopkit/extensions/cloud.py) +
+[`Makefile`](../../Makefile) `cloud-*` targets):
 
 - **Pin the expected cluster context** and **refuse/confirm before mutating any other** — the dev
   `Tiltfile`'s `allow_k8s_contexts(...)` + `fail()` guarantee, extended to the real cloud context.
-- Prefer explicit `--context=<expected>` over ambient current-context for mutating operations.
-- Treat the repo-local `KUBECONFIG` isolation pattern from the `Makefile` as the model — credentials
-  for the loopkit cluster never merge into the user's personal `~/.kube/config`.
+  `check_context()` runs before every mutation (`bootstrap`, and every Phase-3 command on top) and is
+  **fail-closed**: no pin (neither `--context` nor `$LOOPKIT_CLOUD_CONTEXT`) → refuse, rather than
+  trusting the ambient context.
+- Prefer explicit `--context=<expected>` over ambient current-context for mutating operations — the
+  pin is *declared*, never inferred from whatever current-context happens to be.
+- Treat the repo-local `KUBECONFIG` isolation pattern from the `Makefile` as the model — the
+  `cloud-*` targets read `.kube/loopkit-cloud.yaml`, so cluster credentials never merge into the
+  user's personal `~/.kube/config`.
 
 This is the same discipline that kept the dev fleet from ever touching the host's other clusters; it
 matters more, not less, against a cloud control plane.

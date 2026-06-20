@@ -1,0 +1,88 @@
+# RBAC — least-privilege identities for the control plane (Part III security, see 04-security.md).
+#
+# Identity is a defense-in-depth layer: even a hijacked agent can only do what its ServiceAccount
+# allows. Two SAs, deliberately asymmetric:
+#   * loopkit-control — the ONLY identity permitted to create run namespaces, Jobs, and Secrets.
+#     The in-cluster control path (Phase-4 webhook listener + CronJobs) runs as this SA; the
+#     laptop/CI CLI uses the human's kubeconfig. Cluster-scoped because it creates *namespaces*.
+#   * loopkit-worker — the workers' SA, with NO cluster-API access at all (no Role bound to it) and
+#     token automounting OFF. A worker clones a repo and runs the loop; it never needs to read or
+#     mutate the cluster, so it can't. This is the "workers get no cluster-API access" rule.
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: loopkit-control
+  namespace: loopkit-system
+  labels:
+    app.kubernetes.io/part-of: loopkit
+---
+# Cluster-scoped: creating per-run *namespaces* is inherently cluster-level. The namespaced verbs
+# (jobs/secrets/…) are granted cluster-wide via a ClusterRoleBinding so loopkit-control can manage
+# resources inside any `ns/run-<id>` it creates, without pre-binding a Role in each (the namespaces
+# don't exist yet at bind time). Scope is intentionally narrow: the resource *kinds* a run needs and
+# nothing else (no nodes, no cluster RBAC editing, no arbitrary pod exec).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: loopkit-control
+  labels:
+    app.kubernetes.io/part-of: loopkit
+rules:
+  # Per-run namespaces: create on submit, delete on GC/kill.
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["create", "get", "list", "watch", "delete"]
+  # The run's workload: coordinator + worker Jobs (and their pods, for logs/status).
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "get", "list", "watch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+  # Per-run config + credentials, GC'd with the namespace.
+  - apiGroups: [""]
+    resources: ["secrets", "configmaps", "serviceaccounts"]
+    verbs: ["create", "get", "list", "delete"]
+  # The tenancy + isolation primitives stamped into each run namespace.
+  - apiGroups: [""]
+    resources: ["resourcequotas", "limitranges"]
+    verbs: ["create", "get", "delete"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["create", "get", "delete"]
+  # Bind the run's worker SA to its (empty/least-priv) role within the run namespace.
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["roles", "rolebindings"]
+    verbs: ["create", "get", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: loopkit-control
+  labels:
+    app.kubernetes.io/part-of: loopkit
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: loopkit-control
+subjects:
+  - kind: ServiceAccount
+    name: loopkit-control
+    namespace: loopkit-system
+---
+# The worker SA template. Created here as the reference identity; in Phase 3 the control plane
+# stamps an equivalent SA into each `ns/run-<id>`. No Role/RoleBinding references it anywhere, so it
+# has zero cluster-API permissions — and automounting its token is OFF so the pod never even sees a
+# credential it can't use. Containment over trust: a prompt-injected agent has nothing to escalate.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: loopkit-worker
+  namespace: loopkit-system
+  labels:
+    app.kubernetes.io/part-of: loopkit
+automountServiceAccountToken: false

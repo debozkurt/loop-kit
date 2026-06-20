@@ -1,0 +1,18 @@
+# ns/loopkit-system — the long-lived, shared control-plane namespace (Part III, Phase 2).
+#
+# This is the cloud analogue of the dev fleet's `loopkit` namespace (k8s/redis.yaml), but it holds
+# only the *shared infra* — Redis (queue + results), the control-plane RBAC, and later the webhook
+# listener. Each run gets its OWN ephemeral `ns/run-<id>` (created by loopkit-control in Phase 3);
+# keeping shared infra in its own namespace is the first ring of blast-radius containment, and lets
+# default-deny NetworkPolicy + RBAC be reasoned about per-namespace.
+#
+# Applied by `loopkit cloud bootstrap` (after the context-safety guard passes), or via
+# `kubectl apply --context=<doks-context> -f k8s/cloud/`.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: loopkit-system
+  labels:
+    app.kubernetes.io/part-of: loopkit
+    # Stable label so NetworkPolicy/peer selectors can target this namespace by name.
+    kubernetes.io/metadata.name: loopkit-system

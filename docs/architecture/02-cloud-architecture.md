@@ -1,4 +1,10 @@
-# 02 — Cloud architecture, Part III (Designed 🟡)
+# 02 — Cloud architecture, Part III (Designed 🟡 · foundation Built 🟢 Phase 2)
+
+> **Built 🟢 (Phase 2):** the control-plane *foundation* — the **context-safety guard** + `loopkit
+> cloud` sub-app ([`loopkit/extensions/cloud.py`](../../loopkit/extensions/cloud.py)) and the
+> **`ns/loopkit-system` manifests** ([`k8s/cloud/`](../../k8s/cloud/)): the **Redis StatefulSet (AOF
+> + PVC)**, `loopkit-control` RBAC, and default-deny NetworkPolicy. The run *mechanics* below
+> (coordinator/worker Jobs, per-run namespaces, `create_run()`) remain 🟡 until Phase 3.
 
 The target system: loopkit **deployed to a managed cloud cluster (DigitalOcean DOKS), running many
 jobs in production** — concurrent, scheduled, and event-triggered — with the Ch 16 safety envelope
@@ -106,10 +112,11 @@ The cost-and-complexity win here is recognizing how little needs to survive a po
   - **A shared long-lived PVC across workers is ruled out by a hard DO constraint:** DO block storage
     is **ReadWriteOnce** — a single volume can't be mounted by pods across nodes. RWX would need
     DO's managed NFS/filesystem; not worth standing up for disposable scratch.
-- **Redis StatefulSet + one PVC, with AOF.** The only in-cluster durable state is the queue +
-  results. The dev Redis is intentionally ephemeral (`--save "" --appendonly no`); **production must
-  enable AOF** (`--appendonly yes` + the PVC) so a Redis pod restart doesn't drop the results hash
-  mid-run and waste paid tokens. Each run uses a distinct **Redis keyspace** (`RedisQueue(namespace=
+- **Redis StatefulSet + one PVC, with AOF.** *(Built 🟢 Phase 2 —
+  [`k8s/cloud/10-redis.yaml`](../../k8s/cloud/10-redis.yaml).)* The only in-cluster durable state is
+  the queue + results. The dev Redis is intentionally ephemeral (`--save "" --appendonly no`);
+  **production enables AOF** (`appendonly yes` + the PVC volumeClaimTemplate, `noeviction`) so a Redis
+  pod restart doesn't drop the results hash mid-run and waste paid tokens. Each run uses a distinct **Redis keyspace** (`RedisQueue(namespace=
   run-<id>)` already keys `{ns}:tasks`/`{ns}:results`) so one shared Redis serves every run with no
   cross-talk; the coordinator deletes the keyspace (or sets a TTL) on finish.
 - **Skills flywheel = a dedicated `loopkit-skills` git repo.** The one piece of cross-run *learned*
@@ -131,10 +138,14 @@ webhook-listener + CronJob pods via in-cluster ServiceAccount (`load_incluster_c
 submissions **never depend on one engineer's machine**: the in-cluster triggers stand alone, and the
 CLI is a convenience client usable anywhere.
 
-The CLI surface (the "simple management system"):
+The CLI surface (the "simple management system") — **Built 🟢 Phase 2:** `bootstrap` + the
+`context`/`doctor` status helpers; **🟡 Phase 3:** `run`/`ls`/`status`/`logs`/`kill`; **🟡 Phase
+4–5:** `register`/`schedule`/`creds`:
 
 ```bash
-loopkit cloud bootstrap                                 # one-time: ns/loopkit-system, Redis, listener, RBAC
+loopkit cloud bootstrap                                 # one-time: ns/loopkit-system, Redis, RBAC, NetworkPolicy (guarded)
+loopkit cloud context                                   # show active context + whether the guard allows mutations (read-only)
+loopkit cloud doctor                                    # pre-flight: [cloud] extra, kubeconfig, context pinned + matching
 loopkit cloud register <repo> --env … --adapter …       # target ConfigMap: gates, budget, workers, key map
 loopkit cloud run --target <repo> [--goal G | --from-issues --label L] [--workers N] [--env prod|dev] [--adapter claude-code|claude-api|codex|openai-api]  # start a run (one of --goal | --from-issues)
 loopkit cloud ls                                        # list runs across run-* namespaces: phase, done/total, cost
@@ -146,10 +157,15 @@ loopkit cloud schedules | unschedule <name>             # list / remove schedule
 loopkit cloud creds set --as <eng> --adapter …          # register a per-engineer key (see 03)
 ```
 
-**Non-negotiable — the context-safety guard.** A managed cloud context is production-sensitive (the
-global kubectl-safety rule). The CLI **pins the expected DOKS context and refuses/confirms before
-mutating any other** — the same `allow_k8s_contexts` + `fail()` guarantee the `Tiltfile` enforces,
-now protecting a real cloud. See [`04-security.md`](04-security.md).
+**Non-negotiable — the context-safety guard. (Built 🟢 Phase 2 —
+[`loopkit/extensions/cloud.py`](../../loopkit/extensions/cloud.py).)** A managed cloud context is
+production-sensitive (the global kubectl-safety rule). The CLI **pins the expected DOKS context and
+refuses/confirms before mutating any other** — the same `allow_k8s_contexts` + `fail()` guarantee the
+`Tiltfile` enforces, now protecting a real cloud. The guard is **fail-closed**: with no context
+pinned (neither `--context` nor `$LOOPKIT_CLOUD_CONTEXT`) it refuses rather than acting on the
+ambient context, and it never infers the target from current-context. `check_context()` is pure (no
+client, no cluster) so the safety property is exhaustively unit-tested; `bootstrap` runs it *before*
+any apply, and confirms before mutating. See [`04-security.md`](04-security.md).
 
 ## Tenancy — namespace per run
 
