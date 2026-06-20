@@ -32,7 +32,7 @@ Every load-bearing fork is decided. Detail + rationale live in the architecture 
 | **Control plane** | **CLI + CronJobs + webhook listener** → one `create_run()`; operator/CRD = v2 | [`02`](architecture/02-cloud-architecture.md#control-plane--one-path-three-entry-points) |
 | **CLI ↔ k8s** | Python **kubernetes client** (`loopkit[cloud]`); cloud-agnostic; runs laptop **or** in-cluster | [`02`](architecture/02-cloud-architecture.md#control-plane--one-path-three-entry-points) |
 | **Worker scaling** | **Fixed `--workers N`** for v1; KEDA `ScaledJob` later | [`02`](architecture/02-cloud-architecture.md#scaling) |
-| **Registry/image** | **GHCR**, **multi-arch amd64** built via GitHub Actions (not `kind load`) | [`02`](architecture/02-cloud-architecture.md#image--registry-pipeline) |
+| **Registry/image** (Built 🟢 Phase 1) | **GHCR**, **multi-arch amd64** built via GitHub Actions (not `kind load`); `imagePullSecret` recipe | [`02`](architecture/02-cloud-architecture.md#image--registry-pipeline) |
 | **Adapters** | Full 2×2: `claude-code` / `claude-api` / `codex` / `openai-api` behind the `Agent` protocol | [`03`](architecture/03-adapters-and-auth.md#the-agent-protocol--the-22-adapter-matrix) |
 | **Agent auth** | **Pluggable** per `(env, adapter, submitter)`: OAuth token **or** API key; per-submitter keys (Option 1 hardened, Vault later) | [`03`](architecture/03-adapters-and-auth.md#the-pluggable-credential-model) |
 | **Billing** | Dedicated **API key for prod** (subscription subsidy ended 2026-06-15); subscription token for dev | [`03`](architecture/03-adapters-and-auth.md#billing--cost-control) |
@@ -81,8 +81,8 @@ proven before the trigger surface is built on top of it.
 ## Gap inventory
 
 **🔴 v1-critical** (don't ship without these)
-- Multi-arch **amd64** build pipeline (the dev `Tiltfile` pins arm64 + `kind load` — do not leak that
-  into prod).
+- ✅ **Multi-arch amd64 build pipeline** — *built (Phase 1)*: the `worker-image` Actions workflow →
+  GHCR (the dev `Tiltfile`'s arm64 + `kind load` stays dev-only). Goes live once the repo has a remote.
 - Redis **AOF** durability (dev Redis is ephemeral by design).
 - **NetworkPolicy** default-deny + egress allowlist; **least-privilege SAs** (workers get no
   cluster-API access).

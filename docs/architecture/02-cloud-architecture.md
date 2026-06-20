@@ -161,9 +161,9 @@ Each run gets its own namespace (siloing chosen in scope: *separation now, tight
 - **Per-run Secrets**, scoped to the namespace and GC'd with it.
 - A future **admission gate** can cap max concurrent runs cluster-wide; ⚪ planned.
 
-## Image & registry pipeline  (Phase 1 — Built 🟢)
+## Image & registry pipeline
 
-The build path is the **`worker-image` GitHub Actions workflow**
+**Built 🟢 (Phase 1).** The build path is the **`worker-image` GitHub Actions workflow**
 ([`.github/workflows/worker-image.yml`](../../.github/workflows/worker-image.yml)): buildx →
 `linux/amd64` (+`arm64` for dev parity) → **GHCR**. It builds amd64 **first**, runs that image on the
 amd64 runner (`fleet worker --help`, then `demo 12` + `demo 14` — a full mock loop, zero tokens, no
