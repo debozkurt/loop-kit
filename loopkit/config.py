@@ -17,9 +17,10 @@ from pydantic import BaseModel, Field, field_validator
 class AgentConfig(BaseModel):
     """How to invoke the model (Ch 1-3) and the budget ceiling it runs under (Ch 14)."""
 
-    adapter: str = "mock"                 # mock | claude-code | codex
-    model: str | None = None
+    adapter: str = "mock"                 # mock | claude-code | codex | claude-api | openai-api
+    model: str | None = None              # provider default if None (e.g. claude-opus-4-8 for claude-api)
     max_cost_usd: float = Field(default=10.0, ge=0)
+    max_tool_calls: int = Field(default=25, ge=1)   # per-tick tool-call cap for the API adapters
     args: list[str] = Field(default_factory=list)
 
 
@@ -71,6 +72,20 @@ class RemoteConfig(BaseModel):
     draft: bool = True                    # open the PR/MR as a draft (a human reviews + merges)
 
 
+class TraceConfig(BaseModel):
+    """LangSmith full-tree tracing (Ch 14-15 observability) — optional, auto-on by default.
+
+    Traces capture the full human-readable input/output of every step, all tool use, and organized
+    cost/usage/model metadata — the rich complement to the always-on payload-free logs. `langsmith`
+    is an optional extra (`loopkit[trace]`); when `enabled` is None (the default), tracing turns on
+    automatically iff `langsmith` is installed *and* a LangSmith API key (or `LANGSMITH_TRACING`) is
+    in the environment. Set `enabled = true`/`false` to force it; nothing is captured when off.
+    """
+
+    enabled: bool | None = None           # None = auto (on iff langsmith + a LangSmith key present)
+    project: str | None = None            # LangSmith project; falls back to env, then "loopkit"
+
+
 class Config(BaseModel):
     """The whole loop as one object. `goal` and `gate.iteration` are the only required fields."""
 
@@ -83,6 +98,7 @@ class Config(BaseModel):
     stops: StopsConfig = Field(default_factory=StopsConfig)
     safety: SafetyConfig = Field(default_factory=SafetyConfig)
     remote: RemoteConfig = Field(default_factory=RemoteConfig)
+    trace: TraceConfig = Field(default_factory=TraceConfig)
 
     @field_validator("goal")
     @classmethod

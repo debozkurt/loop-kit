@@ -534,8 +534,10 @@ def make_repo_runner(repo_source: str, *, gate_iteration: str, gate_acceptance: 
                                     allow_branches=[f"{branch_prefix}/*"]),
                 remote=remote)
             agent = agent_factory(task) if agent_factory else build_agent(cfg.agent)
+            # Tag the LangSmith trace with the task id so every run in a fleet is attributable.
             result = run_loop(cfg, agent, iteration_gate=ShellGate(gate_iteration),
-                              acceptance_gate=ShellGate(gate_acceptance))
+                              acceptance_gate=ShellGate(gate_acceptance),
+                              trace_metadata={"task": task_id, "issue": task.get("issue")})
             score, revalidated = _grade(result)
             # Outward edge: a solved branch is pushed + (optionally) a PR opened, only when the
             # repo's [remote] is enabled. The issue number rides through so the PR closes it.

@@ -6,11 +6,13 @@ toward the goal, tick by tick, with the guardrails that keep an autonomous loop 
 off a cliff: an external verification gate, a **held-out acceptance gate**, three hard stops,
 durable git state, and a blast-radius safety envelope.
 
-```
-prompt ─▶ agent ─▶ guard ─▶ commit ─▶ review ─▶ iteration gate ─┬─▶ held-out acceptance ─▶ DONE
-   ▲                                                            │
-   └────────── feedback (gate or review failure) ◀──────────────┘
-                    hard stops every tick:  budget ▸ no-progress ▸ cap
+```mermaid
+%%{init: {'theme':'base','themeVariables':{'background':'#1b1b1b','primaryColor':'#2b2b2b','primaryTextColor':'#e6e6e6','primaryBorderColor':'#5a5a5a','lineColor':'#8a8a8a','fontSize':'13px'}}}%%
+flowchart LR
+  P["prompt"] --> A["agent"] --> G["guard"] --> C["commit"] --> R["review"] --> I["iteration gate"] --> H["held-out acceptance"] --> D(["DONE"])
+  I -- "feedback" --> P
+  H -- "feedback" --> P
+  C --> S["hard stops<br/>budget · no-progress · cap"]
 ```
 
 That's the **single-agent core**. On top of it, the `loopkit/extensions/` layer adds three
@@ -25,6 +27,10 @@ out and the core behaves exactly as above. See *Beyond one loop* below.
 python3 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"        # or: pip install -e .
 ```
+
+The core is just `typer + rich + pydantic`. Everything heavy is an optional extra, imported lazily:
+`[claude]`/`[openai]` (the API-adapter SDKs), `[trace]` (LangSmith tracing), `[fleet]` (Redis).
+`pip install loopkit` pulls none of them; `[agents]` = both API SDKs, `[all]` = everything.
 
 ## Quickstart
 
@@ -70,12 +76,14 @@ Each module implements one part of the manual and is a named, swappable seam:
 | Module | What it is | Chapter |
 |---|---|---|
 | `config.py` | the one Config object — the whole loop as one file | 18 |
-| `agent.py` | the model as a subroutine (`claude-code` · `codex` · `mock`) | 1–3 |
+| `agent.py` | the model as a subroutine — the 2×2 matrix: `claude-code`·`codex` (CLI), `claude-api`·`openai-api` (SDK), `mock` | 1–3 |
+| `pricing.py` | per-model cost table → exact per-tick `cost_usd` (makes the budget stop bite) | 14 |
 | `prompt.py` | fixed prompt, fresh context, anchor files | 4–5 |
 | `gate.py` | the iteration gate and the held-out acceptance gate | 6–7, 9 |
 | `stops.py` | the three hard stops + precedence | 13–14 |
 | `durability.py` | commit every tick; state signature; resume from git | 15 |
 | `safety.py` | blast-radius preflight + protected-path guard | 16 |
+| `log.py` / `trace.py` | two-layer observability: payload-free logs **+** optional full-tree LangSmith traces | 14–15 |
 | `loop.py` | the controller that wires them — the tick lifecycle | 1–3, 7, 13 |
 | `extensions/review.py` | continuous review hook (gates done on a clean diff) | 8 |
 | `extensions/orchestrate.py` | supervisor: fan-out + evolutionary, over git worktrees | 10–12 |
@@ -163,8 +171,8 @@ goal = "Describe exactly what 'done' means."
 branch = "loopkit/run"           # never main/master
 
 [agent]
-adapter = "claude-code"          # mock | claude-code | codex
-max_cost_usd = 5.0               # budget ceiling
+adapter = "claude-code"          # mock | claude-code | codex | claude-api | openai-api
+max_cost_usd = 5.0               # budget ceiling — bites on real cost (see `loopkit doctor`)
 
 [gate]
 iteration  = "python -m pytest tests/seen -q"
@@ -178,6 +186,10 @@ no_progress_after = 3
 protected_paths = ["tests/"]     # the loop may not touch these
 require_clean_tree = true
 allow_branches = ["loopkit/*"]
+
+# [trace]                          # optional LangSmith tracing (auto-on when langsmith + a key set)
+# enabled = true                   # omit for auto; true/false forces it
+# project = "loopkit"
 ```
 
 ## Use it on your own repo
@@ -246,6 +258,25 @@ allowed branch, commits every tick to its own branch (never force-pushes), rever
 if the agent touches a protected path, and stops at the budget ceiling regardless of progress.
 `loopkit doctor` reports all of this before you run.
 
+## Observability — logs + traces
+
+Two layers, by design. **Logs** are always on and **payload-free** (`[loopkit][component]` + run id,
+ids/lengths/counts only — safe to ship anywhere). **Traces** are optional and rich: enable
+`loopkit[trace]` and tracing auto-activates when a LangSmith key is present, emitting a full run tree
+— `loopkit run → tick → agent → llm/tool → gates` — with the human-readable input/output of every
+step, all tool calls, and exact `cost_usd`/usage/model metadata on each span (the same cost
+`pricing.py` feeds the budget stop). A trace backend is the one controlled place payloads belong, so
+this never weakens the never-log-payloads rule.
+
+```bash
+pip install -e ".[trace]"                  # optional; pulls langsmith
+export LANGSMITH_API_KEY=...               # (and LANGSMITH_PROJECT to name the project)
+loopkit run                                # traces appear automatically; loopkit doctor shows status
+```
+
+It's a clean no-op without the extra/key, nests via LangSmith contextvars (no tracer threaded
+through any contract), and the fleet inherits it — each worker's run traces, tagged by task id.
+
 ## Sandboxed runs (Docker)
 
 ```bash
@@ -268,8 +299,9 @@ Everything `loopkit` exposes. Run any command with `--help` for the live version
 **`loopkit init [PATH]`** — scaffold a starter `loopkit.toml` + `PROMPT.md` in `PATH` (default `.`;
 never overwrites).
 
-**`loopkit doctor`** — preflight: is this repo safe to point the loop at? (branch, agent on PATH,
-gates). Exits non-zero if preflight fails.
+**`loopkit doctor`** — preflight: is this repo safe to point the loop at? Reports branch safety, the
+agent (CLI binary on PATH, or API SDK + key), whether the **budget** can bite (model is priced), the
+**gates**, and **tracing** status. Exits non-zero if preflight fails.
 - `-c, --config PATH` — config file (default `loopkit.toml`).
 
 **`loopkit run`** — run the loop until it reaches a terminal (DONE / a hard stop).
@@ -287,7 +319,8 @@ gates). Exits non-zero if preflight fails.
 **`loopkit learn [CHAPTER]`** — the same scenarios, narrated, with a pause between beats.
 - `--live` — as above.
 
-Scenarios available: `5, 7, 8, 9, 10, 11, 12, 13, 16, 17` (try `loopkit demo 9` and `loopkit demo 12`).
+Scenarios available: `5, 7, 8, 9, 10, 11, 12, 13, 14, 16, 17` (try `loopkit demo 9`, `loopkit demo 12`,
+and `loopkit demo 14` — the 2×2 adapter matrix + real cost making the budget stop bite).
 
 ### Fleet — many loops (Chapter 12)
 
@@ -337,25 +370,28 @@ repo: [`docs/USING-ON-YOUR-REPO.md`](docs/USING-ON-YOUR-REPO.md).
 ## Develop
 
 ```bash
-pip install -e ".[dev]"          # core + pytest + fakeredis;  add [fleet] for the redis client
-pytest -q                        # MockAgent-driven; no coding-agent binary, no tokens
+pip install -e ".[dev]"          # core + pytest + fakeredis + truststore;  add [fleet]/[claude]/[openai]/[trace] as needed
+pytest -q                        # MockAgent + injected fakes; no agent binary, no SDK keys, no tokens
 ```
 
 ## Roadmap
 
 **Done:** the single-agent core; the Part II library (supervisor fan-out + evolutionary Ch 10–12,
 continuous review Ch 8, skill write-back Ch 17); the **dev fleet** (Redis queue, worker containers,
-Tilt on an isolated kind cluster, verified live); and **real-target** support — `loopkit run --repo`
+Tilt on an isolated kind cluster, verified live); **real-target** support — `loopkit run --repo`
 / `fleet worker --target` (any repo), `[remote]` push + draft PR via `gh`/`glab`, and
-`fleet run --from-issues` (GitHub/GitLab issues → tasks).
+`fleet run --from-issues` (GitHub/GitLab issues → tasks); and **Part III Phase 0** — the **2×2
+adapter matrix** (`claude-api`/`openai-api` + `codex` alongside `claude-code`), real per-adapter
+**cost parsing** (`pricing.py`) so the budget stop bites, and a **full-tree LangSmith tracing** layer
+(`trace.py`, auto-on, verified live).
 
-**Next — a production, cloud-deployable system.** Round out the k8s env beyond the dev Tilt loop:
-**`Job`s** for one-shot fleet runs and **`CronJob`s** for scheduled/triggered runs (the Ch 12
-trigger idea as infra); push images to a **registry** and deploy to a **managed cloud cluster**
-(git-cred + API-key **Secrets** in pods, the target toolchain in the worker image); and run
-**multiple jobs in production** with per-job namespacing, budget ceilings, and real
-logging/metrics. Safety (Ch 16) must hold at cloud scale: least-privilege ServiceAccounts, the
-pre-tool-use hook, branch-only pushes. See `docs/part-ii-resume.md` → "Next milestone".
+**Next — a production, cloud-deployable system (Part III).** Phase 0 (adapters + cost + tracing) is
+done; the next phase is the **amd64 worker image → GHCR** pipeline, then the DOKS cluster foundation,
+per-run **`Job`s** + namespaces, **`CronJob`/webhook** triggers, and **Secrets** — running many jobs
+in production with per-run namespacing, budget ceilings, and shipped logs/traces. Safety (Ch 16) must
+hold at cloud scale: least-privilege ServiceAccounts, the pre-tool-use hook, branch-only pushes. The
+full plan + current state: [`docs/part-iii-resume.md`](docs/part-iii-resume.md) and the architecture
+wiki [`docs/architecture/`](docs/architecture/README.md).
 
 Smaller enhancements: an optional **dashboard** over `FleetResult`/`EvolutionResult`; **tree-level
 reseed** for `fleet evolve` (today's is prompt-level — tree-level needs the winner's tree on a

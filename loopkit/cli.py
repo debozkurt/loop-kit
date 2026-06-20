@@ -9,19 +9,23 @@ commands, so the core CLI loads without the optional `[fleet]` dependency.
 """
 from __future__ import annotations
 
+import importlib.util
+import os
 import shutil
 import subprocess
 from pathlib import Path
 
 import typer
 from rich.console import Console
+from rich.markup import escape
 from rich.panel import Panel
 from rich.table import Table
 
-from . import safety, scenarios
+from . import pricing, safety, scenarios, trace
 from .agent import build_agent
 from .config import Config, load_config
 from .loop import RunResult, run_loop
+from .pricing import DEFAULT_MODELS
 from .stops import StopReason
 
 app = typer.Typer(add_completion=False, no_args_is_help=True,
@@ -43,8 +47,8 @@ repo = "."
 branch = "loopkit/run"           # never main/master (Ch 16)
 
 [agent]
-adapter = "claude-code"          # mock | claude-code | codex
-max_cost_usd = 5.0               # budget ceiling (Ch 14)
+adapter = "claude-code"          # mock | claude-code | codex | claude-api | openai-api
+max_cost_usd = 5.0               # budget ceiling (Ch 14) — bites on real cost (see `doctor`)
 
 [prompt]
 anchors = ["PROMPT.md"]          # fixed context reloaded each tick (Ch 4-5)
@@ -106,14 +110,8 @@ def doctor(config: Path = typer.Option(DEFAULT_CONFIG, "--config", "-c")) -> Non
         for problem in pf.problems:
             table.add_row("safety preflight", "[red]fail[/]", problem)
 
-    adapter = cfg.agent.adapter
-    if adapter == "mock":
-        table.add_row("agent", "[green]ok[/]", "mock (no binary needed)")
-    else:
-        binary = {"claude-code": "claude", "codex": "codex"}.get(adapter, adapter)
-        found = shutil.which(binary)
-        table.add_row("agent", "[green]ok[/]" if found else "[red]missing[/]",
-                      found or f"{binary} not on PATH")
+    _doctor_agent(table, cfg)
+    _doctor_budget(table, cfg)
 
     table.add_row("iteration gate", "[green]set[/]", cfg.gate.iteration)
     if cfg.gate.acceptance:
@@ -123,9 +121,74 @@ def doctor(config: Path = typer.Option(DEFAULT_CONFIG, "--config", "-c")) -> Non
     else:
         table.add_row("acceptance gate", "[yellow]none[/]", "no held-out check (Ch 9)")
 
+    # Tracing (Ch 14-15): full-tree LangSmith observability, auto-on when langsmith + a key present.
+    trace.configure(cfg.trace)
+    if trace.active():
+        table.add_row("tracing", "[green]on[/]", f"LangSmith → project {trace.project()}")
+    elif cfg.trace.enabled:
+        table.add_row("tracing", "[yellow]unavailable[/]",
+                      escape("enabled but langsmith not importable (pip install 'loopkit[trace]')"))
+    else:
+        table.add_row("tracing", "[dim]off[/]",
+                      escape("auto: install loopkit[trace] + set LANGSMITH_API_KEY"))
+
     console.print(table)
     if not pf.ok:
         raise typer.Exit(1)
+
+
+# Adapter binary / SDK / key for each adapter name, used by `doctor`.
+_CLI_BINARIES = {"claude-code": "claude", "codex": "codex"}
+_API_REQUIREMENTS = {"claude-api": ("anthropic", "ANTHROPIC_API_KEY", "claude"),
+                     "openai-api": ("openai", "OPENAI_API_KEY", "openai")}
+
+
+def _doctor_agent(table: Table, cfg: Config) -> None:
+    """Is the configured adapter actually runnable here — binary on PATH, or SDK + key present?"""
+    adapter = cfg.agent.adapter
+    if adapter == "mock":
+        table.add_row("agent", "[green]ok[/]", "mock (no binary needed)")
+    elif adapter in _CLI_BINARIES:
+        binary = _CLI_BINARIES[adapter]
+        found = shutil.which(binary)
+        table.add_row("agent", "[green]ok[/]" if found else "[red]missing[/]",
+                      found or f"{binary} not on PATH")
+    elif adapter in _API_REQUIREMENTS:
+        pkg, env, extra = _API_REQUIREMENTS[adapter]
+        have_sdk = importlib.util.find_spec(pkg) is not None
+        have_key = bool(os.environ.get(env))
+        if have_sdk and have_key:
+            table.add_row("agent", "[green]ok[/]", f"{adapter} (SDK + {env})")
+        elif not have_sdk:
+            table.add_row("agent", "[red]missing[/]",
+                          escape(f"{pkg} SDK not installed (pip install 'loopkit[{extra}]')"))
+        else:
+            table.add_row("agent", "[yellow]no key[/]", f"{env} not set")
+    else:
+        table.add_row("agent", "[red]unknown[/]", f"unknown adapter {adapter!r}")
+
+
+def _doctor_budget(table: Table, cfg: Config) -> None:
+    """Will the budget ceiling actually bite? It only fires if the adapter reports a real cost."""
+    adapter = cfg.agent.adapter
+    ceiling = f"ceiling ${cfg.agent.max_cost_usd}"
+    model = cfg.agent.model or DEFAULT_MODELS.get(adapter)
+    if adapter == "mock":
+        table.add_row("budget", "[green]ok[/]", f"mock charges per tick · {ceiling}")
+    elif adapter == "claude-code":
+        table.add_row("budget", "[green]ok[/]", f"cost parsed from claude JSON · {ceiling}")
+    elif adapter in _API_REQUIREMENTS:
+        if pricing.known_model(model):
+            table.add_row("budget", "[green]ok[/]", f"priced model {model} · {ceiling}")
+        else:
+            table.add_row("budget", "[yellow]no price[/]",
+                          f"unknown model {model!r} → cost 0.0; budget stop can't fire")
+    elif adapter == "codex":
+        if pricing.known_model(model):
+            table.add_row("budget", "[green]ok[/]", f"token cost for {model} · {ceiling}")
+        else:
+            table.add_row("budget", "[yellow]no price[/]",
+                          "codex cost needs a priced --model, else 0.0")
 
 
 @app.command()
@@ -142,6 +205,7 @@ def run(config: Path = typer.Option(DEFAULT_CONFIG, "--config", "-c"),
         cfg.repo = repo
     if max_iter is not None:
         cfg.stops.max_iter = max_iter
+    trace.configure(cfg.trace)            # full-tree LangSmith tracing, auto-on (Ch 14-15)
 
     if sandbox:
         _run_sandboxed(cfg, config, dry_run=dry_run, max_iter=max_iter, force=force)
@@ -214,9 +278,12 @@ def fleet_worker(
     solves.
     """
     from .extensions.fleet import RedisQueue, Worker, make_demo_runner, make_repo_runner
+    trace.configure(None)                 # auto-on from env; each worker traces its own runs (Ch 12)
     queue = RedisQueue.from_url(redis_url)
     if target:
         tcfg = _maybe_target_config(target)
+        if tcfg is not None:
+            trace.configure(tcfg.trace)   # honor the target repo's [trace] project/toggle
         iteration = gate_iteration or (tcfg.gate.iteration if tcfg else "python -m pytest -q")
         acceptance = gate_acceptance or (tcfg.gate.acceptance if tcfg and tcfg.gate.acceptance else "true")
         runner = make_repo_runner(
