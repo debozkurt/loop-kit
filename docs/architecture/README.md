@@ -24,7 +24,12 @@ in sync with the topology. History goes in git and the resume-doc changelog, not
 | [`01-system-today.md`](01-system-today.md) | **Built:** the single-loop core, its contracts, the **2×2 adapter matrix** + cost (`pricing.py`), the **two-layer observability** (logs + LangSmith traces), the extension seams, the in-process + dev-cluster fleet |
 | [`02-cloud-architecture.md`](02-cloud-architecture.md) | **Designed:** the Part III Kubernetes/DOKS target — topology, run lifecycle, control plane, storage, scaling, triggers. **Built 🟢 (Phase 1):** image & registry (`worker-image` → GHCR). **Built 🟢 (Phase 2):** control-plane foundation — context guard + `loopkit cloud`, `ns/loopkit-system` manifests (Redis AOF+PVC, RBAC, NetworkPolicy). **Built 🟢 (Phase 3):** run mechanics — sentinel shutdown + `cloudrun.create_run` (per-run ns + coordinator/worker Jobs) + `cloud run/ls/status/logs/kill`. **Built 🟢 (Phase 4):** triggers — in-cluster auth + CronJob (`cloud schedule`) + GitHub/GitLab webhook listener (HMAC or token + idempotency → `create_run`) |
 | [`03-adapters-and-auth.md`](03-adapters-and-auth.md) | The agent-adapter matrix (CLI/API × Claude/OpenAI), the pluggable credential model, per-submitter keys, billing |
-| [`04-security.md`](04-security.md) | The Ch 16 safety envelope at cloud scale — threat model and defense-in-depth. **Built 🟢 (Phase 2):** context guard, default-deny NetworkPolicy, least-priv RBAC. **Built 🟢 (Phase 4):** webhook HMAC + idempotency, in-cluster context guard |
+| [`04-security.md`](04-security.md) | The Ch 16 safety envelope at cloud scale — threat model and defense-in-depth. **Built 🟢 (Phase 2):** context guard, default-deny NetworkPolicy, least-priv RBAC. **Built 🟢 (Phase 4):** webhook HMAC + idempotency, in-cluster context guard. **Built 🟢 (Phase 5a):** per-submitter creds withheld from the agent. **Built 🟢 (Phase 6):** agent isolation — the keyless executor sidecar closes the same-uid in-pod key-read residual |
+
+For the **teaching** view of Part III — the GitHub/GitLab ecosystem, the three tiers as a *lesson*, and
+the two runnable labs (`loopkit demo 20` triggers, `demo 21` the CI tier) — see
+[`../part-iii-ecosystem.md`](../part-iii-ecosystem.md). This wiki describes how the system *is built*;
+that module teaches *how to use it on a real repo*.
 
 ## Deployment tiers
 
@@ -34,12 +39,13 @@ core, only the *trigger / secrets / isolation* differ:
 | Tier | Runs | Trigger · secrets · isolation | For | Status |
 |---|---|---|---|---|
 | **Local** | `loopkit run` on a laptop | a human · local env · the laptop | iterating by hand | 🟢 Built |
-| **CI** | `loopkit run` in a CI job | forge issue/cron/manual · **CI-native** secrets · the **ephemeral runner** | hands-off issue→PR, no cluster | 🟡 Designed ([`../part-iii-ci-mode.md`](../part-iii-ci-mode.md), build next) |
-| **Cloud fleet** | coordinator + worker Jobs on DOKS | CLI/CronJob/webhook · per-submitter resolver + **sidecar** · namespace + container split | concurrent/`evolve`/multi-tenant | 🟢 code-built (Phases 2–5a), live-pending |
+| **CI** | `loopkit run` in a CI job | forge issue/cron/manual · **CI-native** secrets · the **ephemeral runner** | hands-off issue→PR, no cluster | 🟢 Built (Phase 5c — `run --from-event/--from-issue/--open-pr`, `init --ci`; see [`../part-iii-ci-mode.md`](../part-iii-ci-mode.md)) |
+| **Cloud fleet** | coordinator + worker Jobs on DOKS | CLI/CronJob/webhook · per-submitter resolver + **keyless executor sidecar** · namespace + **two-container** split | concurrent/`evolve`/multi-tenant | 🟢 code-built (Phases 2–6), live-pending |
 
-The credential machinery (resolver, shred, sidecar) is **cloud-tier only** — the CI tier delegates
-secrets/identity/sandbox to the forge, which is its whole appeal. The cloud tier's remaining hardening
-(the keyless-executor split) is designed in [`../part-iii-agent-isolation.md`](../part-iii-agent-isolation.md).
+The credential machinery (resolver, shred, **keyless-executor sidecar**) is **cloud-tier only** — the CI
+tier delegates secrets/identity/sandbox to the forge, which is its whole appeal. The cloud tier's
+agent-isolation split (the keyless executor that closes the same-uid in-pod key read) is **built** —
+see [`../part-iii-agent-isolation.md`](../part-iii-agent-isolation.md).
 
 ## Status legend
 
@@ -61,7 +67,8 @@ flowchart LR
   CREATE["create_run()<br/>namespace +<br/>Secrets + Jobs"]
   REDIS["Redis StatefulSet<br/>queue + results<br/>per-run keyspace"]
   COORD["Coordinator Job<br/>enqueue · collect ·<br/>select · sentinel"]
-  WORK["Worker Job<br/>parallelism N ·<br/>clone · run_loop · push"]
+  CORE["Worker · loopkit-core (uid 1000)<br/>HOLDS key · clone · run_loop ·<br/>LLM call · commit · push"]
+  EXEC["Worker · executor (uid 1001)<br/>KEYLESS sidecar ·<br/>run_bash · read/write · gate"]
   GH["GitHub / GitLab<br/>clone / branch / PR / MR ·<br/>issues · skills repo"]
   LLM["Agent API<br/>Claude / OpenAI"]
 
@@ -69,11 +76,12 @@ flowchart LR
   CRON --> CREATE
   HOOK --> CREATE
   CREATE --> COORD
-  CREATE --> WORK
+  CREATE --> CORE
   COORD <--> REDIS
-  WORK <--> REDIS
-  WORK --> GH
-  WORK --> LLM
+  CORE <--> REDIS
+  CORE -- "tool RPC<br/>(unix socket)" --> EXEC
+  CORE --> GH
+  CORE --> LLM
 ```
 
 > Render with `/render-mermaid --hd` to verify (dark-greyscale, flat by house style). **Namespaces:**

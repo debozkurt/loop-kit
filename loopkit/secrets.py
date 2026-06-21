@@ -41,8 +41,10 @@ from .log import get_logger
 log = get_logger("secrets")
 
 # Known credential env-var names. The agent never needs any of these; loopkit injects the few a
-# controlled subprocess needs via `child_env(add=...)`.
-GIT_ENV: tuple[str, ...] = ("GITHUB_TOKEN", "GH_TOKEN")
+# controlled subprocess needs via `child_env(add=...)`. Both forges' token vars are listed so
+# loopkit's OWN forge subprocess (git/gh/glab) authenticates on either — `gh`/git read
+# `GITHUB_TOKEN`/`GH_TOKEN`, `glab` reads `GITLAB_TOKEN`; the agent's scrubbed shell still gets none.
+GIT_ENV: tuple[str, ...] = ("GITHUB_TOKEN", "GH_TOKEN", "GITLAB_TOKEN")
 # Adapter → the env var(s) that adapter's SDK/binary authenticates with (first present wins).
 ADAPTER_KEYS: dict[str, tuple[str, ...]] = {
     "claude-code": ("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"),

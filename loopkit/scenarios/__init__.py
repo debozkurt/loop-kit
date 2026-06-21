@@ -158,11 +158,13 @@ def _registry() -> dict[int, Scenario]:
     # Imported lazily so chapter modules can import helpers from this package without a cycle.
     from . import (ch05_context, ch07_feedback, ch08_review, ch09_held_out, ch10_orchestration,
                    ch11_evolution, ch12_fleet, ch13_hard_stops, ch14_economics, ch16_safety,
-                   ch17_skills)
+                   ch17_skills, ch20_triggers, ch21_ci, ch22_isolation)
     items = [ch05_context.SCENARIO, ch07_feedback.SCENARIO, ch08_review.SCENARIO,
              ch09_held_out.SCENARIO, ch10_orchestration.SCENARIO, ch11_evolution.SCENARIO,
              ch12_fleet.SCENARIO, ch13_hard_stops.SCENARIO, ch14_economics.SCENARIO,
-             ch16_safety.SCENARIO, ch17_skills.SCENARIO]
+             ch16_safety.SCENARIO, ch17_skills.SCENARIO,
+             # Part III — productionizing the loop into the GitHub/GitLab ecosystem (course Ch 20-22).
+             ch20_triggers.SCENARIO, ch21_ci.SCENARIO, ch22_isolation.SCENARIO]
     return {s.chapter: s for s in items}
 
 

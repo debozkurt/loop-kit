@@ -10,10 +10,19 @@ The shape, per [`docs/architecture/02-cloud-architecture.md`](../../docs/archite
     ns/run-<id>  (ephemeral, one per run, TTL-GC'd)
       ├─ Job coordinator   `fleet run|evolve --drain-workers N`  (enqueue → collect → sentinel → exit)
       ├─ Job worker        parallelism N, completions unset      (BRPOP → clone → run_loop → push → exit)
+      │    ├─ loopkit-core (uid 1000)   HOLDS the key (envFrom); loop · LLM call · git clone/commit/push
+      │    └─ executor    (uid 1001)    keyless native sidecar; run_bash/read/write + held-out gate
       ├─ ServiceAccount loopkit-worker   no cluster-API access (automount off)
-      ├─ Secret loopkit-creds            git creds + the agent key (envFrom, optional)
+      ├─ Secret loopkit-creds            git creds + the agent key (envFrom into loopkit-core ONLY)
       ├─ ResourceQuota + LimitRange      loose to start
       └─ NetworkPolicy                   default-deny + egress allowlist (DNS, Redis, HTTPS, no metadata)
+
+**Why the two-container worker (Phase 6 agent isolation).** The agent's tool calls + the held-out gate
+run attacker-influenced commands. Rather than mitigate (load-shred the key in time, Phase 5a), the
+worker pod runs that untrusted surface in a **keyless executor sidecar** — a different uid in its own
+PID namespace — and loopkit-core dispatches to it over a Unix socket. The credential is `envFrom`'d
+into loopkit-core only; there is nothing to `ptrace` and nothing to shred in the executor. The
+coordinator runs no untrusted command, so it stays a single trusted container.
 
 **Why two Jobs and a shared Redis keyspace.** The worker Job is the canonical *fine-grained
 work-queue* pattern — `parallelism: N`, `completions` unset, pods drain the queue and exit 0. The
@@ -49,18 +58,31 @@ SYSTEM_NAMESPACE = "loopkit-system"
 # exists only to dodge a laptop's local redis-server; in-cluster there is no such collision.
 DEFAULT_REDIS_URL = f"redis://redis.{SYSTEM_NAMESPACE}.svc.cluster.local:6379"
 
-# Where the worker entrypoint loads creds from (a memory tmpfs the init container populates from the
-# per-run Secret); loadshreds it immediately, so this path is empty by the time agent code runs.
-CREDS_DIR = "/var/run/loopkit/creds"
+# Phase 6 — agent isolation. The worker pod is split in two: loopkit-core (uid 1000) holds the
+# credential and runs only trusted code (the loop, the LLM API call, git clone/commit/push); the
+# keyless executor sidecar (uid 1001, a separate PID namespace by default) runs the untrusted surface
+# (the agent's run_bash/read/write + the held-out gate) against the shared workspace. They talk over a
+# Unix socket on a shared emptyDir.
+EXECUTOR_UID = 1001                                  # different uid → can't ptrace loopkit-core's heap
+EXECUTOR_SOCKET_DIR = "/var/run/loopkit-exec"        # shared emptyDir; both containers mount it here
+EXECUTOR_SOCKET = f"{EXECUTOR_SOCKET_DIR}/exec.sock"
+# Set on the worker container (survives the load-shred — not a credential var) so the entrypoint can
+# fail-closed when an API adapter resolves no key (a misconfiguration), instead of 401-ing deep in a tick.
+CREDS_EXPECTED_ENV = "LOOPKIT_CREDS_EXPECTED"
 
-# Phase-5a hardening (C2): a non-root, no-caps, read-only-rootfs pod so file ownership is deterministic
-# and privilege escalation is blocked. NB: RuntimeDefault seccomp does NOT block ptrace — a same-uid
-# heap read of the in-process key is the documented residual until a separate-PID-namespace agent
-# container lands (see 04-security.md). Writable paths are explicit emptyDirs (readOnlyRootFilesystem).
+# Phase-5a hardening (C2): a non-root, no-caps, read-only-rootfs pod so privilege escalation is blocked
+# and file ownership is deterministic. The shared `fsGroup` makes the workspace + socket emptyDirs
+# group-owned (gid 1000); both uids are in that group, so loopkit-core can clone/commit files the
+# executor edited and vice-versa (the entrypoints `umask 002` for group-writable trees).
 _POD_SECURITY_CONTEXT = {"runAsNonRoot": True, "runAsUser": 1000, "runAsGroup": 1000, "fsGroup": 1000,
                          "seccompProfile": {"type": "RuntimeDefault"}}
 _CONTAINER_SECURITY_CONTEXT = {"allowPrivilegeEscalation": False, "readOnlyRootFilesystem": True,
                                "capabilities": {"drop": ["ALL"]}}
+# The executor sidecar runs as a *different* uid than loopkit-core — so even within the pod it cannot
+# `ptrace`/`process_vm_readv` loopkit-core's heap (where the SDK client holds the key), and in its own
+# PID namespace (the k8s default — no `shareProcessNamespace`) it can't see loopkit-core's PIDs at all.
+_EXECUTOR_SECURITY_CONTEXT = {**_CONTAINER_SECURITY_CONTEXT, "runAsUser": EXECUTOR_UID,
+                              "runAsGroup": 1000}
 
 # The only hosts a run legitimately reaches over 443: the agent API, the git forge, the image registry.
 # A per-run Cilium FQDN policy narrows the broad `0.0.0.0/0:443` egress to these, so a hijacked run
@@ -181,10 +203,21 @@ def coordinator_command(spec: RunSpec) -> list[str]:
 
 
 def worker_command(spec: RunSpec) -> list[str]:
-    """The `loopkit fleet worker …` argv each worker pod runs (drains the per-run keyspace)."""
+    """The `loopkit fleet worker …` argv loopkit-core runs (drains the per-run keyspace).
+
+    `--executor-socket` is the Phase-6 seam: loopkit-core dispatches the agent's tool calls + the
+    held-out gate to the keyless executor sidecar over this socket, so the model's chosen commands
+    never run in the key-holding container.
+    """
     return ["fleet", "worker",
             "--redis-url", spec.redis_url, "--redis-namespace", spec.redis_namespace,
-            "--adapter", spec.adapter, "--target", spec.target, "--max-iter", str(spec.max_iter)]
+            "--adapter", spec.adapter, "--target", spec.target, "--max-iter", str(spec.max_iter),
+            "--executor-socket", EXECUTOR_SOCKET]
+
+
+def executor_command() -> list[str]:
+    """The argv the keyless executor sidecar runs — serve the tool surface over the shared socket."""
+    return ["executor", "--socket", EXECUTOR_SOCKET]
 
 
 # --------------------------------------------------------------------------------------------
@@ -297,12 +330,12 @@ def build_creds_secret(spec: RunSpec, data: dict[str, str], *, name: str | None 
     """A per-run Secret holding `data` (resolved + projected creds), `name` defaulting to the worker
     Secret. Namespace-scoped and GC'd with the namespace.
 
-    Delivery is **not** `envFrom` (a co-located agent could `printenv`) and **not** a direct file mount
-    into the worker container (it could `cat` a readOnly mount it can't unlink). Instead an init
-    container mounts this Secret readOnly, copies it onto a memory tmpfs, and the worker entrypoint
-    loads + shreds it before any agent code runs (see `_pod_spec`). `stringData` is base64 (not
-    encrypted) in the k8s API — at-rest protection depends on the cluster's etcd posture, which the
-    operator must verify (see [`04-security.md`]). Empty `data` ⇒ caller omits the Secret entirely.
+    In the Phase-6 split this Secret is mounted (`envFrom`) **only into loopkit-core** — the trusted
+    container that runs no model-chosen command. The untrusted surface (run_bash/read/write + the gate)
+    runs in the *keyless* executor sidecar, which has no Secret reference at all, so there is nothing
+    for a hijacked agent to `printenv`/`cat`. `stringData` is base64 (not encrypted) in the k8s API —
+    at-rest protection depends on the cluster's etcd posture, which the operator must verify (see
+    [`04-security.md`]). Empty `data` ⇒ caller omits the Secret entirely.
     """
     return {"apiVersion": "v1", "kind": "Secret", "type": "Opaque",
             "metadata": {"name": name or spec.creds_secret, "namespace": spec.namespace,
@@ -310,51 +343,65 @@ def build_creds_secret(spec: RunSpec, data: dict[str, str], *, name: str | None 
             "stringData": dict(data)}
 
 
-def _creds_init_container(spec: RunSpec, creds_secret: str) -> dict:
-    """An init container that copies the per-run Secret onto the shared memory tmpfs, then exits.
+def _executor_sidecar(spec: RunSpec) -> dict:
+    """The keyless tool-execution sidecar (Phase 6) — a *native* sidecar (an initContainer with
+    `restartPolicy: Always`, stable since k8s 1.29) so it starts before loopkit-core and is terminated
+    by the kubelet when loopkit-core exits (letting the Job complete).
 
-    This is the crux of Phase-5a containment (C1): the Secret is mounted **readOnly here only**, never
-    in the main container the agent shares — so once the worker entrypoint loads + shreds the tmpfs
-    copy (before any agent code runs), there is no credential file the agent's `run_bash`/`cat` can
-    reach. The Secret is `optional` so a token-free mock run schedules with an empty tmpfs.
+    Runs as `EXECUTOR_UID` (≠ loopkit-core) with **no creds env and no Secret mount**, sharing only the
+    workspace (the clone target) + the socket dir. `GIT_CONFIG_*` marks all dirs safe so an agent's
+    `git` call doesn't trip dubious-ownership on a tree loopkit-core (a different uid) cloned.
     """
     return {
-        "name": "creds-init", "image": spec.image,
-        # `*` (not `.`) so the k8s Secret-mount metadata (`..data`, `..<timestamp>` dirs) is NOT copied
-        # — otherwise the key content would survive in a tmpfs subdir the worker's shred doesn't reach.
-        # `-L` follows the Secret's key symlinks to copy the real values; no `-r` (the keys are files).
-        "command": ["sh", "-c",
-                    "cp -L /creds-src/* /creds/ 2>/dev/null || true; "
-                    "chmod 0400 /creds/* 2>/dev/null || true"],
-        "securityContext": _CONTAINER_SECURITY_CONTEXT,
-        "volumeMounts": [{"name": "creds-src", "mountPath": "/creds-src", "readOnly": True},
-                         {"name": "creds", "mountPath": "/creds"}],
+        "name": "executor", "image": spec.image,
+        "command": ["loopkit"], "args": executor_command(),
+        "restartPolicy": "Always",                            # native sidecar (k8s ≥ 1.29)
+        "securityContext": _EXECUTOR_SECURITY_CONTEXT,
+        "env": [{"name": "HOME", "value": "/home/executor"},
+                {"name": "LOOPKIT_ENV", "value": spec.env_name},
+                # Treat any working tree as safe — loopkit-core (uid 1000) owns the clone, the executor
+                # runs as uid 1001, so an agent `git` command would otherwise warn dubious-ownership.
+                {"name": "GIT_CONFIG_COUNT", "value": "1"},
+                {"name": "GIT_CONFIG_KEY_0", "value": "safe.directory"},
+                {"name": "GIT_CONFIG_VALUE_0", "value": "*"}],
+        "resources": {"requests": {"cpu": spec.cpu_request, "memory": spec.mem_request},
+                      "limits": {"cpu": spec.cpu_limit, "memory": spec.mem_limit}},
+        "volumeMounts": [{"name": "scratch", "mountPath": "/scratch"},        # the shared workspace
+                         {"name": "exec-socket", "mountPath": EXECUTOR_SOCKET_DIR},
+                         {"name": "exec-home", "mountPath": "/home/executor"},
+                         {"name": "exec-tmp", "mountPath": "/tmp"}],
     }
 
 
-def _pod_spec(spec: RunSpec, *, command: list[str], scratch: bool, creds_secret: str) -> dict:
-    """Pod template for a Job: a hardened (non-root, no-caps, read-only-rootfs) loopkit container, with
-    creds delivered via the init-container→memory-tmpfs→shred path (NOT envFrom, NOT a direct mount).
+def _pod_spec(spec: RunSpec, *, command: list[str], scratch: bool, creds_secret: str,
+              executor_sidecar: bool) -> dict:
+    """Pod template for a Job. loopkit-core is a hardened (non-root, no-caps, read-only-rootfs)
+    container that gets the per-role creds via `envFrom` (it runs only trusted code). When
+    `executor_sidecar` is set (the worker), a keyless executor native-sidecar runs the untrusted
+    surface in a different uid/PID-namespace, and loopkit-core dispatches to it over the shared socket
+    (`command` already carries `--executor-socket`). `restartPolicy: Never` + `backoffLimit` own retries.
 
-    The main container mounts only the (writable) tmpfs the init populated, plus emptyDirs for the
-    writable paths a read-only rootfs needs (HOME, /tmp, and the worker's `/scratch` clone target).
-    `restartPolicy: Never` + the Job's `backoffLimit` own retries.
+    Writable paths for the read-only rootfs are explicit emptyDirs (HOME, /tmp, the `/scratch` clone
+    target). The creds Secret is referenced **only** by loopkit-core's `envFrom` — never by the
+    executor — so the untrusted container has no credential in its env, files, or address space.
     """
     container: dict = {
-        "name": "loopkit",
+        "name": "loopkit-core",
         "image": spec.image,
         "command": ["loopkit"],
         "args": command,
         "securityContext": _CONTAINER_SECURITY_CONTEXT,
+        # Creds come in via envFrom (loopkit-core is trusted); the entrypoint load-shreds them out of
+        # os.environ into the in-process store, and `child_env` re-injects only the git token for git.
+        "envFrom": [{"secretRef": {"name": creds_secret, "optional": True}}],
         "env": [{"name": "WORKER_NAME",
                  "valueFrom": {"fieldRef": {"fieldPath": "metadata.name"}}},
                 {"name": "LOOPKIT_ENV", "value": spec.env_name},
-                {"name": "LOOPKIT_CREDS_DIR", "value": CREDS_DIR},
+                {"name": CREDS_EXPECTED_ENV, "value": "1"},   # fail-closed if an API adapter resolves no key
                 {"name": "HOME", "value": "/home/loopkit"}],
         "resources": {"requests": {"cpu": spec.cpu_request, "memory": spec.mem_request},
                       "limits": {"cpu": spec.cpu_limit, "memory": spec.mem_limit}},
-        "volumeMounts": [{"name": "creds", "mountPath": CREDS_DIR},        # the tmpfs; loopkit shreds it
-                         {"name": "home", "mountPath": "/home/loopkit"},   # writable HOME (ro-rootfs)
+        "volumeMounts": [{"name": "home", "mountPath": "/home/loopkit"},   # writable HOME (ro-rootfs)
                          {"name": "tmp", "mountPath": "/tmp"}],
     }
     pod: dict = {
@@ -362,16 +409,9 @@ def _pod_spec(spec: RunSpec, *, command: list[str], scratch: bool, creds_secret:
         "automountServiceAccountToken": False,
         "restartPolicy": "Never",
         "securityContext": _POD_SECURITY_CONTEXT,
-        "initContainers": [_creds_init_container(spec, creds_secret)],
         "containers": [container],
-        "volumes": [
-            # The Secret is referenced ONLY by the init container's mount (above) — listed at pod level
-            # but never mounted into the main container, so the agent has no Secret file to read.
-            {"name": "creds-src", "secret": {"secretName": creds_secret,
-                                             "defaultMode": 0o440, "optional": True}},
-            {"name": "creds", "emptyDir": {"medium": "Memory"}},
-            {"name": "home", "emptyDir": {}},
-            {"name": "tmp", "emptyDir": {}}],
+        "volumes": [{"name": "home", "emptyDir": {}},
+                    {"name": "tmp", "emptyDir": {}}],
     }
     if spec.image_pull_secret:
         pod["imagePullSecrets"] = [{"name": spec.image_pull_secret}]
@@ -379,22 +419,33 @@ def _pod_spec(spec: RunSpec, *, command: list[str], scratch: bool, creds_secret:
         container["volumeMounts"].append({"name": "scratch", "mountPath": "/scratch"})
         container["env"].append({"name": "TMPDIR", "value": "/scratch"})
         pod["volumes"].append({"name": "scratch", "emptyDir": {"sizeLimit": spec.scratch_size}})
+    if executor_sidecar:
+        # The shared socket dir + the executor's own writable HOME/tmp (it runs as a different uid).
+        pod["volumes"] += [{"name": "exec-socket", "emptyDir": {}},
+                           {"name": "exec-home", "emptyDir": {}},
+                           {"name": "exec-tmp", "emptyDir": {}}]
+        container["volumeMounts"].append({"name": "exec-socket", "mountPath": EXECUTOR_SOCKET_DIR})
+        # Native sidecars are initContainers with restartPolicy: Always (start first, stay running).
+        pod["initContainers"] = [_executor_sidecar(spec)]
     return pod
 
 
 def _job(spec: RunSpec, *, name: str, role: str, command: list[str],
-         parallelism: int | None, scratch: bool, creds_secret: str) -> dict:
+         parallelism: int | None, scratch: bool, creds_secret: str,
+         executor_sidecar: bool) -> dict:
     """A Job wrapping the pod template, with TTL GC + backoff. `parallelism=None` ⇒ a single
     completion (the coordinator); a worker Job sets `parallelism: N` with **completions unset** —
     the fine-grained work-queue pattern (pods drain the queue and exit 0 on a sentinel). `creds_secret`
-    is the per-role Secret: the worker gets adapter-key+git, the coordinator only git (G1)."""
+    is the per-role Secret: the worker gets adapter-key+git, the coordinator only git (G1).
+    `executor_sidecar` adds the keyless tool-execution sidecar (the worker; not the coordinator)."""
     labels = {**_labels(spec), "app.kubernetes.io/component": role}
     job_spec: dict = {
         "ttlSecondsAfterFinished": spec.ttl_seconds,
         "backoffLimit": spec.backoff_limit,
         "template": {"metadata": {"labels": labels},
                      "spec": _pod_spec(spec, command=command, scratch=scratch,
-                                       creds_secret=creds_secret)},
+                                       creds_secret=creds_secret,
+                                       executor_sidecar=executor_sidecar)},
     }
     if parallelism is not None:
         job_spec["parallelism"] = parallelism        # completions left unset on purpose (work queue)
@@ -405,16 +456,17 @@ def _job(spec: RunSpec, *, name: str, role: str, command: list[str],
 
 def build_coordinator_job(spec: RunSpec) -> dict:
     # The coordinator runs no agent — it only enqueues/collects and (for --from-issues) lists issues
-    # via `gh`, so it needs the git token but NOT the model key (which it would never use).
+    # via `gh`, so it needs the git token but NOT the model key (which it would never use). It runs no
+    # untrusted command, so it needs no executor sidecar (single trusted container).
     return _job(spec, name="coordinator", role="coordinator",
                 command=coordinator_command(spec), parallelism=None, scratch=False,
-                creds_secret=spec.coordinator_creds_secret)
+                creds_secret=spec.coordinator_creds_secret, executor_sidecar=False)
 
 
 def build_worker_job(spec: RunSpec) -> dict:
     return _job(spec, name="worker", role="worker",
                 command=worker_command(spec), parallelism=spec.parallelism, scratch=True,
-                creds_secret=spec.creds_secret)
+                creds_secret=spec.creds_secret, executor_sidecar=True)
 
 
 def build_run_objects(spec: RunSpec, *, creds: dict[str, str] | None = None) -> list[dict]:

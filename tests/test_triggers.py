@@ -103,6 +103,26 @@ def test_event_to_run_spec_uses_the_issue_as_the_goal_and_is_traceable():
     assert spec.extra_labels["loopkit.dev/trigger"] == "webhook"
 
 
+# parse_event_payload — the CI tier's header-less entry: auto-detect the forge from the body shape.
+def test_parse_event_payload_detects_github_by_shape():
+    ev = triggers.parse_event_payload(_issue_payload(number=7, title="T", body="B"))
+    assert ev is not None and ev.issue_number == 7 and ev.title == "T"
+
+
+def test_parse_event_payload_detects_gitlab_by_object_kind():
+    payload = {"object_kind": "issue",
+               "object_attributes": {"action": "open", "iid": 9, "title": "GT", "description": "GB"},
+               "project": {"path_with_namespace": "g/p", "git_http_url": "https://gitlab.com/g/p.git"}}
+    ev = triggers.parse_event_payload(payload)
+    assert ev is not None and ev.issue_number == 9 and ev.title == "GT"
+
+
+def test_parse_event_payload_returns_none_for_non_issue_payloads():
+    # A workflow_dispatch / push payload carries no actionable issue → None (caller refuses cleanly).
+    assert triggers.parse_event_payload({"inputs": {"issue": "5"}}) is None
+    assert triggers.parse_event_payload(_issue_payload(action="closed")) is None
+
+
 # --------------------------------------------------------------------------------------------
 # Idempotency — first writer wins; a re-delivery is a no-op.
 # --------------------------------------------------------------------------------------------

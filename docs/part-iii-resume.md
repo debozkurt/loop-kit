@@ -5,9 +5,38 @@ phase: state, locked decisions, the build sequence, sharp edges, and the next st
 system is built/designed*, read the architecture wiki: [`architecture/`](architecture/README.md).
 The auto-memory `project_loopkit` only points here.
 
-> **Current state (2026-06-21):** **Phases 0–5a built; the two live steps (a GitHub remote, a real
-> DOKS cluster) are the only things outstanding.** Part II (the extension library) and the dev
-> kind/Tilt fleet are done and verified live (see [`part-ii-resume.md`](part-ii-resume.md)).
+> **Current state (2026-06-21):** **Phases 0–6 built (Phase 6 = agent isolation, this session); the two
+> live steps (a GitHub remote, a real DOKS cluster) and Phase 5b (skills repo) are what's outstanding.**
+> **Phase 6 (this session) landed agent isolation — the keyless-executor sidecar split**, closing the one
+> residual Phase 5a could not close in a single container (a same-uid `ptrace`/heap read of the in-process
+> key) for the cloud worker, by construction. New core **`executor.py`**: a `ToolExecutor` seam
+> (`dispatch`/`run_gate`) with **`LocalToolExecutor`** (in-process default — exact prior behavior) and
+> **`RemoteToolExecutor`** (length-prefixed-JSON Unix-socket client, degrade-on-unreachable) + a `serve()`
+> server and a new **`loopkit executor`** CLI command (the keyless sidecar). `_APIAdapter`/`ShellGate`/
+> `run_loop`/`build_agent`/`make_repo_runner` all take an injected executor; the **cloud worker**
+> (`fleet worker --executor-socket`) injects `RemoteToolExecutor` so the agent's tool calls + the held-out
+> gate run in a **different-uid, separate-PID-namespace, credential-free** container, while loopkit-core
+> holds the key only for the LLM call + git. **`cloudrun._pod_spec` rewritten to the two-container split**:
+> loopkit-core gets creds via **`envFrom`** (dropping the init-container→tmpfs→shred), the executor is a
+> **native sidecar** (initContainer `restartPolicy: Always`) with no Secret, a **shared workspace + socket
+> emptyDir** (`fsGroup`, `umask 002`), uid 1001. **Refinement from the design doc:** `secrets.py`'s
+> load-shred + `child_env` scrub were **kept** (not deleted) — they remain the containment for the two
+> tiers with **no sidecar** (the CI tier + untrusted local); the sidecar is the cloud-worker kernel
+> boundary, and the shred is harmless/redundant inside the split. **252 tests green** (was 241; +9 socket
+> round-trip in `tests/test_executor.py`, +2 net pod-spec). Additive to the core contracts, `None`-safe,
+> deferred-import invariant preserved. Designed + now documented-built in
+> [`part-iii-agent-isolation.md`](part-iii-agent-isolation.md). The **live DOKS proof** (ptrace from the
+> executor fails; the run still completes) awaits a cluster.
+> **Phase 5c (prior session) landed the CI deployment
+> tier** — the middle of the three tiers — so the single loop runs from GitHub Actions / GitLab CI with
+> **no cluster**: `loopkit run` gained `--from-event`/`--from-issue`/`--open-pr`/`--adapter` (glue over a
+> new `triggers.parse_event_payload` + `issues.fetch_issue` + `remote.sync_done(issue=N)`), `loopkit
+> init --ci github|gitlab` scaffolds the workflow, and `examples/ci/` ships both templates. A GitLab
+> credential fix (`secrets.GIT_ENV` += `GITLAB_TOKEN`, `remote.CRED_HELPER` GitHub→GitLab fallback) makes
+> `glab`/git-push authenticate through the Phase-5a hygiene without ever handing the agent a token. **240
+> tests green** (was 219; +21 token-free). Additive — touched no cloud control-plane code. Part II (the
+> extension library) and the dev kind/Tilt fleet are done and verified live (see
+> [`part-ii-resume.md`](part-ii-resume.md)).
 > **Phase 5a** (this session) landed **per-submitter credentials, hardened end-to-end against the
 > prompt-injection flow** — red-teamed by a multi-agent pass + a lifecycle trace before build. New
 > core **`secrets.py`** (load-then-shred creds off the FS + `os.environ`, `child_env` scrubs every
@@ -75,7 +104,7 @@ Every load-bearing fork is decided. Detail + rationale live in the architecture 
 | **Agent auth** (Built 🟢 Phase 5a) | **Per-submitter** key resolved by `(env, submitter)`, adapter selects/projects the var; registered set = fail-closed allowlist; Vault = a later resolver swap | [`03`](architecture/03-adapters-and-auth.md#the-pluggable-credential-model) |
 | **Billing** | Dedicated **API key for prod** (subscription subsidy ended 2026-06-15); subscription token for dev | [`03`](architecture/03-adapters-and-auth.md#billing--cost-control) |
 | **Skills home** | Dedicated **`loopkit-skills` git repo** (cross-run learned state) | [`02`](architecture/02-cloud-architecture.md#storage-model--almost-nothing-is-persistent-by-design) |
-| **Security** (Built 🟢 P2–P5a) | Ch 16 envelope extended: default-deny + per-run **Cilium FQDN** egress, least-priv SAs (no write verbs on the listener SA), **credential withheld from the agent** (load-shred + scrub + redact + pre-push scan), branch-only/draft PRs, context guard | [`04`](architecture/04-security.md) |
+| **Security** (Built 🟢 P2–P6) | Ch 16 envelope extended: default-deny + per-run **Cilium FQDN** egress, least-priv SAs (no write verbs on the listener SA), **credential withheld from the agent** (load-shred + scrub + redact + pre-push scan), branch-only/draft PRs, context guard, **+ P6 agent isolation: the untrusted tool surface runs in a keyless, different-uid/PID-ns executor sidecar (kernel boundary, closes the same-uid in-pod key-read residual)** | [`04`](architecture/04-security.md) |
 | **Observability** (Built 🟢) | Two layers: payload-free logs (`log.py`) **+** full-tree **LangSmith traces** (`trace.py`, optional `[trace]`, auto-on, `None`-safe); per-span cost via `pricing.py` | [`01`](architecture/01-system-today.md#observability--two-layers-logs--traces) |
 
 ## Build sequence
@@ -157,22 +186,46 @@ proven before the trigger surface is built on top of it.
   without burning the dedupe key. The **live** proof (two engineers' keys; a hijacked run's
   `printenv`/`cat /var/run/loopkit/creds` yields nothing; FQDN egress blocks an off-allowlist POST)
   **awaits a DOKS cluster**.
-- **Phase 5c — CI deployment tier (BUILD NEXT).** Run the single loop from **GitHub Actions / GitLab
-  CI** — the forge is the trigger/scheduler/secret-store/identity/sandbox, so it needs **no cluster**
-  and almost no new code (glue over `parse_event`/`issues.fetch_issues`/`remote.sync_done`). Designed in
-  **[`part-iii-ci-mode.md`](part-iii-ci-mode.md)**. This adds the middle of the **three deployment
-  tiers** — *local* (`loopkit run`) · *CI* (forge-triggered single loop, no infra) · *cloud fleet*
-  (concurrent/`evolve`/multi-tenant). Additive: touches no cloud code. *Acceptance:* a labeled issue →
-  a draft PR that closes it, with `MockAgent` covering the `--from-event` path token-free.
+- **Phase 5c — CI deployment tier ✅ BUILT (live drop-in optional).** The single loop now runs from
+  **GitHub Actions / GitLab CI** with **no cluster** — the forge is the trigger/scheduler/secret-store/
+  identity/sandbox. `loopkit run` gained **`--from-event`** (a new `triggers.parse_event_payload`
+  auto-detects the forge by body shape), **`--from-issue`** + **`--provider`** (a new
+  `issues.fetch_issue` single-object counterpart of `fetch_issues`), **`--open-pr`** (flips `[remote]`
+  on for the invocation, threading the issue number into `remote.sync_done(issue=N)`), and **`--adapter`**
+  (the templates pass `claude-api`). **`loopkit init --ci github|gitlab`** scaffolds the workflow + a
+  starter `loopkit.toml`/`PROMPT.md`; both templates also ship in **`examples/ci/`** (a drift-guard test
+  keeps them identical). A **GitLab credential fix** (`secrets.GIT_ENV` += `GITLAB_TOKEN`,
+  `remote.CRED_HELPER` GitHub→GitLab fallback) makes `glab`/git-push authenticate through the Phase-5a
+  hygiene while the agent's scrubbed shell still gets nothing. Additive — no cloud code touched. Designed
+  + now documented-built in **[`part-iii-ci-mode.md`](part-iii-ci-mode.md)**. *Acceptance met:* a labeled
+  issue → a draft PR that closes it, `MockAgent` covering the `--from-event`/`--from-issue` paths
+  token-free (`tests/test_ci.py`, 219 → 240 green); the live drop-the-template proof is optional.
+  **Teaching form (same session):** two runnable labs — `loopkit demo 20` (triggers-as-infrastructure)
+  and `loopkit demo 21` (the CI tier, `--live`-capable) — plus the
+  [`part-iii-ecosystem.md`](part-iii-ecosystem.md) module, bring Part III to the Parts I–II
+  scenario-per-concept standard.
 - **Phase 5b — Skills repo.** `loopkit-skills` repo wired into the worker (read at start + gated
   write-back on `DONE`). *Acceptance:* a solved run writes a skill back that a later run reads.
-- **Phase 6 — Agent isolation (the residual-closer) + observability.** The headline hardening is the
-  **sidecar / keyless-executor split** that closes the same-uid in-pod memory-read residual 5a can't
-  close in a single container — **designed in [`part-iii-agent-isolation.md`](part-iii-agent-isolation.md)**
-  (next-session plan; independent of 5b). Then logs/metrics shipping, the read-only dashboard, and the
-  v2 layer (KEDA, ESO/Vault, GitHub App, tighter quotas) — see *the ecosystem-vs-hand-rolled map* in
-  that doc's spirit: an operator + `LoopRun` CRD, Argo Events for the webhook, KEDA `ScaledJob` for the
-  queue, a GitHub App for auth, all of which replace thin slices we hand-rolled for the v1.
+- **Phase 6 — Agent isolation (the residual-closer) ✅ BUILT (live ptrace-fails proof pending a DOKS
+  cluster).** The **sidecar / keyless-executor split** that closes the same-uid in-pod memory-read
+  residual 5a can't close in a single container — **built this session**, documented in
+  [`part-iii-agent-isolation.md`](part-iii-agent-isolation.md). New core `executor.py` (`ToolExecutor`
+  seam + `Local`/`Remote` + `serve` + `loopkit executor` CLI); `_APIAdapter`/`ShellGate`/`run_loop`/
+  `build_agent`/`make_repo_runner` take an injected executor; `cloudrun._pod_spec` rewritten to a
+  two-container worker (loopkit-core + keyless executor native sidecar, creds via `envFrom` into
+  loopkit-core only). *Acceptance:* **proven by 252 token-free tests** — the API adapter drives tools
+  through a `RemoteToolExecutor` over a real socket (a file is written only if the call crossed the
+  wire); `ShellGate` runs the gate remotely; an unreachable executor degrades to a tool/gate error; the
+  pod spec asserts two containers, the key `envFrom`'d **only** into loopkit-core, a different-uid native
+  sidecar, and no Secret-backed volume anywhere. The **live** proof (`cat /proc/<core-pid>/mem` from the
+  executor fails — separate PID namespace — and the run still produces a branch + draft PR) **awaits a
+  DOKS cluster**. **Refinement:** `secrets.py`'s shred/scrub were kept (containment for the no-sidecar
+  CI + local tiers), not deleted; the worker pod dropped the init/tmpfs delivery for `envFrom`.
+- **Phase 6 (rest) — observability.** Logs/metrics shipping, the read-only dashboard, and the v2 layer
+  (KEDA, ESO/Vault, GitHub App, tighter quotas) — see *the ecosystem-vs-hand-rolled map*: an operator +
+  `LoopRun` CRD, Argo Events for the webhook, KEDA `ScaledJob` for the queue, a GitHub App for auth, all
+  of which replace thin slices we hand-rolled for the v1. A **separate-pod** executor split (own network
+  namespace) would also close same-pod 443-exfil of *content* — deferred.
 
 ## Gap inventory
 
@@ -258,33 +311,100 @@ proven before the trigger surface is built on top of it.
    the next firing produces a run. The HMAC/idempotency/CronJob logic + the in-cluster guard are
    already proven locally; only the live firing needs the cluster.
 
-**Phase 5a (per-submitter creds) is built and tested** — the env-grab is replaced by the
-identity→Secret resolver, the key is withheld from the agent, and the trigger paths bind the run to
-the issue author. **The next two sessions are scoped and designed:**
+**Phases 5a (per-submitter creds), 5c (CI tier), and 6 (agent isolation) are built and tested.** The
+env-grab is replaced by the identity→Secret resolver, the key is withheld from the agent, the trigger
+paths bind the run to the issue author, the single loop runs forge-CI-natively with no cluster, and the
+cloud worker's untrusted tool surface now runs in a **keyless, isolated executor container** (a kernel
+boundary, not a timed shred). **The next build step is:**
 
-1. **Phase 5c — the CI deployment tier (BUILD FIRST), designed in
-   [`part-iii-ci-mode.md`](part-iii-ci-mode.md).** Run the single loop from GitHub Actions / GitLab CI:
-   `loopkit run` gains `--from-event`/`--from-issue`/`--open-pr` (glue over the existing
-   `parse_event`/`issues.fetch_issues`/`remote.sync_done`), plus two shipped workflow templates. It
-   needs **no cluster** and works today, so it's the cheapest accessibility win and the most teachable
-   realization of Ch 12 + Ch 16. CI is the forge's job for secrets/identity/sandbox — **none** of the
-   cloud creds machinery applies there (that stays the cloud tier's).
-2. **Phase 6 — agent isolation (the residual-closer), designed in
-   [`part-iii-agent-isolation.md`](part-iii-agent-isolation.md).** The **sidecar / keyless-executor
-   split**: run the untrusted tool surface as a different uid/PID-namespace container with **no key**,
-   replacing the timing-dependent shred with a kernel boundary. Closes the same-uid in-pod memory-read
-   residual for the API-adapter path. (Build after the CI tier — the residual is only live-exploitable
-   once a DOKS cluster runs, which is still gated on provisioning.)
+1. **Phase 5b — the `loopkit-skills` cross-run flywheel (BUILD NEXT)** (`SkillRegistry` exists, needs a
+   durable git-repo home: read at run start + gated write-back on `DONE`). Independent of 6. *Acceptance:*
+   a solved run writes a skill back that a later run reads.
+2. **Phase 6 (rest) — observability + the v2 layer** (logs/metrics shipping, the read-only dashboard;
+   KEDA/ESO/Vault/GitHub App; a separate-pod executor split for same-pod 443-exfil of *content*).
 
 **Still queued:** Phase 5b (the `loopkit-skills` cross-run flywheel — `SkillRegistry` exists, needs a
-durable git-repo home), the two live steps (a GitHub remote → GHCR; a DOKS cluster → live-apply 2–5a),
-and the rest of Phase 6 (observability, KEDA/ESO/Vault/GitHub App). Carry the invariants in
+durable git-repo home), the two live steps (a GitHub remote → GHCR + the optional CI drop-in; a DOKS
+cluster → live-apply 2–6, including the Phase-6 ptrace-fails proof), and the rest of Phase 6
+(observability, KEDA/ESO/Vault/GitHub App). Carry the invariants in
 [`../CLAUDE.md`](../CLAUDE.md): extend at the seams, `None`-safe, thin stack, test-as-you-go,
 log-as-you-go, **trace-as-you-go**, **credentials never reach the agent's reach**, and **every mutating
 cloud command goes through the context guard**. **Update this doc and the architecture wiki as each
 phase lands** (the documentation contract).
 
 ## Changelog
+
+- **2026-06-21 — Phase 6 built (agent isolation: the keyless-executor sidecar split).** Closed 5a's one
+  residual — a same-uid in-pod `ptrace`/heap read of the in-process key — for the cloud worker, by
+  construction. New core **`executor.py`** (stdlib-only): a `ToolExecutor` seam (`dispatch` + `run_gate`),
+  **`LocalToolExecutor`** (in-process default — exact prior behavior; `_WorkspaceTools` moved here,
+  re-exported from `agent.py`), **`RemoteToolExecutor`** (length-prefixed-JSON over a Unix socket,
+  one-request-per-connection, **degrade-on-unreachable** → tool/gate error not a crash), a `serve()`
+  server, and a new top-level **`loopkit executor`** CLI command (the keyless sidecar; graceful SIGTERM).
+  `_APIAdapter`, `ShellGate`, `run_loop`, `build_agent`, and `make_repo_runner` all take an injected
+  executor (default `Local`); the cloud worker (`fleet worker --executor-socket`, env
+  `LOOPKIT_EXECUTOR_SOCKET`) injects `RemoteToolExecutor` so the agent's tool calls + the held-out gate
+  run in the sidecar. **`cloudrun._pod_spec` rewritten** to the two-container worker: loopkit-core (uid
+  1000) gets creds via **`envFrom`** (dropping the init-container→tmpfs→shred + `CREDS_DIR` + the
+  `creds`/`creds-src` volumes), the **executor native sidecar** (initContainer `restartPolicy: Always`,
+  uid 1001, **no Secret/envFrom**) runs the untrusted surface; shared **workspace + socket emptyDirs**
+  (`fsGroup` 1000, `umask 002`, socket `0660`), `GIT_CONFIG safe.directory=*` on the executor; the
+  coordinator stays single-container. The worker fail-closed key check re-keys off a new
+  `LOOPKIT_CREDS_EXPECTED` marker (envFrom replaced `LOOPKIT_CREDS_DIR`). **Refinement from the design
+  doc:** `secrets.py`'s load-shred + `child_env` scrub were **kept** (not deleted globally) — they are the
+  containment for the two tiers with **no sidecar** (the CI tier + untrusted local); the sidecar is the
+  cloud-worker kernel boundary and the shred is harmless/redundant inside the split. **241 → 252 tests**
+  (`tests/test_executor.py` ×9 socket round-trip — incl. the API adapter + `ShellGate` driving a real
+  socket peer, and degrade-on-unreachable — + the rewritten `test_cloudrun.py` pod-spec assertions: two
+  containers, the key `envFrom`'d into loopkit-core only, a different-uid native sidecar, no Secret-backed
+  volume anywhere). Deferred-import invariant held (core imports pull no kubernetes/redis/langsmith).
+  Updated [`part-iii-agent-isolation.md`](part-iii-agent-isolation.md) (Designed→Built + resolved
+  decisions), [`04`](architecture/04-security.md) (residual → closed for the cloud worker; new
+  *Agent isolation* layer row), [`02`](architecture/02-cloud-architecture.md) (two-container topology),
+  [`03`](architecture/03-adapters-and-auth.md) (envFrom delivery), and [`architecture/README.md`](architecture/README.md)
+  (master diagram + tier table). **Live DOKS proof** (ptrace from the executor fails; run still completes)
+  awaits a cluster.
+
+- **2026-06-21 — Part III teaching form restored (curriculum labs + ecosystem module).** Brought Part
+  III up to the Parts I–II standard: the *runnable-scenario* teaching form Part III had dropped. Two new
+  `demo`/`learn` chapters — **ch20 "Triggers as infrastructure"** (scripted: drives the pure
+  `WebhookApp.dispatch` through six deliveries — forged→401/no-run, signed→one run, retry + second event
+  →dedup, unlabelled→ignored — so the run count never exceeds one; the Ch 12 trigger seam productionized,
+  GitHub HMAC vs GitLab token) and **ch21 "The CI deployment tier"** (live-capable: a canned GitHub issue
+  event → `parse_event_payload` → goal → the real `run_loop` over the demo-repo → DONE → the simulated
+  `--open-pr` outward edge with `Closes #N`; narrates the three tiers + platform-primitives-first). Both
+  token-free by default (`MockAgent` + the demo-repo's real pytest gates); ch21 swaps in claude-code under
+  `--live`, ch20 is scripted-only (it teaches plumbing, like ch12). Registered in
+  `scenarios/__init__.py`, covered by `test_scenarios.py` (the play-all smoke test + an explicit
+  registry/`live_supported` assertion). New **[`docs/part-iii-ecosystem.md`](part-iii-ecosystem.md)** —
+  the GitHub/GitLab teaching module: the three deployment tiers, *use-the-platform's-primitives-first*
+  (trigger/secrets/identity/sandbox per tier), the CI tier in depth (a render-verified mermaid flow + a
+  GitHub-vs-GitLab table), triggers-as-infrastructure, the two labs, and the `loopkit init --ci`
+  real-project on-ramp (fulfils the backlogged ecosystem-module note). Cross-linked from
+  `USING-ON-YOUR-REPO.md`, the architecture wiki, and the root README. **241 tests green** (was 240;
+  ch20/21 ride the existing play-all smoke test, +1 explicit registry/`live_supported` assertion).
+
+- **2026-06-21 — Phase 5c built (CI deployment tier: run the single loop from forge CI, no cluster).**
+  Added the middle of the three deployment tiers. `loopkit run` gained **`--from-event <path>`** (read a
+  forge issue-event JSON — Actions `$GITHUB_EVENT_PATH` / GitLab CI — via a new
+  **`triggers.parse_event_payload`** that auto-detects GitHub vs GitLab by body shape, since there are no
+  HTTP headers/signature on disk), **`--from-issue <n>` + `--provider`** (fetch one issue via a new
+  **`issues.fetch_issue`** — `gh/glab issue view`, the single-object sibling of `fetch_issues`, factored
+  over a shared `_run_forge_json`), **`--open-pr`** (per-invocation flip of `[remote]` on → push + draft
+  PR, threading the captured issue number into `remote.sync_done(issue=N)` for `Closes #N`), and
+  **`--adapter`** (override; the templates pass `claude-api`, no binary in CI). **`loopkit init --ci
+  github|gitlab`** scaffolds the workflow alongside the starter `loopkit.toml`/`PROMPT.md`; both
+  templates ship in **`examples/ci/`** (+ a README) with a drift-guard test keeping them byte-identical
+  to the CLI constants. **GitLab credential fix:** `secrets.GIT_ENV` += `GITLAB_TOKEN` and
+  `remote.CRED_HELPER` now falls back GitHub→GitLab, so `glab` (issue fetch + MR) and the HTTPS git push
+  authenticate through the Phase-5a hygiene — re-injected only into loopkit's *own* forge subprocess; the
+  agent's scrubbed `child_env()` still gets no token (asserted by a new `test_secrets` case). Additive:
+  no cloud control-plane code touched; the deferred-import invariant holds (the CI path reuses `triggers`
+  without pulling `[cloud]`/`[fleet]`). **219 → 240 tests** (`tests/test_ci.py` ×12 + parser/fetch/secrets
+  units). Updated [`part-iii-ci-mode.md`](part-iii-ci-mode.md) (Designed→Built) and
+  [`architecture/README.md`](architecture/README.md) (CI tier → 🟢 Built). **Sharp edge documented:** CI
+  cost/identity is **per-repo, not per-submitter** (CI secrets are repo-scoped) — per-engineer attribution
+  stays a cloud-tier feature; the doc says so rather than faking it.
 
 - **2026-06-21 — Phase 5a built (per-submitter creds, hardened against the prompt-injection flow).**
   Red-teamed before build (a multi-agent pass — 4 adversarial attack lenses → per-finding verify →

@@ -1,0 +1,14 @@
+# loopkit CI tier (GitLab) — run the loop on one issue, open a draft MR. No cluster required.
+# GitLab has no native issue->pipeline trigger, so this fires on: a manual "Run pipeline" with an
+# ISSUE_IID variable, a webhook -> trigger token, or a pipeline schedule. Add ANTHROPIC_API_KEY and a
+# GITLAB_TOKEN (PAT, api scope) as masked CI/CD variables, and keep a loopkit.toml in the repo.
+loopkit:
+  image: python:3.13-slim
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "web" && $ISSUE_IID'         # manual run, pass ISSUE_IID
+    - if: '$CI_PIPELINE_SOURCE == "trigger" && $ISSUE_IID'     # webhook -> trigger token
+    - if: '$CI_PIPELINE_SOURCE == "schedule" && $ISSUE_IID'    # scheduled run of one issue
+  script:
+    - pip install 'loopkit[claude,remote]'                     # claude-api needs no binary in CI
+    - loopkit run --from-issue "$ISSUE_IID" --provider gitlab --adapter claude-api --open-pr
+  # GITLAB_TOKEN authenticates glab (issue fetch + MR) and the git push; ANTHROPIC_API_KEY pays.

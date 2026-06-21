@@ -207,6 +207,23 @@ def parse_gitlab_event(payload: dict, delivery_id: str = "-") -> WebhookEvent | 
         body=(oa.get("description") or "").strip(), labels=labels)
 
 
+def parse_event_payload(payload: dict, delivery_id: str = "-") -> WebhookEvent | None:
+    """Parse a raw forge issue-event payload, auto-detecting GitHub vs GitLab by its *shape*.
+
+    The CI tier (`loopkit run --from-event`) hands us the event JSON straight off disk — Actions
+    writes it to `$GITHUB_EVENT_PATH`, GitLab CI to a trigger variable — with **no HTTP headers** to
+    read the event type from and **no signature** to verify (the forge already authenticated the
+    trigger; the CI runner is the trust boundary, not loopkit). So unlike the webhook path, the forge
+    has to be inferred from the body: a GitLab issue payload carries a top-level `object_kind`, a
+    GitHub `issues` payload does not (it has `action` + `issue` + `repository`). Everything downstream
+    is the same `WebhookEvent` the webhook path produces. Returns None for any non-issue / non-actionable
+    payload (a `workflow_dispatch`, a `closed` issue), so the caller can report it cleanly.
+    """
+    if payload.get("object_kind"):                       # GitLab system-hook discriminator
+        return parse_gitlab_event(payload, delivery_id)
+    return parse_event("issues", payload, delivery_id)   # GitHub `issues` event
+
+
 def should_trigger(event: WebhookEvent, trigger_label: str | None) -> bool:
     """Policy: does this event warrant a run, given an optional required label?
 

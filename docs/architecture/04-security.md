@@ -27,6 +27,12 @@ defense-in-depth that answers it.
 > author** (fail-closed allowlist), **CLI adapters are refused** on untrusted runs, and a **pre-push
 > secret scan** + **Cilium FQDN egress** backstop the exfil paths. See *Credential handling along the
 > injection flow* below.
+> **Built 🟢 (Phase 6):** **agent isolation — the keyless executor sidecar** closes 5a's one residual
+> (a same-uid `ptrace` of the in-process key) for the cloud worker by construction: the untrusted tool
+> surface runs in a **different-uid, separate-PID-namespace container with no credential** ([`executor.py`](../../loopkit/executor.py),
+> [`cloudrun._pod_spec`](../../loopkit/extensions/cloudrun.py)), a kernel boundary that *replaces* the
+> timing-dependent shred there. The in-process shred/scrub stay as the containment for the no-sidecar CI
+> + local tiers. See *The same-uid residual — closed for the cloud worker* below.
 
 ## Threat model
 
@@ -56,7 +62,8 @@ ServiceAccount, NetworkPolicy, Secret, and budget allow.
 | **Tenant isolation** | namespace per run; `ResourceQuota`/`LimitRange`; per-run Redis keyspace | cross-tenant blast radius |
 | **Network** 🟢 | `NetworkPolicy` **default-deny** + egress allowlist (GitHub, `api.anthropic.com`/OpenAI, GHCR) — and *nothing else*; **workers get no cluster-API access** | exfiltration, lateral movement |
 | **Identity** 🟢 | least-privilege ServiceAccounts: **only `loopkit-control` may create namespaces/Jobs/Secrets**; workers run a no-API-access SA; the control SA gets secrets `create,get,delete` — **no `list`/`update`/`patch`** (a listener RCE can't enumerate or rewrite a tenant's key) | privilege escalation |
-| **Secrets** 🟢 | per-submitter source Secret → **only the adapter key + git projected** into a per-run Secret, **delivered to memory and shredded** off the FS/`os.environ` before agent code runs (never `envFrom`, never an agent-readable mount), **GC'd with the namespace**; at-rest depends on the cluster's etcd posture (sealed-secrets/SOPS; Vault ⚪) | secret theft, exfiltration, persistence |
+| **Secrets** 🟢 | per-submitter source Secret → **only the adapter key + git projected** into a per-run Secret; in the **Phase-6 worker split** it is `envFrom`'d into **loopkit-core only** (trusted) while the untrusted `run_bash`/gate run in a **keyless executor sidecar** (different uid/PID-ns, no key); the no-sidecar CI/local tiers **load + shred** it off the FS/`os.environ`; **GC'd with the namespace**; at-rest depends on the cluster's etcd posture (sealed-secrets/SOPS; Vault ⚪) | secret theft, exfiltration, persistence |
+| **Agent isolation** 🟢 | the model's chosen commands + the held-out gate run in a **separate-uid, separate-PID-namespace, credential-free** executor container — a kernel boundary, so a hijacked agent can neither `printenv`/`cat` nor `ptrace` the key | same-uid in-pod key read |
 | **Code egress** | **branch-only pushes** (never `main`), **draft** PRs, refuses forbidden branches, never force | malicious merges |
 | **Filesystem** | protected-path guard (agent can't touch `tests/`) + the pre-tool-use hook baked into the image | gaming the gate, destructive edits |
 | **Cost** | per-run loopkit budget stop + provider Console spend limit (two independent backstops) | runaway / abusive spend |
@@ -99,10 +106,9 @@ flowchart LR
     A["cloud creds set --as eng<br/>(env/stdin, never argv)"] --> B["per-(env,submitter) Secret<br/>in loopkit-system"]
     B --> C["resolve_for_run<br/>project adapter key + git<br/>issue-author identity · fail-closed"]
     C --> D["per-run Secret<br/>worker: api+git · coord: git only"]
-    D --> E["initContainer → tmpfs<br/>emptyDir medium:Memory<br/>(NOT envFrom / agent mount)"]
-    E --> F["worker load → memory<br/>os.remove files · scrub os.environ<br/>RLIMIT_CORE=0"]
-    F --> G["API SDK: explicit key in-proc<br/>git: env-fed helper, no URL token"]
-    F --> H["run_bash · gate · vendor CLI<br/>scrub_env() → NO key"]
+    D --> E["loopkit-core · uid 1000 (TRUSTED)<br/>creds via envFrom (cloud) · load→heap<br/>scrub os.environ · RLIMIT_CORE=0"]
+    E --> G["API SDK: explicit key in-proc<br/>git: env-fed helper, no URL token"]
+    E -- "tool RPC (unix socket)" --> H["executor · uid 1001 (KEYLESS)<br/>run_bash · gate · NO credential<br/>kernel boundary, not a timed shred"]
     G --> I["pre-push secret scan +<br/>Cilium FQDN egress"]
 ```
 
@@ -110,9 +116,9 @@ flowchart LR
 
 | Vector | Control |
 |---|---|
-| `run_bash`/gate inherit `os.environ` → `printenv` → trace/repo/push | `secrets.child_env()` scrubs every untrusted-driven subprocess |
-| File-mount co-located with the agent uid → `cat /var/run/loopkit/creds/*` | init-container→memory-tmpfs→**`os.remove` + scrub** before agent code runs |
-| Same-container `/proc/<loopkit>/environ` | the key is deleted from `os.environ` at load; held only in heap |
+| `run_bash`/gate inherit `os.environ` → `printenv` → trace/repo/push | **cloud worker:** they run in the **keyless executor sidecar** (no key in its env) — Phase 6; **CI/local:** `secrets.child_env()` scrubs every untrusted-driven subprocess |
+| File-mount co-located with the agent uid → `cat /var/run/loopkit/creds/*` | **cloud worker:** the executor has **no Secret mount or envFrom at all**; the key is `envFrom`'d into loopkit-core only — Phase 6; **CI/local:** load → `os.remove` + scrub before agent code runs |
+| Same-uid `ptrace`/`/proc/<loopkit>/mem` of the in-process key | **cloud worker:** the executor is a **different uid in its own PID namespace** — it can't see loopkit-core's PID, let alone read its memory — Phase 6 (the residual 5a could not close); **CI/local:** held only in heap, scrubbed from `os.environ` |
 | Whose key = **attacker-controlled** webhook JSON (`sender.login`) | bind to the **issue author**; **fail-closed allowlist** (registered set); GitLab uses a pinned identity |
 | Token-in-URL persists in `.git/config` | `sanitize_git_url` strips userinfo; auth via an env-fed credential helper (never argv) |
 | Held-out gate runs agent-authored `conftest.py` with creds | the gate spawns with the scrubbed env too |
@@ -121,17 +127,32 @@ flowchart LR
 | A credential written into the repo before a human sees the draft PR | **pre-push secret scan** (registry + token-shape) hard-gates `push_branch` |
 | A run orphaning a real Secret at rest on partial failure | `create_run` deletes the namespace on any apply failure |
 
-**The honest residual.** In a *single shared container*, loopkit must hold the live key in-process to
-make the LLM/git calls, and the agent's `run_bash` runs as the same uid — so a same-uid
-`ptrace`/`process_vm_readv` of loopkit's heap is **not** closed by env/file scrubbing or
-`RuntimeDefault` seccomp (which doesn't block ptrace). It is closed only by running the agent shell in
-a **separate PID-namespace container** — a topology change deferred past 5a (the in-process API tool
-loop co-locates `run_bash` with loopkit). We state this plainly: 5a closes every
-env/file/argv/URL/log/trace/gate/repo/network path; it does **not** claim "the agent never sees it."
-Other residuals: 443-exfil of content to an *allowed* host (irreducible without per-destination
-identity); the CLI-adapter vendor loop (so it's **refused** on untrusted runs); redact-by-value is a
-backstop, not a boundary; the `--from-issues` **sweep** spends one identity for *all* swept issues
-(per-author attribution is the **webhook** path only).
+**The same-uid residual — closed for the cloud worker (Phase 6 🟢).** 5a's honest residual was: in a
+*single shared container* loopkit must hold the live key in-process to make the LLM/git calls, and the
+agent's `run_bash` runs as the same uid — so a same-uid `ptrace`/`process_vm_readv` of loopkit's heap is
+**not** closed by env/file scrubbing or `RuntimeDefault` seccomp (which doesn't block ptrace). **Phase 6
+closes it by construction** for the cloud worker (the multi-tenant attack surface): the untrusted tool
+surface (`run_bash`/read/write + the held-out gate) is dispatched over a Unix socket to a **keyless
+executor sidecar** running as a **different uid in its own PID namespace** (`extensions/cloudrun._pod_spec`
++ `executor.py` + `RemoteToolExecutor`). uid 1001 has no `CAP_SYS_PTRACE`, can't see loopkit-core's PID,
+and the key is never in its env, files, or address space — a **kernel-enforced** boundary that replaces
+5a's timing-dependent shred. loopkit-core (uid 1000) keeps the key but runs only trusted code (the loop,
+the LLM call, git clone/commit/push) and **never executes a model-chosen command**.
+
+**What Phase 6 does *not* change (deliberate, refined from the design):** the in-process **load-shred +
+`child_env` scrub remain** — they are the containment for the two tiers that have **no sidecar**: the
+**CI deployment tier** (5c, an untrusted issue-triggered run with the API agent in-process) and untrusted
+**local** runs. The sidecar is the cloud-worker kernel boundary; the shred is the everywhere-else
+mitigation, and is harmless/redundant inside the split. (The design doc's "delete the shred globally" was
+scoped to the cloud worker; deleting it would have regressed the CI tier — so we kept it.)
+
+**Remaining residuals.** (1) The executor shares loopkit-core's **network namespace** (same pod), so it
+keeps the same 443 egress and could exfil *data it holds* (workspace/issue text) — **not the key** —
+bounded by the FQDN egress allowlist + the pre-push scan; a separate-pod split (own netns) would close
+that too, at the cost of cross-pod IPC (deferred). (2) **CLI adapters** run their own internal tool loop,
+so their execution can't be relocated to a keyless executor — they stay **refused** on untrusted/trigger
+runs. (3) redact-by-value is a backstop, not a boundary. (4) the `--from-issues` **sweep** spends one
+identity for *all* swept issues (per-author attribution is the **webhook** path only).
 
 ## Budget ceilings
 
@@ -210,9 +231,11 @@ security-critical logic is a pure, exhaustively unit-tested `WebhookApp.dispatch
 
 ## Open hardening (⚪ Planned)
 
-The one that matters most: a **separate-PID-namespace agent container** so the agent's `run_bash`
-can't `ptrace` loopkit's in-process key — the residual that single-container 5a cannot close. Then:
-GitHub **App** auth (scoped, revocable) replacing PATs; a validating **admission webhook** pinning
+The one that mattered most — a **separate-PID-namespace, keyless agent container** so the agent's
+`run_bash` can't `ptrace` loopkit's in-process key — is **Built 🟢 (Phase 6)**: the executor sidecar
+above. What remains: a **separate-pod** split (own network namespace) to also close same-pod 443-exfil
+of *content* (not the key); GitHub **App** auth (scoped, revocable) replacing PATs; a validating
+**admission webhook** pinning
 `--as` to the authenticated identity (so `--as` is an authorization, not a trust assertion); a scoped
 **per-engineer self-service RBAC** Role for `cloud creds set/rm`; tighter per-run quotas; a
 cluster-wide **admission/concurrency cap** on runs; signed commits. (Per-run **Cilium FQDN egress** and

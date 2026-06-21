@@ -52,9 +52,14 @@ loopkit demo 8                 # Ch 8  — continuous review gates done
 loopkit demo 10                # Ch 10 — fan-out over isolated workers
 loopkit demo 11                # Ch 11 — evolutionary search, validated
 loopkit demo 17                # Ch 17 — the skill write-back flywheel
+loopkit demo 20                # Ch 20 — triggers as infrastructure (a signed webhook → one run)
+loopkit demo 21                # Ch 21 — the CI deployment tier (an issue → a draft PR, no cluster)
 loopkit learn 9                # any scenario, narrated, with pauses
 loopkit demo 9 --live          # use the real claude-code agent (where a scenario supports it)
 ```
+
+Chapters 20–21 are the **Part III** ecosystem labs — running the loop inside GitHub/GitLab. The
+companion teaching module is [`docs/part-iii-ecosystem.md`](docs/part-iii-ecosystem.md).
 
 ## The two gates (the heart of it)
 

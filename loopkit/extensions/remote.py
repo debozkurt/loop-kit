@@ -30,7 +30,10 @@ _log = get_logger("remote")
 # An env-fed credential helper: it echoes the git token from the (re-injected) env *at call time*, so
 # the token is never on the command line (visible in `ps`) nor persisted in `.git/config`. Paired with
 # `child_env(add=GIT_ENV)` so loopkit's own git authenticates while the agent's scrubbed shell cannot.
-CRED_HELPER = '!f() { echo username=x; echo "password=${GITHUB_TOKEN:-${GH_TOKEN:-}}"; }; f'
+# Falls back GitHub → GitLab so an HTTPS push works on either forge (GitLab accepts a PAT as the
+# password with any username); `glab`/`gh` read their native token vars from the same re-injected env.
+CRED_HELPER = ('!f() { echo username=x; echo '
+               '"password=${GITHUB_TOKEN:-${GH_TOKEN:-${GITLAB_TOKEN:-}}}"; }; f')
 _USERINFO = re.compile(r"(https?://)[^/@]*@")
 
 
@@ -133,8 +136,8 @@ def open_pull_request(repo: Path, *, provider: str, branch: str, base: str, titl
         return None
 
     try:
-        # gh/glab authenticate from GH_TOKEN/GITHUB_TOKEN in env — give them the scrubbed env with
-        # only the git token re-injected (no model key, nothing else).
+        # gh reads GH_TOKEN/GITHUB_TOKEN, glab reads GITLAB_TOKEN — give them the scrubbed env with
+        # only those git tokens re-injected (GIT_ENV); no model key, nothing else.
         proc = subprocess.run(cmd, cwd=repo, env=git_env(), capture_output=True, text=True)
     except FileNotFoundError:
         cli = "gh" if provider == "github" else "glab"

@@ -59,6 +59,18 @@ def test_child_env_prefers_store_value_for_reinjected_var():
     assert env["GITHUB_TOKEN"] == "from-store"                  # the loaded store wins over ambient
 
 
+def test_child_env_reinjects_the_gitlab_token_for_loopkits_own_forge_calls():
+    # glab authenticates via GITLAB_TOKEN — it must reach loopkit's own forge subprocess (GIT_ENV),
+    # but the agent's bare child_env() must still scrub it (it matches the *_TOKEN credential rule).
+    base = {"PATH": "/bin", "GITLAB_TOKEN": "glpat-xyz", "ANTHROPIC_API_KEY": "sk-ant-secret"}
+    assert "GITLAB_TOKEN" in secrets.GIT_ENV
+    forge_env = secrets.CredentialStore().child_env(base=base, add=secrets.GIT_ENV)
+    assert forge_env["GITLAB_TOKEN"] == "glpat-xyz"            # re-injected for glab / git push
+    assert "ANTHROPIC_API_KEY" not in forge_env                # model key still withheld
+    agent_env = secrets.CredentialStore().child_env(base=base)
+    assert "GITLAB_TOKEN" not in agent_env                     # the agent's shell gets none
+
+
 # --------------------------------------------------------------------------------------------
 # load() — from tmpfs files (cloud) and from env (laptop), both shred after.
 # --------------------------------------------------------------------------------------------

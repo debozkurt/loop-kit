@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Callable, Protocol, runtime_checkable
 
 from . import secrets, trace
+from .executor import LocalToolExecutor, ToolExecutor, _WorkspaceTools  # noqa: F401 — _WorkspaceTools re-exported
 from .pricing import DEFAULT_MODELS, Usage, estimate_cost
 
 
@@ -289,73 +290,27 @@ _TOOLS: list[_ToolSpec] = [
 ]
 
 
-class _WorkspaceTools:
-    """Executes the API adapter's tool calls against the run's workspace, sandboxed to its root.
-
-    Every path is resolved and confined to the workspace (no traversal out via `..`, symlinks, or
-    absolute paths). Errors become tool *outputs* with `is_error=True` — never raised — so the model
-    can read the failure and adapt on the next turn, exactly as a human-driven agent would.
-    """
-
-    MAX_OUTPUT = 8000             # cap tool output so one tick can't blow up the context
-
-    def __init__(self, workspace: Path) -> None:
-        self.root = workspace.resolve()
-
-    def dispatch(self, name: str, args: dict) -> tuple[str, bool]:
-        try:
-            if name == "read_file":
-                return self._read(str(args.get("path", "")))
-            if name == "write_file":
-                return self._write(str(args.get("path", "")), str(args.get("content", "")))
-            if name == "run_bash":
-                return self._bash(str(args.get("command", "")))
-            return f"unknown tool {name!r}", True
-        except Exception as exc:   # noqa: BLE001 — tool errors are fed back to the model, never raised
-            return f"error: {exc}", True
-
-    def _resolve(self, path: str) -> Path:
-        candidate = (self.root / path).resolve()
-        if candidate != self.root and self.root not in candidate.parents:
-            raise ValueError(f"path {path!r} escapes the repository root")
-        return candidate
-
-    def _read(self, path: str) -> tuple[str, bool]:
-        target = self._resolve(path)
-        if not target.is_file():
-            return f"no such file: {path}", True
-        return target.read_text()[: self.MAX_OUTPUT], False
-
-    def _write(self, path: str, content: str) -> tuple[str, bool]:
-        target = self._resolve(path)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(content)
-        return f"wrote {path} ({len(content)} bytes)", False
-
-    def _bash(self, command: str) -> tuple[str, bool]:
-        # The agent's shell runs untrusted-derived commands, so it gets a credential-free env: the
-        # API key lives only in loopkit's process; loopkit's own git calls re-inject the git token.
-        proc = subprocess.run(command, shell=True, cwd=self.root,
-                              env=secrets.current().child_env(), capture_output=True, text=True)
-        out = ((proc.stdout or "") + (proc.stderr or ""))[: self.MAX_OUTPUT]
-        return f"exit={proc.returncode}\n{out}", False
-
-
 class _APIAdapter:
     """Provider-agnostic tool-calling loop for one tick. Drives a `_Backend` until the model stops
     requesting tools (or a per-tick cap is hit), executing each tool call against the workspace and
-    accumulating native usage into an exact `cost_usd` via `pricing.estimate_cost`."""
+    accumulating native usage into an exact `cost_usd` via `pricing.estimate_cost`.
 
-    def __init__(self, backend: _Backend, *, max_tool_calls: int = 25) -> None:
+    Tool execution is dispatched through an injected `ToolExecutor` (default `LocalToolExecutor`, the
+    in-process path). The cloud worker injects a `RemoteToolExecutor` so the model's chosen commands
+    run in a keyless, isolated container — loopkit-core (this process) keeps the key for the LLM call
+    but never executes a model-chosen command itself (Phase 6 agent isolation)."""
+
+    def __init__(self, backend: _Backend, *, max_tool_calls: int = 25,
+                 executor: ToolExecutor | None = None) -> None:
         self._backend = backend
         self._max = max_tool_calls
+        self._executor = executor or LocalToolExecutor()
 
     @property
     def model(self) -> str:
         return self._backend.model
 
     def act(self, prompt: str, workspace: Path) -> AgentResult:
-        tools = _WorkspaceTools(workspace)
         transcript: list[dict] = [{"role": "user", "content": prompt}]
         total = Usage()
         last_text = ""
@@ -386,7 +341,7 @@ class _APIAdapter:
             for call in turn.tool_calls:
                 n_calls += 1
                 with trace.span(f"tool:{call.name}", run_type="tool", inputs=call.args) as tool_span:
-                    output, is_error = tools.dispatch(call.name, call.args)
+                    output, is_error = self._executor.dispatch(call.name, call.args, workspace)
                     # Redact at capture: this output re-enters the transcript and is re-sent to the
                     # model on the next tick (the wire), so scrub a key here, not only in the trace.
                     output = secrets.redact(output)
@@ -410,18 +365,20 @@ class ClaudeAPIAdapter(_APIAdapter):
     """
 
     def __init__(self, model: str | None = None, *, client: object | None = None,
-                 backend: _Backend | None = None, max_tool_calls: int = 25) -> None:
+                 backend: _Backend | None = None, max_tool_calls: int = 25,
+                 executor: ToolExecutor | None = None) -> None:
         backend = backend or _AnthropicBackend(model or DEFAULT_MODELS["claude-api"], client=client)
-        super().__init__(backend, max_tool_calls=max_tool_calls)
+        super().__init__(backend, max_tool_calls=max_tool_calls, executor=executor)
 
 
 class OpenAIAPIAdapter(_APIAdapter):
     """OpenAI via the OpenAI SDK (`loopkit[openai]`). Default model: `gpt-4o`. `backend` injectable."""
 
     def __init__(self, model: str | None = None, *, client: object | None = None,
-                 backend: _Backend | None = None, max_tool_calls: int = 25) -> None:
+                 backend: _Backend | None = None, max_tool_calls: int = 25,
+                 executor: ToolExecutor | None = None) -> None:
         backend = backend or _OpenAIBackend(model or DEFAULT_MODELS["openai-api"], client=client)
-        super().__init__(backend, max_tool_calls=max_tool_calls)
+        super().__init__(backend, max_tool_calls=max_tool_calls, executor=executor)
 
 
 class _AnthropicBackend:
@@ -574,8 +531,14 @@ def _trace_messages(transcript: list[dict]) -> list[dict]:
     return out
 
 
-def build_agent(cfg) -> Agent:
-    """Resolve the configured adapter name to a concrete Agent (AgentConfig in)."""
+def build_agent(cfg, *, executor: ToolExecutor | None = None) -> Agent:
+    """Resolve the configured adapter name to a concrete Agent (AgentConfig in).
+
+    `executor` is the Phase-6 seam: the cloud worker passes a `RemoteToolExecutor` so an API adapter's
+    tool calls run in the keyless executor sidecar, not in this (key-holding) process. None ⇒ the
+    in-process `LocalToolExecutor` — exact prior behavior for local runs and the dev fleet. CLI/mock
+    adapters ignore it (a vendor binary loops internally; the mock has no tools).
+    """
     name = cfg.adapter
     if name == "mock":
         return MockAgent()
@@ -584,8 +547,8 @@ def build_agent(cfg) -> Agent:
     if name == "codex":
         return CodexAdapter(model=cfg.model, extra_args=cfg.args)
     if name == "claude-api":
-        return ClaudeAPIAdapter(model=cfg.model, max_tool_calls=cfg.max_tool_calls)
+        return ClaudeAPIAdapter(model=cfg.model, max_tool_calls=cfg.max_tool_calls, executor=executor)
     if name == "openai-api":
-        return OpenAIAPIAdapter(model=cfg.model, max_tool_calls=cfg.max_tool_calls)
+        return OpenAIAPIAdapter(model=cfg.model, max_tool_calls=cfg.max_tool_calls, executor=executor)
     raise ValueError(f"unknown agent adapter: {name!r} "
                      "(expected: mock | claude-code | codex | claude-api | openai-api)")

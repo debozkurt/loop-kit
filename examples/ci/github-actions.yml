@@ -1,0 +1,41 @@
+# loopkit CI tier — turn a labelled issue into a draft PR, no cluster required.
+# Setup: drop this at .github/workflows/loopkit.yml, add the repo secret ANTHROPIC_API_KEY, and keep
+# a loopkit.toml in the repo (run `loopkit init`). Label an issue `loopkit` to dispatch the loop.
+name: loopkit
+on:
+  issues:
+    types: [opened, labeled]
+  workflow_dispatch:
+    inputs:
+      issue:
+        description: Issue number to run loopkit on
+        required: true
+permissions:
+  contents: write          # push the loop's branch
+  pull-requests: write     # open the draft PR
+  issues: read             # read the issue (manual-dispatch path)
+jobs:
+  loopkit:
+    # Act on issues carrying the `loopkit` label (the opt-in switch); always act on a manual run.
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.issue.labels.*.name, 'loopkit')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0     # full history so the loop can branch from + PR against the base
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - run: pip install 'loopkit[claude,remote]'
+      - name: loopkit run (issue event)
+        if: github.event_name == 'issues'
+        run: loopkit run --from-event "$GITHUB_EVENT_PATH" --adapter claude-api --open-pr
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}   # a repo/org secret (per-repo keying)
+          GH_TOKEN: ${{ github.token }}                          # scoped, ephemeral — pushes + opens the PR
+      - name: loopkit run (manual dispatch)
+        if: github.event_name == 'workflow_dispatch'
+        run: loopkit run --from-issue "${{ inputs.issue }}" --adapter claude-api --open-pr
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GH_TOKEN: ${{ github.token }}

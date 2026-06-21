@@ -29,6 +29,7 @@ from .stops import BudgetCeiling, LoopState, NoProgress, StopReason, first_trigg
 if TYPE_CHECKING:
     # Typing-only imports: the core never depends on an extension at runtime — the hook and the
     # registry are duck-called. Both are opt-in (Ch 8, Ch 17), so passing None keeps v1 exact.
+    from .executor import ToolExecutor
     from .extensions.review import ReviewHook
     from .extensions.skills import SkillRegistry
 
@@ -62,19 +63,26 @@ def _finish(run_span, result: RunResult) -> RunResult:
 def run_loop(config, agent: Agent, *, iteration_gate: Gate | None = None,
              acceptance_gate: Gate | None = None, review_hook: "ReviewHook | None" = None,
              skills: "SkillRegistry | None" = None, dry_run: bool = False,
-             trace_metadata: dict | None = None) -> RunResult:
+             trace_metadata: dict | None = None,
+             executor: "ToolExecutor | None" = None) -> RunResult:
     """Drive the agent toward `config.goal` until a terminal is reached. Returns the terminal.
 
     `trace_metadata` is merged onto the top-level trace span — the fleet worker passes the task id
     here so every run in a fleet is attributable in LangSmith (None = exact prior behavior).
+
+    `executor` is the Phase-6 seam wired into the **default** gates the loop builds from config: a
+    `RemoteToolExecutor` makes the held-out gate (agent-authored tests) run in the keyless executor
+    sidecar. None ⇒ the in-process `LocalToolExecutor`. The protected-path guard and commit-every-tick
+    stay here in loopkit-core (trusted) operating on the shared workspace — only the gate *command* is
+    dispatched. An explicitly-passed gate keeps its own executor (the caller's choice).
     """
     repo = config.repo_path()
     run_id = durability.state_signature(repo)[:8]
     log = get_logger("loop", run_id)
 
-    iteration_gate = iteration_gate or ShellGate(config.gate.iteration)
+    iteration_gate = iteration_gate or ShellGate(config.gate.iteration, executor=executor)
     acceptance_gate = acceptance_gate or (
-        ShellGate(config.gate.acceptance) if config.gate.acceptance else AlwaysPass()
+        ShellGate(config.gate.acceptance, executor=executor) if config.gate.acceptance else AlwaysPass()
     )
     # Per-tick hard stops, in precedence order. The iteration cap is the loop's own bound.
     hard_stops = [BudgetCeiling(config.agent.max_cost_usd),

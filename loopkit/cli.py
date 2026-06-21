@@ -10,6 +10,7 @@ commands, so the core CLI loads without the optional `[fleet]` dependency.
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import shutil
 import subprocess
@@ -24,6 +25,7 @@ from rich.table import Table
 from . import pricing, safety, scenarios, secrets, trace
 from .agent import build_agent
 from .config import Config, load_config
+from .log import get_logger
 from .loop import RunResult, run_loop
 from .pricing import DEFAULT_MODELS
 from .stops import StopReason
@@ -84,17 +86,98 @@ The visible tests are an incomplete check — passing them is necessary but not 
 Make the behaviour correct. Do not weaken, delete, or skip any test.
 """
 
+# CI deployment tier (Phase 5c): run the single loop from the forge's CI on a labelled issue, no
+# cluster. The forge is the trigger, the secret store, the identity, and the per-job sandbox; loopkit
+# is just the loop. These are the canonical templates `loopkit init --ci <forge>` scaffolds and
+# `examples/ci/` mirrors — see docs/part-iii-ci-mode.md. Requires a loopkit.toml in the repo.
+_CI_GITHUB_TEMPLATE = """\
+# loopkit CI tier — turn a labelled issue into a draft PR, no cluster required.
+# Setup: drop this at .github/workflows/loopkit.yml, add the repo secret ANTHROPIC_API_KEY, and keep
+# a loopkit.toml in the repo (run `loopkit init`). Label an issue `loopkit` to dispatch the loop.
+name: loopkit
+on:
+  issues:
+    types: [opened, labeled]
+  workflow_dispatch:
+    inputs:
+      issue:
+        description: Issue number to run loopkit on
+        required: true
+permissions:
+  contents: write          # push the loop's branch
+  pull-requests: write     # open the draft PR
+  issues: read             # read the issue (manual-dispatch path)
+jobs:
+  loopkit:
+    # Act on issues carrying the `loopkit` label (the opt-in switch); always act on a manual run.
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.issue.labels.*.name, 'loopkit')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0     # full history so the loop can branch from + PR against the base
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - run: pip install 'loopkit[claude,remote]'
+      - name: loopkit run (issue event)
+        if: github.event_name == 'issues'
+        run: loopkit run --from-event "$GITHUB_EVENT_PATH" --adapter claude-api --open-pr
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}   # a repo/org secret (per-repo keying)
+          GH_TOKEN: ${{ github.token }}                          # scoped, ephemeral — pushes + opens the PR
+      - name: loopkit run (manual dispatch)
+        if: github.event_name == 'workflow_dispatch'
+        run: loopkit run --from-issue "${{ inputs.issue }}" --adapter claude-api --open-pr
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GH_TOKEN: ${{ github.token }}
+"""
+
+_CI_GITLAB_TEMPLATE = """\
+# loopkit CI tier (GitLab) — run the loop on one issue, open a draft MR. No cluster required.
+# GitLab has no native issue->pipeline trigger, so this fires on: a manual "Run pipeline" with an
+# ISSUE_IID variable, a webhook -> trigger token, or a pipeline schedule. Add ANTHROPIC_API_KEY and a
+# GITLAB_TOKEN (PAT, api scope) as masked CI/CD variables, and keep a loopkit.toml in the repo.
+loopkit:
+  image: python:3.13-slim
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "web" && $ISSUE_IID'         # manual run, pass ISSUE_IID
+    - if: '$CI_PIPELINE_SOURCE == "trigger" && $ISSUE_IID'     # webhook -> trigger token
+    - if: '$CI_PIPELINE_SOURCE == "schedule" && $ISSUE_IID'    # scheduled run of one issue
+  script:
+    - pip install 'loopkit[claude,remote]'                     # claude-api needs no binary in CI
+    - loopkit run --from-issue "$ISSUE_IID" --provider gitlab --adapter claude-api --open-pr
+  # GITLAB_TOKEN authenticates glab (issue fetch + MR) and the git push; ANTHROPIC_API_KEY pays.
+"""
+
+_CI_TEMPLATES = {"github": (".github/workflows/loopkit.yml", _CI_GITHUB_TEMPLATE),
+                 "gitlab": (".gitlab-ci.yml", _CI_GITLAB_TEMPLATE)}
+
 
 @app.command()
-def init(path: Path = typer.Argument(Path("."), help="Repository to set up.")) -> None:
-    """Scaffold a starter loopkit.toml and PROMPT.md in PATH (never overwrites)."""
+def init(path: Path = typer.Argument(Path("."), help="Repository to set up."),
+         ci: str | None = typer.Option(None, "--ci",
+                                        help="Also scaffold a CI workflow: github | gitlab (Phase 5c).")) -> None:
+    """Scaffold a starter loopkit.toml and PROMPT.md in PATH (never overwrites).
+
+    With `--ci github|gitlab`, also scaffold a CI workflow that runs the loop on a labelled issue with
+    no cluster (the CI deployment tier) — see docs/part-iii-ci-mode.md.
+    """
     path = path.expanduser().resolve()
+    files = [("loopkit.toml", _CONFIG_TEMPLATE), ("PROMPT.md", _PROMPT_TEMPLATE)]
+    if ci is not None:
+        if ci not in _CI_TEMPLATES:
+            err.print(f"[red]init[/] unknown --ci value {ci!r} (expected: github | gitlab).")
+            raise typer.Exit(1)
+        files.append(_CI_TEMPLATES[ci])
     wrote: list[str] = []
-    for name, content in (("loopkit.toml", _CONFIG_TEMPLATE), ("PROMPT.md", _PROMPT_TEMPLATE)):
+    for name, content in files:
         target = path / name
         if target.exists():
             err.print(f"[yellow]exists, skipped[/] {name}")
             continue
+        target.parent.mkdir(parents=True, exist_ok=True)     # e.g. .github/workflows/
         target.write_text(content)
         wrote.append(name)
     body = "\n".join(f"[green]wrote[/] {w}" for w in wrote) or "nothing new to write"
@@ -202,12 +285,30 @@ def _doctor_budget(table: Table, cfg: Config) -> None:
 @app.command()
 def run(config: Path = typer.Option(DEFAULT_CONFIG, "--config", "-c"),
         repo: str | None = typer.Option(None, "--repo", help="Override the target repo (config `repo`)."),
+        adapter: str | None = typer.Option(None, "--adapter",
+                                            help="Override the configured agent adapter (e.g. claude-api in CI)."),
+        from_event: Path | None = typer.Option(None, "--from-event",
+                                                help="Set the goal from a forge issue-event JSON "
+                                                     "(Actions $GITHUB_EVENT_PATH / GitLab CI). CI tier."),
+        from_issue: int | None = typer.Option(None, "--from-issue",
+                                              help="Set the goal by fetching one issue by number via gh/glab. CI tier."),
+        provider: str = typer.Option("auto", "--provider",
+                                     help="Forge for --from-issue: auto | github | gitlab."),
+        open_pr: bool = typer.Option(False, "--open-pr",
+                                     help="Enable push + draft PR for this run (overrides [remote]). CI tier."),
         dry_run: bool = typer.Option(False, "--dry-run", help="Run the control flow, skip the agent."),
         max_iter: int | None = typer.Option(None, "--max-iter", help="Override stops.max_iter."),
         force: bool = typer.Option(False, "--force", help="Run even if preflight fails."),
         sandbox: bool = typer.Option(False, "--sandbox",
                                      help="Run the loop inside the loopkit Docker container (Ch 16).")) -> None:
-    """Run the loop until it reaches a terminal. Point it at any repo via `repo` (or `--repo`)."""
+    """Run the loop until it reaches a terminal. Point it at any repo via `repo` (or `--repo`).
+
+    The CI deployment tier (Phase 5c) rides this same single-loop path: `--from-event`/`--from-issue`
+    source the goal from a forge issue (so an Actions/GitLab job is an issue→PR worker with no
+    cluster), and `--open-pr` flips on push + a draft PR for that one invocation without editing the
+    repo's `loopkit.toml`. Everything else — the gates, the protected-path guard, the budget stop —
+    applies unchanged; in CI the ephemeral runner supplies the sandbox the cloud tier hand-builds.
+    """
     # FIRST: load creds into memory + scrub them out of os.environ, before any subprocess (git, the
     # agent, the gates) can inherit them (Phase 5a credential hygiene). On a laptop with no creds dir
     # this reads from env; with none set it is a no-op.
@@ -215,6 +316,24 @@ def run(config: Path = typer.Option(DEFAULT_CONFIG, "--config", "-c"),
     cfg = _load(config)
     if repo is not None:
         cfg.repo = repo
+    if adapter is not None:
+        cfg.agent.adapter = adapter
+    # CI tier: source the goal from a forge issue (event JSON or a number). Mutually exclusive — they
+    # are two routes to the same thing. The issue number is captured so a `Closes #N` lands in the PR.
+    issue_number: int | None = None
+    if from_event is not None and from_issue is not None:
+        err.print("[red]run[/] pass only one of --from-event or --from-issue.")
+        raise typer.Exit(1)
+    if from_event is not None:
+        cfg.goal, issue_number = _goal_from_event(from_event)
+    elif from_issue is not None:
+        cfg.goal, issue_number = _goal_from_issue(cfg.repo_path(), from_issue, provider)
+    # `--open-pr` is a per-invocation override so the CI template is turnkey on a repo whose
+    # loopkit.toml leaves [remote] off (the safe default). draft stays on (a human merges).
+    if open_pr:
+        cfg.remote.enabled = True
+        cfg.remote.push = True
+        cfg.remote.open_pr = True
     if max_iter is not None:
         cfg.stops.max_iter = max_iter
     trace.configure(cfg.trace)            # full-tree LangSmith tracing, auto-on (Ch 14-15)
@@ -230,22 +349,69 @@ def run(config: Path = typer.Option(DEFAULT_CONFIG, "--config", "-c"),
         err.print("Fix these or pass [bold]--force[/]  (see [bold]loopkit doctor[/]).")
         raise typer.Exit(1)
 
-    agent = build_agent(cfg.agent)
+    try:
+        agent = build_agent(cfg.agent)
+    except ValueError as exc:
+        err.print(f"[red]run[/] {escape(str(exc))}")
+        raise typer.Exit(1)
     console.print(Panel.fit(
         f"[bold]{cfg.goal}[/]\nrepo {cfg.repo} · branch {cfg.branch} · adapter {cfg.agent.adapter} · "
-        f"budget ${cfg.agent.max_cost_usd}",
+        f"budget ${cfg.agent.max_cost_usd}"
+        + (f" · issue #{issue_number}" if issue_number is not None else ""),
         title="loopkit run"))
     result = run_loop(cfg, agent, dry_run=dry_run)
     _render(result)
-    # Outward edge (Ch 16): push the solved branch + open a PR, only if [remote] is enabled.
+    # Outward edge (Ch 16): push the solved branch + open a PR, only if [remote] is enabled (which
+    # --open-pr turns on). When the run was issue-sourced, the issue number rides into the PR body so
+    # the forge auto-closes it on merge.
     if not dry_run and result.reason is StopReason.DONE and cfg.remote.enabled:
         from .extensions.remote import sync_done
-        sync = sync_done(cfg, cfg.repo_path(), title=f"loopkit: {cfg.goal[:60]}")
+        sync = sync_done(cfg, cfg.repo_path(), title=_pr_title(cfg.goal), issue=issue_number)
         if sync["pushed"]:
             console.print(f"[green]pushed[/] {cfg.branch} → {cfg.remote.name}")
         if sync["pr_url"]:
             console.print(f"[green]opened PR[/] {sync['pr_url']}")
     raise typer.Exit(0 if result.reason is StopReason.DONE else 2)
+
+
+def _pr_title(goal: str) -> str:
+    """A single-line PR title from a goal (which may be a multi-line issue title+body)."""
+    first = next((line for line in goal.splitlines() if line.strip()), "")
+    return f"loopkit: {first.strip()[:72]}" if first else "loopkit: automated change"
+
+
+def _goal_from_event(path: Path) -> tuple[str, int | None]:
+    """Read a forge issue-event JSON (Actions $GITHUB_EVENT_PATH / GitLab CI) → (goal, issue number).
+
+    Reuses the webhook path's parsers via `triggers.parse_event_payload` (forge auto-detected from the
+    body), so the CI goal-building is identical to a webhook-triggered run. Exits cleanly when the file
+    is unreadable or holds no actionable issue (a `workflow_dispatch`, a closed issue).
+    """
+    from .extensions import triggers
+    try:
+        payload = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        err.print(f"[red]run[/] could not read --from-event {path}: {escape(str(exc))}")
+        raise typer.Exit(1)
+    event = triggers.parse_event_payload(payload)
+    if event is None:
+        err.print(f"[red]run[/] --from-event {path} carries no actionable issue "
+                  "(not an issue event, or a closed/edited action).")
+        raise typer.Exit(1)
+    goal = f"{event.title}\n\n{event.body}".strip() if event.body else event.title
+    return goal or f"Resolve issue #{event.issue_number}", event.issue_number
+
+
+def _goal_from_issue(repo: Path, number: int, provider: str) -> tuple[str, int]:
+    """Fetch one issue by number via gh/glab and build (goal, issue number). CI tier / local convenience."""
+    from .extensions import issues
+    issue = issues.fetch_issue(repo, number, provider=provider)
+    if issue is None:
+        err.print(f"[red]run[/] could not fetch issue #{number} (provider {provider}) — "
+                  "is gh/glab installed + authenticated, and is the repo a github/gitlab remote?")
+        raise typer.Exit(1)
+    task = issues.issue_to_task(issue)                    # reuse the shared goal builder
+    return task["goal"], number
 
 
 @app.command()
@@ -268,6 +434,39 @@ def learn(chapter: int | None = typer.Argument(None, help="Course chapter number
     scenarios.play(chapter, console, live=live, pause=True)
 
 
+@app.command()
+def executor(
+        socket_path: str = typer.Option(..., "--socket", envvar="LOOPKIT_EXECUTOR_SOCKET",
+                                         help="Unix socket to listen on (shared emptyDir with loopkit-core)."),
+) -> None:
+    """Run the keyless tool-execution sidecar (Part III, Phase 6 — agent isolation).
+
+    This is the untrusted half of the cloud worker pod: it serves the agent's `run_bash`/`read`/`write`
+    tool calls and the held-out gate over the socket, against the **shared workspace** — but in a
+    container running as a **different uid / PID namespace with no credential mount**. loopkit-core (the
+    `fleet worker` process) holds the key for the LLM call + git and dispatches every model-chosen
+    command here, so there is no key in this process to read or exfiltrate.
+
+    Deliberately does **not** call `secrets.install` — the executor must never load a credential.
+    """
+    import signal
+
+    from .executor import serve
+    console.print(Panel.fit(f"keyless executor · socket {socket_path}\n"
+                            "serving run_bash / read / write / gate for loopkit-core (no credentials)",
+                            title="loopkit executor"))
+    # The kubelet terminates a native sidecar with SIGTERM when loopkit-core exits — translate it to
+    # the clean-shutdown path so the socket is unlinked and a stop is logged (graceful termination).
+    def _terminate(*_args) -> None:
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGTERM, _terminate)
+    try:
+        serve(socket_path)
+    except KeyboardInterrupt:
+        console.print("[yellow]executor stopped[/]")
+
+
 @fleet_app.command("worker")
 def fleet_worker(
         redis_url: str = typer.Option(DEFAULT_REDIS_URL, "--redis-url", envvar="REDIS_URL",
@@ -281,6 +480,10 @@ def fleet_worker(
         gate_acceptance: str | None = typer.Option(None, "--gate-acceptance", help="Override the acceptance gate."),
         redis_namespace: str = typer.Option("loopkit", "--redis-namespace", envvar="REDIS_NAMESPACE",
                                              help="Per-run Redis keyspace ({ns}:tasks/:results). Cloud sets this to the run id."),
+        executor_socket: str | None = typer.Option(
+            None, "--executor-socket", envvar="LOOPKIT_EXECUTOR_SOCKET",
+            help="Dispatch the agent's tool calls + the held-out gate to a keyless executor sidecar "
+                 "over this Unix socket (Phase 6). Unset = run them in-process (local/dev)."),
         name: str = typer.Option("worker", "--name", envvar="WORKER_NAME",
                                  help="Worker name (rides logs as a tag; set from the pod name).")) -> None:
     """The executor: BRPOP a task, run the loop in an isolated clone of the target, HSET the result.
@@ -290,14 +493,20 @@ def fleet_worker(
     gates come from that repo's loopkit.toml unless overridden, and the repo's remote config there
     controls whether a solved branch is pushed + a PR opened. Use `--adapter claude-code` for real
     solves.
+
+    `--executor-socket` is the Phase-6 agent-isolation seam: when set (the cloud worker pod), the
+    agent's chosen commands + the held-out gate are dispatched to the keyless `loopkit executor`
+    sidecar (a different uid / PID namespace, no credential) instead of running in this key-holding
+    process. Unset, they run in-process (`LocalToolExecutor`) — exact prior behavior.
     """
-    # FIRST: load the per-run creds from the memory-tmpfs mount into the in-process store and shred
-    # them off the filesystem + os.environ, BEFORE the first git clone / agent / gate spawns inherits
-    # them (Phase 5a; the cloud pod sets LOOPKIT_CREDS_DIR, dev/laptop falls back to env or no-op).
+    # FIRST: load the per-run creds into the in-process store and shred them out of os.environ, BEFORE
+    # the first git clone inherits them (Phase 5a). The Phase-6 cloud pod delivers them via envFrom into
+    # *this* (trusted) loopkit-core container — the untrusted run_bash/gate run in the keyless executor
+    # sidecar, so there's nothing to shred there. A tmpfs dir is still honored if set (back-compat).
     secrets.install(secrets.CredentialStore.load(os.environ.get("LOOPKIT_CREDS_DIR")))
-    # Fail-closed (G7): in a cloud pod (a creds dir was mounted), an API adapter with no resolved key
-    # is a misconfiguration — stop with a clear, attributable error rather than 401-ing deep in a tick.
-    if (os.environ.get("LOOPKIT_CREDS_DIR") and adapter in ("claude-api", "openai-api")
+    # Fail-closed (G7): in a cloud pod (LOOPKIT_CREDS_EXPECTED is set), an API adapter with no resolved
+    # key is a misconfiguration — stop with a clear, attributable error rather than 401-ing deep in a tick.
+    if (os.environ.get("LOOPKIT_CREDS_EXPECTED") and adapter in ("claude-api", "openai-api")
             and secrets.current().api_key(adapter) is None):
         err.print(f"[red]worker[/] no credential for adapter '{adapter}' — the per-run Secret had no "
                   f"{'/'.join(secrets.ADAPTER_KEYS.get(adapter, ()))}. Register: loopkit cloud creds set.")
@@ -305,6 +514,16 @@ def fleet_worker(
     from .extensions.fleet import RedisQueue, Worker, make_demo_runner, make_repo_runner
     trace.configure(None)                 # auto-on from env; each worker traces its own runs (Ch 12)
     queue = RedisQueue.from_url(redis_url, namespace=redis_namespace)
+    # Phase 6: when a socket is configured, the agent's tool calls + the held-out gate run in the
+    # keyless executor sidecar; loopkit-core (here) keeps the key for the LLM call + git. None = local.
+    tool_executor = None
+    if executor_socket:
+        from .executor import RemoteToolExecutor
+        # Group-writable umask so the executor sidecar (a different uid, same fsGroup) can edit files
+        # loopkit-core clones — and loopkit-core can commit files the executor wrote (Phase 6).
+        os.umask(0o002)
+        tool_executor = RemoteToolExecutor(executor_socket)
+        get_logger("worker").bind(task=name).info("executor.remote", socket=executor_socket)
     if target:
         tcfg = _maybe_target_config(target)
         if tcfg is not None:
@@ -315,10 +534,11 @@ def fleet_worker(
             target, mode="clone", adapter=adapter, max_iter=max_iter,
             gate_iteration=iteration, gate_acceptance=acceptance,
             protected_paths=tuple(tcfg.safety.protected_paths) if tcfg else ("tests/",),
-            remote=tcfg.remote if tcfg else None)
+            remote=tcfg.remote if tcfg else None, executor=tool_executor)
         console.print(Panel.fit(
             f"worker [bold]{name}[/] · target {target} · adapter {adapter} · {redis_url}\n"
-            f"gates: {iteration!r} / {acceptance!r} · remote {'on' if tcfg and tcfg.remote.enabled else 'off'}",
+            f"gates: {iteration!r} / {acceptance!r} · remote {'on' if tcfg and tcfg.remote.enabled else 'off'}"
+            + (f" · executor {executor_socket}" if executor_socket else ""),
             title="loopkit fleet worker"))
     else:
         runner = make_demo_runner(adapter=adapter, max_iter=max_iter)

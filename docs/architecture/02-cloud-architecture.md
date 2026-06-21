@@ -1,4 +1,4 @@
-# 02 — Cloud architecture, Part III (foundation + run mechanics + triggers + per-submitter creds Built 🟢 Phases 2–5a)
+# 02 — Cloud architecture, Part III (foundation + run mechanics + triggers + per-submitter creds + agent isolation Built 🟢 Phases 2–6)
 
 > **Built 🟢 (Phase 2):** the control-plane *foundation* — the **context-safety guard** + `loopkit
 > cloud` sub-app ([`loopkit/extensions/cloud.py`](../../loopkit/extensions/cloud.py)) and the
@@ -56,12 +56,21 @@ ns/loopkit-system   (long-lived, shared infra)
   └─ Secret sources (per env/submitter)   resolved → adapter key projected into each run ns
 
 ns/run-<id>         (ephemeral, one per run, TTL-GC'd)
-  ├─ Job coordinator    enqueue → collect → select → sentinel → report → exit  (git-only creds)
+  ├─ Job coordinator    enqueue → collect → select → sentinel → report → exit  (git-only creds, 1 container)
   ├─ Job worker         parallelism N; BRPOP → clone → run_loop → push → HSET; exit on sentinel
-  ├─ Secret loopkit-creds   adapter key + git, delivered via init→memory-tmpfs→SHRED (never envFrom)
+  │    ├─ loopkit-core (uid 1000)   HOLDS the key (envFrom); loop · LLM call · git clone/commit/push
+  │    └─ executor    (uid 1001)    keyless native sidecar; run_bash/read/write + held-out gate (Phase 6)
+  ├─ Secret loopkit-creds   adapter key + git, envFrom into loopkit-core ONLY (the executor gets none)
   ├─ ResourceQuota + LimitRange   loose to start; tightenable later
-  └─ emptyDir scratch (per worker pod)   clone target here; no PVC
+  └─ emptyDir scratch (shared rw, fsGroup)   clone target; the executor edits it over a unix socket; no PVC
 ```
+
+**Phase 6 — agent isolation (the two-container worker).** The agent's tool calls + the held-out gate run
+attacker-influenced commands, so they're dispatched over a Unix socket to a **keyless executor sidecar**
+(a different uid in its own PID namespace, no credential) instead of running in the key-holding
+loopkit-core. This *replaces* 5a's timing-dependent credential-shred with a kernel boundary for the cloud
+worker. See [`docs/part-iii-agent-isolation.md`](../part-iii-agent-isolation.md) and
+[`04-security.md`](04-security.md).
 
 ## Run lifecycle
 

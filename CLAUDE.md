@@ -14,6 +14,7 @@ Kubernetes.
 | Understanding **how the system is built / designed** | [`docs/architecture/`](docs/architecture/README.md) — the living architecture wiki |
 | The **previous phase** (Part II library + dev fleet, done) | [`docs/part-ii-resume.md`](docs/part-ii-resume.md) |
 | Using loopkit on a real repo / the steering files | [`docs/USING-ON-YOUR-REPO.md`](docs/USING-ON-YOUR-REPO.md), [`docs/CONTROL-FILES.md`](docs/CONTROL-FILES.md) |
+| **Teaching** Part III — GitHub/GitLab ecosystem, the three tiers, the runnable labs (`loopkit demo 18/19`) | [`docs/part-iii-ecosystem.md`](docs/part-iii-ecosystem.md) |
 
 ## ⛓️ Documentation contract (binding)
 

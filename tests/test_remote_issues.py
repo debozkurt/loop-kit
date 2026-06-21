@@ -11,8 +11,9 @@ from pathlib import Path
 
 from loopkit.agent import MockAgent
 from loopkit.config import Config, GateConfig, RemoteConfig
+from loopkit.extensions import issues as issues_mod
 from loopkit.extensions.fleet import make_repo_runner
-from loopkit.extensions.issues import issue_to_task, issues_to_tasks
+from loopkit.extensions.issues import fetch_issue, issue_to_task, issues_to_tasks
 from loopkit.extensions.remote import detect_provider, open_pull_request, push_branch, sync_done
 
 
@@ -43,6 +44,45 @@ def test_issues_to_tasks_skips_empty_titles():
 def test_issue_task_branch_prefix_is_configurable():
     task = issue_to_task({"number": 7, "title": "t", "body": ""}, base_branch="bot")
     assert task["branch"] == "bot/issue-7"
+
+
+# --------------------------------------------------------------------------------------------
+# Fetch one issue by number (the CI tier's --from-issue source) — gh/glab stubbed at the JSON edge.
+# --------------------------------------------------------------------------------------------
+def test_fetch_github_issue_maps_the_gh_json_object(monkeypatch, git_repo):
+    # gh issue view --json returns a single object; map it to the shared {number,title,body,url} shape.
+    monkeypatch.setattr(issues_mod, "_run_forge_json",
+                        lambda repo, cmd, *, cli: {"number": 8, "title": "Bug", "body": "boom",
+                                                   "url": "https://gh/8", "labels": []})
+    issue = fetch_issue(git_repo, 8, provider="github")
+    assert issue == {"number": 8, "title": "Bug", "body": "boom", "url": "https://gh/8"}
+
+
+def test_fetch_gitlab_issue_maps_iid_and_description(monkeypatch, git_repo):
+    # glab uses iid / description / web_url; normalise to the same shape as the GitHub path.
+    monkeypatch.setattr(issues_mod, "_run_forge_json",
+                        lambda repo, cmd, *, cli: {"iid": 14, "title": "Slow", "description": "p95",
+                                                   "web_url": "https://gl/14"})
+    issue = fetch_issue(git_repo, 14, provider="gitlab")
+    assert issue == {"number": 14, "title": "Slow", "body": "p95", "url": "https://gl/14"}
+
+
+def test_fetch_issue_returns_none_on_cli_failure(monkeypatch, git_repo):
+    monkeypatch.setattr(issues_mod, "_run_forge_json", lambda *a, **k: None)
+    assert fetch_issue(git_repo, 1, provider="github") is None
+
+
+def test_fetch_issue_auto_detects_provider_from_remote(monkeypatch, git_repo):
+    _set_remote(git_repo, "https://github.com/acme/widgets.git")
+    monkeypatch.setattr(issues_mod, "_run_forge_json",
+                        lambda repo, cmd, *, cli: {"number": 3, "title": "t", "body": "", "url": ""})
+    # provider="auto" should detect github from the remote and dispatch there (no crash, returns dict).
+    assert fetch_issue(git_repo, 3)["number"] == 3
+
+
+def test_fetch_issue_unknown_provider_returns_none(git_repo):
+    # No remote → detect_provider == "unknown" → None, no CLI invoked.
+    assert fetch_issue(git_repo, 1) is None
 
 
 # --------------------------------------------------------------------------------------------

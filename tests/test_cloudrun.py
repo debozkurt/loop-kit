@@ -127,34 +127,55 @@ def test_coordinator_job_has_no_parallelism_and_no_scratch():
 
 
 # --------------------------------------------------------------------------------------------
-# Credential delivery (Phase 5a): init-container → memory tmpfs → shred, NOT envFrom / direct mount.
+# Phase 6 — the worker is a two-container split: loopkit-core holds the key (envFrom), the agent's
+# untrusted surface runs in a keyless, different-uid executor sidecar with no credential anywhere.
 # --------------------------------------------------------------------------------------------
-def test_creds_delivered_via_init_tmpfs_not_envfrom_or_direct_mount():
+def test_loopkit_core_gets_creds_via_envfrom_and_dispatches_to_the_executor():
     spec = cloudrun.RunSpec(run_id="a", image="i", target="t", goal="g")
     pod = cloudrun.build_worker_job(spec)["spec"]["template"]["spec"]
-    main = pod["containers"][0]
-    assert "envFrom" not in main                           # no creds in the agent container's env
-    main_mounts = {m["name"] for m in main["volumeMounts"]}
-    assert "creds-src" not in main_mounts                  # the Secret is NOT mounted in the agent container
-    assert "creds" in main_mounts                          # only the tmpfs the init populated
-    init = pod["initContainers"][0]
-    src = next(m for m in init["volumeMounts"] if m["name"] == "creds-src")
-    assert src["readOnly"] is True                         # Secret mounted readOnly, init container only
-    creds_vol = next(v for v in pod["volumes"] if v["name"] == "creds")
-    assert creds_vol["emptyDir"] == {"medium": "Memory"}   # in-memory; loopkit shreds it at load
-    secret_vol = next(v for v in pod["volumes"] if v["name"] == "creds-src")
-    assert secret_vol["secret"]["secretName"] == "loopkit-creds" and secret_vol["secret"]["optional"]
-    env = {e["name"]: e.get("value") for e in main["env"]}
-    assert env["LOOPKIT_CREDS_DIR"] == cloudrun.CREDS_DIR
+    core = next(c for c in pod["containers"] if c["name"] == "loopkit-core")
+    assert core["envFrom"] == [{"secretRef": {"name": "loopkit-creds", "optional": True}}]
+    env = {e["name"]: e.get("value") for e in core["env"]}
+    assert env[cloudrun.CREDS_EXPECTED_ENV] == "1"         # fail-closed marker (not a credential var)
+    assert "--executor-socket" in core["args"]             # the untrusted surface is dispatched away
 
 
-def test_pod_and_container_are_hardened():
+def test_executor_sidecar_is_a_keyless_native_sidecar_with_a_different_uid():
+    spec = cloudrun.RunSpec(run_id="a", image="i", target="t", goal="g")
+    pod = cloudrun.build_worker_job(spec)["spec"]["template"]["spec"]
+    execs = [c for c in pod.get("initContainers", []) if c["name"] == "executor"]
+    assert len(execs) == 1
+    ex = execs[0]
+    assert ex["restartPolicy"] == "Always"                 # native sidecar (k8s >= 1.29)
+    assert ex["args"] == cloudrun.executor_command()
+    # No credential reaches the executor: no envFrom, no secret-backed env.
+    assert "envFrom" not in ex
+    assert not any(e.get("valueFrom", {}).get("secretKeyRef") for e in ex.get("env", []))
+    assert ex["securityContext"]["runAsUser"] == cloudrun.EXECUTOR_UID
+    assert ex["securityContext"]["runAsUser"] != pod["securityContext"]["runAsUser"]  # ≠ loopkit-core
+    # Shares only the workspace + the socket dir (so dispatched paths resolve) — nothing else.
+    mounts = {m["name"] for m in ex["volumeMounts"]}
+    assert {"scratch", "exec-socket"} <= mounts
+
+
+def test_no_secret_is_mounted_as_a_file_anywhere_in_the_worker_pod():
+    # Belt and braces: the Secret is delivered ONLY via loopkit-core's envFrom, never as a volume —
+    # so there is no readOnly mount for a hijacked agent to `cat` (and the executor has no env either).
+    spec = cloudrun.RunSpec(run_id="a", image="i", target="t", goal="g")
+    pod = cloudrun.build_worker_job(spec)["spec"]["template"]["spec"]
+    assert not any("secret" in v for v in pod["volumes"])
+    ex = next(c for c in pod["initContainers"] if c["name"] == "executor")
+    assert "envFrom" not in ex
+
+
+def test_pod_and_both_containers_are_hardened():
     spec = cloudrun.RunSpec(run_id="a", image="i", target="t", goal="g")
     pod = cloudrun.build_worker_job(spec)["spec"]["template"]["spec"]
     assert pod["securityContext"]["runAsNonRoot"] is True and pod["securityContext"]["runAsUser"] == 1000
-    c = pod["containers"][0]["securityContext"]
-    assert c["allowPrivilegeEscalation"] is False and c["readOnlyRootFilesystem"] is True
-    assert c["capabilities"]["drop"] == ["ALL"]
+    for c in [pod["containers"][0], pod["initContainers"][0]]:        # loopkit-core + the executor
+        sc = c["securityContext"]
+        assert sc["allowPrivilegeEscalation"] is False and sc["readOnlyRootFilesystem"] is True
+        assert sc["capabilities"]["drop"] == ["ALL"]
     assert pod["automountServiceAccountToken"] is False    # workers get no cluster-API token
 
 
@@ -165,8 +186,9 @@ def test_coordinator_secret_is_git_only_worker_secret_is_full():
     assert set(by_name["loopkit-creds"]["stringData"]) == {"ANTHROPIC_API_KEY", "GITHUB_TOKEN"}
     assert set(by_name["loopkit-creds-coord"]["stringData"]) == {"GITHUB_TOKEN"}   # git only — no model key
     coord = cloudrun.build_coordinator_job(spec)["spec"]["template"]["spec"]
-    coord_secret = next(v for v in coord["volumes"] if v["name"] == "creds-src")
-    assert coord_secret["secret"]["secretName"] == "loopkit-creds-coord"
+    core = coord["containers"][0]
+    assert core["envFrom"] == [{"secretRef": {"name": "loopkit-creds-coord", "optional": True}}]
+    assert "initContainers" not in coord                   # the coordinator runs no untrusted command
 
 
 def test_network_policy_is_default_deny_with_a_tight_egress_allowlist():
@@ -202,12 +224,16 @@ def test_fqdn_egress_policy_allowlists_named_hosts_on_443():
     assert {p["port"] for p in fqdn_rule["toPorts"][0]["ports"]} == {"443"}
 
 
-def test_creds_init_copies_only_real_keys_not_k8s_metadata():
-    init = cloudrun.build_worker_job(cloudrun.RunSpec(run_id="a", image="i", target="t", goal="g")
-                                     )["spec"]["template"]["spec"]["initContainers"][0]
-    cmd = " ".join(init["command"])
-    assert "/creds-src/*" in cmd                  # glob skips ..data/..<ts> (else a key persists in a subdir)
-    assert "/creds-src/." not in cmd              # a `.` source would recursively copy the k8s metadata dirs
+def test_worker_and_executor_share_the_same_socket_path():
+    spec = cloudrun.RunSpec(run_id="a", image="i", target="t", goal="g")
+    pod = cloudrun.build_worker_job(spec)["spec"]["template"]["spec"]
+    core = next(c for c in pod["containers"] if c["name"] == "loopkit-core")
+    assert core["args"][core["args"].index("--executor-socket") + 1] == cloudrun.EXECUTOR_SOCKET
+    assert cloudrun.executor_command() == ["executor", "--socket", cloudrun.EXECUTOR_SOCKET]
+    ex = pod["initContainers"][0]
+    core_dir = next(m for m in core["volumeMounts"] if m["name"] == "exec-socket")["mountPath"]
+    ex_dir = next(m for m in ex["volumeMounts"] if m["name"] == "exec-socket")["mountPath"]
+    assert core_dir == ex_dir == cloudrun.EXECUTOR_SOCKET_DIR   # the bound socket is reachable across the split
 
 
 def test_client_applier_routes_cilium_to_custom_objects_and_tolerates_absent_crd(monkeypatch):

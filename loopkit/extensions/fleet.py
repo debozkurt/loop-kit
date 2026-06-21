@@ -41,7 +41,7 @@ import time
 from collections import deque
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Callable, Protocol
+from typing import TYPE_CHECKING, Callable, Protocol
 
 from .. import secrets
 from ..agent import Agent, MockAgent, build_agent
@@ -59,6 +59,9 @@ from .orchestrate import (
     WorkerResult,
     _default_candidate_task,
 )
+
+if TYPE_CHECKING:                                  # typing-only — the executor is a duck-typed seam
+    from ..executor import ToolExecutor
 
 # A worker turns one task (a JSON-able dict off the queue) into one outcome. Injected, because
 # *how* a task becomes work is the one thing that can't cross the wire: tests inject a MockAgent
@@ -572,6 +575,7 @@ def make_repo_runner(repo_source: str, *, gate_iteration: str, gate_acceptance: 
                      protected_paths=("tests/",), adapter: str = "claude-code", max_iter: int = 8,
                      mode: str = "clone", agent_factory: "Callable[[dict], Agent] | None" = None,
                      remote: RemoteConfig | None = None,
+                     executor: "ToolExecutor | None" = None,
                      branch_prefix: str = "loopkit") -> TaskRunner:
     """A `TaskRunner` for an arbitrary repo: materialise it, run the loop on the task's branch,
     grade the terminal, and (if `remote.enabled`) push + open a PR.
@@ -580,6 +584,12 @@ def make_repo_runner(repo_source: str, *, gate_iteration: str, gate_acceptance: 
     source are parameters instead of the pricing constants, and the goal comes from each task (an
     issue body, a CLI goal, …). The agent defaults to the configured adapter; pass `agent_factory`
     to script it (the demo does this for a token-free solve).
+
+    `executor` is the Phase-6 seam: the cloud worker passes a `RemoteToolExecutor` so the agent's
+    tool calls and the held-out gate run in the keyless executor sidecar (a different uid / PID
+    namespace, no credential). None ⇒ in-process `LocalToolExecutor` — exact prior behavior. The
+    clone, the protected-path guard, commit-every-tick, and the push all stay here in loopkit-core,
+    which holds the credential; only the model-chosen commands + the gate command are dispatched.
     """
     remote = remote or RemoteConfig()
 
@@ -597,10 +607,13 @@ def make_repo_runner(repo_source: str, *, gate_iteration: str, gate_acceptance: 
                 safety=SafetyConfig(protected_paths=list(protected_paths), require_clean_tree=False,
                                     allow_branches=[f"{branch_prefix}/*"]),
                 remote=remote)
-            agent = agent_factory(task) if agent_factory else build_agent(cfg.agent)
-            # Tag the LangSmith trace with the task id so every run in a fleet is attributable.
-            result = run_loop(cfg, agent, iteration_gate=ShellGate(gate_iteration),
-                              acceptance_gate=ShellGate(gate_acceptance),
+            agent = agent_factory(task) if agent_factory else build_agent(cfg.agent, executor=executor)
+            # Tag the LangSmith trace with the task id so every run in a fleet is attributable. The
+            # gates carry the same executor, so the held-out check runs in the keyless sidecar too.
+            result = run_loop(cfg, agent,
+                              iteration_gate=ShellGate(gate_iteration, executor=executor),
+                              acceptance_gate=ShellGate(gate_acceptance, executor=executor),
+                              executor=executor,
                               trace_metadata={"task": task_id, "issue": task.get("issue")})
             score, revalidated = _grade(result)
             # Outward edge: a solved branch is pushed + (optionally) a PR opened, only when the

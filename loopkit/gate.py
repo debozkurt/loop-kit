@@ -9,12 +9,12 @@ Chapter 9).
 """
 from __future__ import annotations
 
-import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Protocol
+from typing import TYPE_CHECKING, Callable, Protocol
 
-from . import secrets
+if TYPE_CHECKING:                                  # typing-only: avoids a gate↔executor import cycle
+    from .executor import ToolExecutor
 
 
 @dataclass
@@ -28,23 +28,26 @@ class Gate(Protocol):
 
 
 class ShellGate:
-    """Run a shell command; exit 0 is pass, anything else fails with the output tail."""
+    """Run a shell command; exit 0 is pass, anything else fails with the output tail.
 
-    def __init__(self, command: str, feedback_tail: int = 2000) -> None:
+    The command itself runs through a `ToolExecutor` (default `LocalToolExecutor`, in-process). The
+    cloud worker injects a `RemoteToolExecutor` so the held-out gate — which runs agent-authored tests
+    — executes in the keyless executor sidecar, not in the key-holding loopkit-core (Phase 6). The
+    credential-free env + `PYTHONDONTWRITEBYTECODE` handling lives in the executor's `run_gate`.
+    """
+
+    def __init__(self, command: str, feedback_tail: int = 2000,
+                 *, executor: "ToolExecutor | None" = None) -> None:
         self.command = command
         self._tail = feedback_tail
+        self._executor = executor
 
     def check(self, workspace: Path) -> GateResult:
-        # The held-out gate runs the project's tests — including any conftest/test the AGENT wrote —
-        # so it must carry no credentials (the trust anchor was an exfil sink otherwise; Phase 5a).
-        # PYTHONDONTWRITEBYTECODE keeps a python gate from littering __pycache__ into a protected path.
-        env = {**secrets.current().child_env(), "PYTHONDONTWRITEBYTECODE": "1"}
-        proc = subprocess.run(self.command, cwd=workspace, shell=True, env=env,
-                              capture_output=True, text=True)
-        if proc.returncode == 0:
-            return GateResult(True, None)
-        tail = ((proc.stdout or "") + (proc.stderr or ""))[-self._tail:]
-        return GateResult(False, tail)
+        executor = self._executor
+        if executor is None:
+            from .executor import LocalToolExecutor   # deferred — breaks the import cycle
+            executor = LocalToolExecutor()
+        return executor.run_gate(self.command, workspace, tail=self._tail)
 
 
 class CallableGate:

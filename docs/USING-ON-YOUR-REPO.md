@@ -141,6 +141,26 @@ two things mounted that the host has for free:
 
 ---
 
+## 4. Hands-off in CI (no cluster)
+
+The lowest-friction way to put loopkit on a real repo is the **CI deployment tier**: a labelled issue
+starts a CI job that runs one `loopkit run` and opens a **draft** PR — the forge is the trigger, the
+secret store, the identity, and the sandbox, so there's no infrastructure to operate.
+
+```bash
+loopkit init --ci github     # scaffold .github/workflows/loopkit.yml (or: --ci gitlab → .gitlab-ci.yml)
+# add the repo secret ANTHROPIC_API_KEY, edit the two gates in loopkit.toml, commit
+# then open an issue, add the `loopkit` label, and watch a draft PR appear
+```
+
+Under the hood the job runs `loopkit run --from-event "$GITHUB_EVENT_PATH" --adapter claude-api
+--open-pr` (GitHub) or `--from-issue "$ISSUE_IID" --provider gitlab …` (GitLab). The full how-it-works
++ the GitHub-vs-GitLab differences + the runnable labs (`loopkit demo 20`/`21`) are in the teaching
+module **[`part-iii-ecosystem.md`](part-iii-ecosystem.md)**; the templates live in
+[`../examples/ci/`](../examples/ci/).
+
+---
+
 ## Gotchas
 
 - **The gate runs the target's toolchain.** A real run needs that toolchain present (locally, or in

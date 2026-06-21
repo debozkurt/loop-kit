@@ -1,9 +1,21 @@
 # Phase 6 — Agent isolation (the sidecar / keyless-executor split)
 
-> **Designed, NOT built — the next-session plan.** Read this first when picking up agent isolation.
-> It closes the one residual Phase 5a could not close in a single container, and it *replaces* the
-> fragile ordering-dependent credential-shred with a real kernel boundary. Independent of Phase 5b
-> (skills repo) — can be done before or after it.
+> **Built 🟢 (2026-06-21).** The `ToolExecutor` seam, the `RemoteToolExecutor` + `loopkit executor`
+> socket server, the two-container worker pod, and the worker wiring all landed; 261 tests green
+> (token-free). It closes the one residual Phase 5a could not close in a single container (a same-uid
+> `ptrace` of the in-process key) for the cloud worker by construction.
+>
+> **One refinement from the design below (intentional, see "What it replaces"):** we **kept**
+> `secrets.py`'s load-shred + `child_env` scrub rather than deleting them globally. They are the only
+> containment for the two tiers that have **no sidecar** — the **CI deployment tier** (5c, an untrusted
+> issue-triggered run with the API agent in-process) and untrusted **local** runs. The sidecar is the
+> cloud-worker kernel boundary; the in-process shred/scrub stay as the everywhere-else mitigation (and
+> are harmless/redundant inside the split). What the worker pod *did* drop is the **init-container →
+> tmpfs → shred delivery**: loopkit-core now gets creds via a normal `envFrom`, the executor gets none.
+>
+> Build order below: steps 1–4 done; step 5's simplification was applied as the *pod-spec* change
+> (drop the init/tmpfs), not a `secrets.py` deletion (per the refinement). The **live DOKS proof**
+> (ptrace from the executor fails; the run still completes) awaits a cluster — like the rest of Part III.
 
 ## Why (the residual this closes)
 
@@ -86,32 +98,44 @@ cloud-only wiring choice, and nothing changes for the single-loop/dev path.
 Net: comparable LOC, but a **kernel-enforced boundary** in place of a best-effort mitigation — stronger
 guarantee *and* a simpler mental model ("the untrusted thing has no key" vs "we shred the key in time").
 
-## Open decisions (resolve next session)
+## Resolved decisions (as built)
 
-1. **Native sidecars vs Job completion.** A long-running sidecar blocks `Job` completion on old k8s. Use
-   a **native sidecar** (an `initContainer` with `restartPolicy: Always`, stable in k8s 1.29) — **confirm
-   the DOKS k8s version supports it**; else the executor must exit when loopkit-core signals done (a
-   done-file or socket close). *This is the load-bearing dependency.*
-2. **Transport:** Unix socket on a shared emptyDir (recommended — no netns dependency, file-perm gated)
-   vs localhost TCP.
-3. **Workspace ownership:** loopkit-core clones, the executor edits → a shared `fsGroup` with both uids in
-   the group; pick the gid model and confirm git is happy with group-writable trees.
-4. **Gate + safety location:** the gate runs in the executor (it runs agent-authored tests). Confirm the
-   protected-path guard + commit-every-tick stay in **loopkit-core** (trusted) operating on the shared
-   workspace, with only the *gate command* dispatched to the executor.
-5. **Executor failure handling:** crash → tick error vs run failure; restart/backoff semantics.
+1. **Native sidecar.** The executor is an `initContainer` with `restartPolicy: Always` (native sidecar,
+   stable since k8s 1.29) — it starts before loopkit-core and the kubelet terminates it when loopkit-core
+   exits, so the `Job` still completes. **DOKS k8s-version dependency:** native sidecars need ≥ 1.29 —
+   **confirm on the real cluster** (provision the node pools at a supported version). Belt-and-braces:
+   the executor also exits cleanly on SIGTERM (the `loopkit executor` command unlinks the socket).
+2. **Transport: Unix socket on a shared emptyDir** (`/var/run/loopkit-exec/exec.sock`, mode `0660`,
+   group-connectable via the pod `fsGroup`). Length-prefixed JSON frames, one request per connection.
+3. **Workspace ownership: shared `fsGroup` 1000.** loopkit-core = uid 1000, executor = uid 1001, both
+   gid 1000; both entrypoints `umask 002` so the clone (core) and edits (executor) are group-writable.
+   loopkit-core owns `.git` and runs all git, so no dubious-ownership error; the executor sets
+   `GIT_CONFIG safe.directory=*` so an agent `git` call doesn't trip on the cross-uid tree. *Confirm the
+   group-writable tree behaves on a live pod.*
+4. **Gate runs in the executor** (it runs agent-authored tests); the **protected-path guard +
+   commit-every-tick stay in loopkit-core** (trusted), operating on the shared workspace — only the
+   *gate command* and the *tool calls* are dispatched. As built.
+5. **Executor failure → tick error, not a crash.** `RemoteToolExecutor` degrades an unreachable executor
+   to a tool `is_error` / a failed `GateResult` ("executor unavailable"), so the loop's stops handle it
+   rather than the run dying on a transport hiccup. The Job's `backoffLimit` still owns pod-level retries.
 
-## Build order
+## Build order (✅ done)
 
-1. `ToolExecutor` protocol + `LocalToolExecutor` — refactor `_WorkspaceTools`/`ShellGate` behind it
-   (default; existing tests unchanged).
-2. `RemoteToolExecutor` + a `loopkit executor` socket server (reuses `_WorkspaceTools`/`ShellGate`
-   verbatim) → token-free socket round-trip tests.
-3. `cloudrun._pod_spec`: two containers + shared workspace + native sidecar + creds mount in
-   loopkit-core only; **drop the init/tmpfs/shred**.
-4. Wire the cloud worker to inject `RemoteToolExecutor`; local stays `Local`.
-5. Simplify `secrets.py` (drop the shred; keep `child_env` for loopkit-core's git) + remove the agent scrub.
-6. Docs (04 residual → *closed for the API-adapter path*; 02 topology) + memory.
+1. ✅ `ToolExecutor` protocol + `LocalToolExecutor` in new core **`executor.py`** — `_WorkspaceTools`
+   moved there (re-exported from `agent.py`); `_APIAdapter`/`ShellGate`/`run_loop` take an injected
+   executor (default `Local`). Existing tests unchanged.
+2. ✅ `RemoteToolExecutor` (length-prefixed JSON over a Unix socket, degrade-on-unreachable) + a
+   `serve()` server + the `loopkit executor` CLI command → token-free socket round-trip tests
+   (`tests/test_executor.py`).
+3. ✅ `cloudrun._pod_spec`: two containers + shared workspace/socket emptyDirs + native sidecar; creds
+   `envFrom` into loopkit-core only; **dropped the init/tmpfs/shred container**.
+4. ✅ Wire the cloud worker (`fleet worker --executor-socket` → `make_repo_runner` → `build_agent` +
+   `run_loop`); local/dev stays `Local`.
+5. ✅ *Pod-spec* simplification applied (drop the init/tmpfs delivery). **`secrets.py` kept** (the
+   load-shred + `child_env` scrub remain the containment for the no-sidecar CI/local tiers — the
+   refinement in the header). loopkit-core's git still uses `child_env(add=GIT_ENV)`.
+6. ✅ Docs (this doc; 04 residual → *closed for the cloud worker*; 02 topology; 03 delivery; resume) +
+   memory.
 
 ## Acceptance
 

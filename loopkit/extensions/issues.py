@@ -65,6 +65,48 @@ def fetch_issues(repo: Path, *, provider: str = "auto", label: str | None = None
     return issues
 
 
+def fetch_github_issue(repo: Path, number: int) -> dict | None:
+    """One issue by number via `gh issue view --json` (None if gh is missing/unauthed/errors)."""
+    cmd = ["gh", "issue", "view", str(number), "--json", "number,title,body,url,labels"]
+    obj = _run_json_obj(repo, cmd, cli="gh")
+    if obj is None:
+        return None
+    return {"number": obj.get("number", number), "title": obj.get("title", ""),
+            "body": obj.get("body") or "", "url": obj.get("url", "")}
+
+
+def fetch_gitlab_issue(repo: Path, number: int) -> dict | None:
+    """One issue by iid via `glab issue view --output json` (None if glab is missing/errors)."""
+    cmd = ["glab", "issue", "view", str(number), "--output", "json"]
+    obj = _run_json_obj(repo, cmd, cli="glab")
+    if obj is None:
+        return None
+    return {"number": obj.get("iid") or obj.get("id") or number, "title": obj.get("title", ""),
+            "body": obj.get("description") or "", "url": obj.get("web_url", "")}
+
+
+def fetch_issue(repo: Path, number: int, *, provider: str = "auto",
+                remote: str = "origin") -> dict | None:
+    """Fetch a single issue by number, dispatching to the right forge (None on any failure).
+
+    The single-issue counterpart of `fetch_issues`: used by the CI tier's `loopkit run --from-issue
+    <n>` (and a clean local convenience), where the run is *about one named issue*, not a sweep. The
+    returned dict has the same shape `issue_to_task` consumes, so the goal-building is shared.
+    """
+    resolved = provider if provider != "auto" else detect_provider(repo, remote)
+    log = _log.bind(provider=resolved, issue=number)
+    if resolved == "github":
+        issue = fetch_github_issue(repo, number)
+    elif resolved == "gitlab":
+        issue = fetch_gitlab_issue(repo, number)
+    else:
+        log.error("fetch.unsupported_provider", provider=resolved,
+                  hint="set --provider or a github/gitlab remote")
+        return None
+    log.info("fetch_one.done", found=issue is not None)
+    return issue
+
+
 def issue_to_task(issue: dict, *, base_branch: str = "loopkit") -> dict:
     """Map one issue into a fleet task dict (the wire shape the coordinator/worker consume).
 
@@ -90,20 +132,35 @@ def issues_to_tasks(issues: list[dict], *, base_branch: str = "loopkit") -> list
 
 def _run_json(repo: Path, cmd: list[str], *, cli: str) -> list[dict]:
     """Run a forge CLI expected to print a JSON array; return [] on any failure (logged)."""
+    data = _run_forge_json(repo, cmd, cli=cli)
+    return data if isinstance(data, list) else []
+
+
+def _run_json_obj(repo: Path, cmd: list[str], *, cli: str) -> dict | None:
+    """Run a forge CLI expected to print a single JSON object; return None on any failure (logged)."""
+    data = _run_forge_json(repo, cmd, cli=cli)
+    return data if isinstance(data, dict) else None
+
+
+def _run_forge_json(repo: Path, cmd: list[str], *, cli: str):
+    """Shell out to a forge CLI and parse its JSON stdout, or None on any failure (all logged).
+
+    Shared by the array (`fetch_*_issues`) and object (`fetch_*_issue`) callers — the only
+    difference is the shape they expect back, which they narrow themselves.
+    """
     try:
         # gh/glab read GH_TOKEN/GITHUB_TOKEN from env — give them the scrubbed env with only the git
         # token re-injected. Redact the error detail so a token can't leak into the log line.
         proc = subprocess.run(cmd, cwd=repo, env=git_env(), capture_output=True, text=True)
     except FileNotFoundError:
         _log.error("cli.missing", cli=cli, hint=f"install {cli} and authenticate it")
-        return []
+        return None
     if proc.returncode != 0:
         _log.error("cli.failed", cli=cli,
                    detail=secrets.redact((proc.stderr or proc.stdout).strip()[-200:]))
-        return []
+        return None
     try:
-        data = json.loads(proc.stdout or "[]")
+        return json.loads(proc.stdout or "null")
     except json.JSONDecodeError:
         _log.error("cli.bad_json", cli=cli)
-        return []
-    return data if isinstance(data, list) else []
+        return None

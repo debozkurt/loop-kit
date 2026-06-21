@@ -56,9 +56,17 @@ adapter)`:
 
 ```
 (environment, submitter)  ──resolve──▶  source Secret  ──project──▶  ns/run-<id>/loopkit-creds
-  · adapter selects the var               (loopkit-system)  · adapter key   (delivered to a memory tmpfs,
-  · registered set = allowlist                              · + git creds    loaded + SHREDDED, GC'd with ns)
+  · adapter selects the var               (loopkit-system)  · adapter key   (Phase 6: envFrom into
+  · registered set = allowlist                              · + git creds    loopkit-core ONLY, GC'd with ns)
 ```
+
+**Delivery (Phase 6 worker split).** The per-run Secret is `envFrom`'d into the trusted **loopkit-core**
+container only; loopkit-core load-shreds it out of `os.environ` into its heap (so even it doesn't carry
+the var onward) and `child_env(add=GIT_ENV)` re-injects only the git token for its own git. The agent's
+untrusted tool surface (`run_bash`/read/write + the held-out gate) runs in a **keyless executor sidecar**
+(different uid/PID-ns, no Secret) — so there is no credential for a hijacked agent to read. The
+no-sidecar CI/local tiers still use the memory-tmpfs load + shred. See
+[`04-security.md`](04-security.md) and [`../part-iii-agent-isolation.md`](../part-iii-agent-isolation.md).
 
 - **Adapter → which key:**
   - Claude (`claude-code`/`claude-api`): **either** `ANTHROPIC_API_KEY` **or**
