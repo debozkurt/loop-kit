@@ -1,0 +1,28 @@
+# The webhook listener's Service — the one inbound surface GitHub POSTs to.
+#
+# ⚠️ type: LoadBalancer provisions a DigitalOcean Load Balancer (a PAID, billed resource). That's
+# why this whole directory is opt-in (not in the bootstrap glob): apply it only when you actually
+# want to receive webhooks. Point the GitHub repo webhook at http(s)://<LB-ip>/ with the same HMAC
+# secret as LOOPKIT_WEBHOOK_SECRET, content-type application/json, events = Issues.
+#
+# Cheaper alternative: change type to ClusterIP and expose via an existing Ingress/controller, or
+# keep it internal and front it with one shared LB for all of loopkit-system.
+apiVersion: v1
+kind: Service
+metadata:
+  name: loopkit-webhook
+  namespace: loopkit-system
+  labels:
+    app.kubernetes.io/part-of: loopkit
+    app.kubernetes.io/component: webhook
+  annotations:
+    # DO: keep the LB private to the VPC unless you intentionally expose it to the internet.
+    service.beta.kubernetes.io/do-loadbalancer-name: "loopkit-webhook"
+spec:
+  type: LoadBalancer
+  selector:
+    app.kubernetes.io/component: webhook
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080

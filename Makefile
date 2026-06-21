@@ -38,7 +38,7 @@ CLOUD_KUBECONFIG := $(CURDIR)/.kube/loopkit-cloud.yaml
 CLOUD_ENV         = KUBECONFIG=$(CLOUD_KUBECONFIG) LOOPKIT_CLOUD_CONTEXT=$(CLOUD_CONTEXT)
 
 .PHONY: fleet-up fleet-down fleet-nodes tilt-up tilt-down fleet-run fleet-evolve \
-        cloud-provision cloud-kubeconfig cloud-context cloud-doctor cloud-bootstrap test demo help
+        cloud-provision cloud-kubeconfig cloud-context cloud-doctor cloud-bootstrap cloud-webhook test demo help
 
 help:
 	@grep -E '^[a-zA-Z_-]+:.*?# ' $(MAKEFILE_LIST) | sort | \
@@ -98,6 +98,15 @@ cloud-doctor: # pre-flight the cloud control plane (extra, kubeconfig, pinned + 
 
 cloud-bootstrap: # apply ns/loopkit-system (Redis, RBAC, NetworkPolicy) — guarded by the context pin
 	@$(CLOUD_ENV) $(LOOPKIT) cloud bootstrap
+
+# The webhook listener is OPT-IN (it provisions a PAID DO LoadBalancer), so it is NOT in the
+# bootstrap glob. Apply ONLY the Deployment + Service here (never secret.example.yaml — that holds
+# placeholders); create the real loopkit-webhook Secret out of band first. Explicit --context= per
+# the global kubectl-safety rule, against the repo-local cloud kubeconfig.
+cloud-webhook: # apply the opt-in webhook listener (Deployment + paid LoadBalancer); needs loopkit-webhook Secret
+	@echo "Pre-req: create the loopkit-webhook Secret (see k8s/cloud/webhook/secret.example.yaml)."
+	@KUBECONFIG=$(CLOUD_KUBECONFIG) kubectl --context=$(CLOUD_CONTEXT) \
+	  apply -f k8s/cloud/webhook/deployment.yaml -f k8s/cloud/webhook/service.yaml
 
 test: # run the unit suite (fakeredis + MockAgent — no cluster, no tokens)
 	@.venv/bin/python -m pytest -q

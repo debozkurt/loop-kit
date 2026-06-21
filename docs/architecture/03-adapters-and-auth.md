@@ -1,12 +1,15 @@
-# 03 — Adapters, auth & credentials (Adapters + cost **Built 🟢**, cloud auth **Designed 🟡**)
+# 03 — Adapters, auth & credentials (Adapters + cost **Built 🟢**, per-submitter auth **Built 🟢 Phase 5a**)
 
 How loopkit drives a coding agent (provider-agnostic), and how credentials reach it — both the
 static per-environment model and the dynamic **per-submitter** model.
 
-> **Phase 0 landed (2026-06-19):** the full **2×2 adapter matrix** and **real per-adapter cost
-> parsing** (`pricing.py`) are **built and tested** (token-free) — so the budget stop now bites on
-> real spend. The **cloud credential machinery** below (per-`(env, adapter, submitter)` resolution,
-> per-run Secrets) remains **Designed 🟡** for a later phase.
+> **Built 🟢:** the full **2×2 adapter matrix** + **real per-adapter cost** (`pricing.py`, Phase 0),
+> and the **per-submitter credential machinery** (Phase 5a): the identity→Secret resolver
+> ([`creds.py`](../../loopkit/extensions/creds.py)), key-projection, the fail-closed fallback, and the
+> worker-side hygiene that keeps the resolved key **out of the agent's reach**
+> ([`secrets.py`](../../loopkit/secrets.py)). The deep treatment of *how the key is withheld from a
+> prompt-injected agent* lives in [`04-security.md`](04-security.md) → *Credential handling along the
+> injection flow*; this page is the resolution model.
 
 ## The `Agent` protocol & the 2×2 adapter matrix
 
@@ -44,12 +47,17 @@ adapter is the only thing that varies.
 
 ## The pluggable credential model
 
-A credential is resolved from a **three-part key** and copied into the run's namespace as a Secret:
+A credential is resolved by **`(environment, submitter)`** — one source Secret per engineer-per-env,
+holding all their keys — and the **adapter selects which key** is *projected* into the run's namespace
+(only that key + git creds, never the whole bag). The literal three-part `(env, adapter, submitter)` is
+the doc's earlier framing; in code the *Secret* is keyed by `(env, submitter)` and the *adapter* is a
+within-Secret selector — the resolution is `creds.secret_name(env, submitter)` + `creds.project(data,
+adapter)`:
 
 ```
-(environment, adapter, submitter)  ──resolve──▶  source Secret  ──copy──▶  ns/run-<id>/loopkit-creds
-                                                                            (mounted into pods only,
-                                                                             GC'd with the namespace)
+(environment, submitter)  ──resolve──▶  source Secret  ──project──▶  ns/run-<id>/loopkit-creds
+  · adapter selects the var               (loopkit-system)  · adapter key   (delivered to a memory tmpfs,
+  · registered set = allowlist                              · + git creds    loaded + SHREDDED, GC'd with ns)
 ```
 
 - **Adapter → which key:**
@@ -72,10 +80,15 @@ Engineers can run jobs under **their own** API key, resolved dynamically from wh
 - **Submitter identity** comes from the entry point: the authenticated CLI user (kubeconfig/OIDC
   identity, or explicit `--as`), the **GitHub actor** on a webhook (issue/PR author in the payload),
   or the configured owner of a CronJob.
-- **Resolution (v1 — pre-provisioned per-engineer Secrets, hardened):** each engineer registers a key
-  once (`loopkit cloud creds set --as <eng> --adapter …` → a Secret in `ns/loopkit-system`). At run
-  creation the submitter's identity selects their Secret, copied into `ns/run-<id>`; absent one, fall
-  back to the team/fleet default. Covers all three entry points uniformly.
+- **Resolution (🟢 Phase 5a — pre-provisioned per-engineer Secrets, hardened):** each engineer
+  registers once (`loopkit cloud creds set --as <eng> --adapter …`, env/stdin only → a Secret in
+  `ns/loopkit-system`; re-run per adapter to accumulate). At run creation the submitter's identity
+  (CLI `--as`, the webhook **issue author**, or the CronJob's pinned `--as`) selects their Secret;
+  `resolve_for_run` **projects** only the adapter key + git and records the exact canonical identity
+  (an injective check guards a sanitize collision). Fallback to the shared `fleet` key is
+  **fail-closed**: never on the untrusted webhook/cron path unless `--allow-fleet-fallback`, and a
+  confirm prompt on the interactive CLI — an unregistered submitter is refused, not silently shared.
+  `cloud creds ls` shows key *names* only, never values. Covers all three entry points uniformly.
 
 **Why this is safe enough to start with, and how it hardens:**
 

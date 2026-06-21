@@ -27,7 +27,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Protocol, runtime_checkable
 
-from . import trace
+from . import secrets, trace
 from .pricing import DEFAULT_MODELS, Usage, estimate_cost
 
 
@@ -77,6 +77,7 @@ class _CLIAdapter:
     """Shared base for agents that shell out to a headless coding-agent CLI."""
 
     binary: str = ""
+    cred_keys: tuple[str, ...] = ()           # the env var(s) THIS vendor binary needs (scrub the rest)
 
     def __init__(self, model: str | None = None, extra_args: list[str] | None = None,
                  prompt_flag: str = "-p") -> None:
@@ -91,7 +92,10 @@ class _CLIAdapter:
         return cmd + self.extra_args
 
     def act(self, prompt: str, workspace: Path) -> AgentResult:
-        proc = subprocess.run(self._command(prompt), cwd=workspace,
+        # The vendor binary runs its own loop on untrusted instructions: hand it ONLY its model key
+        # (no git token, no other provider's key) via a scrubbed env (Part III Phase 5a containment).
+        env = secrets.current().child_env(add=self.cred_keys)
+        proc = subprocess.run(self._command(prompt), cwd=workspace, env=env,
                               capture_output=True, text=True)
         return self._result(proc)
 
@@ -100,7 +104,7 @@ class _CLIAdapter:
         return AgentResult(ok=proc.returncode == 0,
                            cost_usd=self._parse_cost(proc.stdout or ""),
                            summary=f"rc={proc.returncode} outLen={len(out)}",
-                           raw_tail=out[-2000:])
+                           raw_tail=secrets.redact(out[-2000:]))
 
     @staticmethod
     def _parse_cost(stdout: str) -> float:
@@ -119,6 +123,7 @@ class ClaudeCodeAdapter(_CLIAdapter):
     """
 
     binary = "claude"
+    cred_keys = secrets.ADAPTER_KEYS["claude-code"]
 
     def __init__(self, model: str | None = None, extra_args: list[str] | None = None) -> None:
         args = list(extra_args or [])
@@ -131,7 +136,7 @@ class ClaudeCodeAdapter(_CLIAdapter):
         cost, result_text = _parse_claude_json(proc.stdout or "")
         return AgentResult(ok=proc.returncode == 0, cost_usd=cost,
                            summary=f"rc={proc.returncode} costUsd={round(cost, 4)}",
-                           raw_tail=(result_text or out)[-2000:])
+                           raw_tail=secrets.redact((result_text or out)[-2000:]))
 
 
 class CodexAdapter(_CLIAdapter):
@@ -140,6 +145,7 @@ class CodexAdapter(_CLIAdapter):
     format is less stable than Claude's; an unknown model or no usage event yields 0.0."""
 
     binary = "codex"
+    cred_keys = secrets.ADAPTER_KEYS["codex"]
 
     def _result(self, proc: subprocess.CompletedProcess) -> AgentResult:
         out = (proc.stdout or "") + (proc.stderr or "")
@@ -148,7 +154,7 @@ class CodexAdapter(_CLIAdapter):
         return AgentResult(ok=proc.returncode == 0, cost_usd=cost,
                            summary=(f"rc={proc.returncode} in={usage.input_tokens} "
                                     f"out={usage.output_tokens} costUsd={round(cost, 4)}"),
-                           raw_tail=out[-2000:])
+                           raw_tail=secrets.redact(out[-2000:]))
 
 
 def _parse_claude_json(stdout: str) -> tuple[float, str]:
@@ -327,7 +333,10 @@ class _WorkspaceTools:
         return f"wrote {path} ({len(content)} bytes)", False
 
     def _bash(self, command: str) -> tuple[str, bool]:
-        proc = subprocess.run(command, shell=True, cwd=self.root, capture_output=True, text=True)
+        # The agent's shell runs untrusted-derived commands, so it gets a credential-free env: the
+        # API key lives only in loopkit's process; loopkit's own git calls re-inject the git token.
+        proc = subprocess.run(command, shell=True, cwd=self.root,
+                              env=secrets.current().child_env(), capture_output=True, text=True)
         out = ((proc.stdout or "") + (proc.stderr or ""))[: self.MAX_OUTPUT]
         return f"exit={proc.returncode}\n{out}", False
 
@@ -378,6 +387,9 @@ class _APIAdapter:
                 n_calls += 1
                 with trace.span(f"tool:{call.name}", run_type="tool", inputs=call.args) as tool_span:
                     output, is_error = tools.dispatch(call.name, call.args)
+                    # Redact at capture: this output re-enters the transcript and is re-sent to the
+                    # model on the next tick (the wire), so scrub a key here, not only in the trace.
+                    output = secrets.redact(output)
                     tool_span.outputs(output=output, is_error=is_error)
                 results.append({"id": call.id, "name": call.name,
                                 "content": output, "is_error": is_error})
@@ -387,7 +399,7 @@ class _APIAdapter:
             ok=True, cost_usd=cost,
             summary=(f"toolCalls={n_calls} in={total.input_tokens} "
                      f"out={total.output_tokens} costUsd={round(cost, 4)}"),
-            raw_tail=last_text[-2000:])
+            raw_tail=secrets.redact(last_text[-2000:]))
 
 
 class ClaudeAPIAdapter(_APIAdapter):
@@ -427,7 +439,9 @@ class _AnthropicBackend:
             except ImportError as exc:   # pragma: no cover - exercised only without the extra
                 raise RuntimeError("the claude-api adapter needs the Anthropic SDK: "
                                    "pip install 'loopkit[claude]'") from exc
-            self._client = anthropic.Anthropic()
+            # Pass the key explicitly: the worker scrubs it from os.environ at load (Phase 5a), so a
+            # zero-arg `Anthropic()` would find nothing. None (laptop/no-store) lets the SDK read env.
+            self._client = anthropic.Anthropic(api_key=secrets.current().api_key("claude-api"))
         return self._client
 
     def complete(self, transcript: list[dict], tools: list[_ToolSpec]) -> _Turn:
@@ -466,7 +480,8 @@ class _OpenAIBackend:
             except ImportError as exc:   # pragma: no cover - exercised only without the extra
                 raise RuntimeError("the openai-api adapter needs the OpenAI SDK: "
                                    "pip install 'loopkit[openai]'") from exc
-            self._client = openai.OpenAI()
+            # Explicit key for the same reason as the Anthropic backend (env is scrubbed at load).
+            self._client = openai.OpenAI(api_key=secrets.current().api_key("openai-api"))
         return self._client
 
     def complete(self, transcript: list[dict], tools: list[_ToolSpec]) -> _Turn:

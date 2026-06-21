@@ -129,6 +129,34 @@ def test_cli_doctor_fails_when_unpinned(tmp_path, monkeypatch):
     assert "unpinned" in result.output
 
 
+def test_cli_run_refuses_wrong_context(tmp_path):
+    pytest.importorskip("kubernetes")
+    cfg = _write_kubeconfig(tmp_path, PROD)                 # active = prod
+    result = runner.invoke(app, ["cloud", "run", "--target", "t", "--goal", "g", "--image", "img",
+                                 "--kubeconfig", str(cfg), "--context", "kind-loopkit", "--yes"])
+    assert result.exit_code == 1
+    assert "refus" in result.output.lower()                # guard fired before create_run
+
+
+def test_cli_run_requires_an_image(tmp_path, monkeypatch):
+    pytest.importorskip("kubernetes")
+    monkeypatch.delenv("LOOPKIT_WORKER_IMAGE", raising=False)
+    cfg = _write_kubeconfig(tmp_path, PROD)
+    result = runner.invoke(app, ["cloud", "run", "--target", "t", "--goal", "g",
+                                 "--kubeconfig", str(cfg), "--context", PROD, "--yes"])
+    assert result.exit_code == 1
+    assert "image" in result.output.lower()
+
+
+def test_cli_kill_refuses_wrong_context(tmp_path):
+    pytest.importorskip("kubernetes")
+    cfg = _write_kubeconfig(tmp_path, PROD)
+    result = runner.invoke(app, ["cloud", "kill", "r1",
+                                 "--kubeconfig", str(cfg), "--context", "kind-loopkit", "--yes"])
+    assert result.exit_code == 1
+    assert "refus" in result.output.lower()
+
+
 # --------------------------------------------------------------------------------------------
 # Manifest sanity — the two Phase-2 acceptance properties that live in YAML.
 # --------------------------------------------------------------------------------------------
@@ -182,4 +210,9 @@ def test_control_clusterrole_can_create_run_namespaces_and_jobs():
         if res in res_list for v in r.get("verbs", [])}
     assert {"create", "delete"} <= verbs_for("namespaces")
     assert {"create", "delete"} <= verbs_for("jobs")
-    assert "create" in verbs_for("secrets")
+    # Secrets (Phase 5a least-privilege on the internet-facing control SA): create a run's Secret +
+    # get a source key to project — but NEVER list (no enumerating all tenants) or update/patch (no
+    # rewriting a victim's stored key on a listener RCE; registration uses the human kubeconfig).
+    secret_verbs = verbs_for("secrets")
+    assert {"create", "get"} <= secret_verbs
+    assert "list" not in secret_verbs and "update" not in secret_verbs and "patch" not in secret_verbs

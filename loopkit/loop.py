@@ -19,7 +19,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from . import durability, safety, trace
+from . import durability, safety, secrets, trace
 from .agent import Agent
 from .gate import AlwaysPass, Gate, ShellGate
 from .log import get_logger
@@ -154,7 +154,7 @@ def run_loop(config, agent: Agent, *, iteration_gate: Gate | None = None,
                     if not review.passed:
                         review_ok = False
                         feedback = ("A review of your last change found issues to fix before it can "
-                                    "be accepted:\n" + (review.feedback or ""))
+                                    "be accepted:\n" + secrets.redact(review.feedback or ""))
 
                 # DONE next: the iteration gate, then the held-out acceptance gate (Ch 9). Skipped
                 # when the review failed, so unreviewed-but-green work can never be declared done.
@@ -186,9 +186,9 @@ def run_loop(config, agent: Agent, *, iteration_gate: Gate | None = None,
                         tick.warn("gate.overfit", detail="iteration_pass_acceptance_fail")
                         feedback = ("The visible checks pass but the held-out acceptance checks "
                                     "fail: you have fit the visible tests, not solved the goal. Make "
-                                    "the behaviour correct.\n" + (acc.feedback or ""))
+                                    "the behaviour correct.\n" + secrets.redact(acc.feedback or ""))
                     else:
-                        feedback = gate.feedback
+                        feedback = secrets.redact(gate.feedback)
 
                 # Hard stops, in precedence order (budget > no-progress). Cap is the loop bound below.
                 reason = first_triggered(hard_stops, state)

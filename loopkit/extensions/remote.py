@@ -17,17 +17,54 @@ Design choices that keep it thin and safe:
 """
 from __future__ import annotations
 
+import re
 import subprocess
 from pathlib import Path
 
+from .. import secrets
 from ..config import Config, RemoteConfig
 from ..log import get_logger
 
 _log = get_logger("remote")
 
+# An env-fed credential helper: it echoes the git token from the (re-injected) env *at call time*, so
+# the token is never on the command line (visible in `ps`) nor persisted in `.git/config`. Paired with
+# `child_env(add=GIT_ENV)` so loopkit's own git authenticates while the agent's scrubbed shell cannot.
+CRED_HELPER = '!f() { echo username=x; echo "password=${GITHUB_TOKEN:-${GH_TOKEN:-}}"; }; f'
+_USERINFO = re.compile(r"(https?://)[^/@]*@")
+
+
+def sanitize_git_url(url: str) -> str:
+    """Strip any `user:token@` userinfo from an https git URL so a token never lands in `.git/config`."""
+    return _USERINFO.sub(r"\1", url or "")
+
+
+def git_env() -> dict[str, str]:
+    """A scrubbed subprocess env with only the git token re-injected (for loopkit's own git/gh)."""
+    return secrets.current().child_env(add=secrets.GIT_ENV)
+
 
 def _git(repo: Path, *args: str) -> subprocess.CompletedProcess:
-    return subprocess.run(["git", *args], cwd=repo, capture_output=True, text=True)
+    return subprocess.run(["git", *args], cwd=repo, env=git_env(), capture_output=True, text=True)
+
+
+def _git_auth(repo: Path, *args: str) -> subprocess.CompletedProcess:
+    """git for an authenticated op (push), with the env-fed credential helper (no token in argv)."""
+    return subprocess.run(["git", "-c", f"credential.helper={CRED_HELPER}", *args],
+                          cwd=repo, env=git_env(), capture_output=True, text=True)
+
+
+def _scan_push(repo: Path, branch: str, base: str) -> list[str]:
+    """Labels of any secret-shaped tokens in the patch about to be pushed (empty list = clean).
+
+    Scans the branch's diff against `base` (falling back to its recent commits if `base` is unknown
+    locally). This is the deterministic backstop before a branch reaches the forge — the root control
+    is that the agent's shell never holds a key (`secrets.child_env`); this catches the careless path.
+    """
+    diff = _git(repo, "diff", "--no-color", f"{base}...{branch}")
+    patch = diff.stdout if diff.returncode == 0 and diff.stdout else \
+        _git(repo, "log", "-p", "--no-color", "-n", "50", branch).stdout
+    return secrets.scan_for_secrets(patch or "")
 
 
 def remote_url(repo: Path, name: str = "origin") -> str | None:
@@ -46,21 +83,28 @@ def detect_provider(repo: Path, name: str = "origin") -> str:
     return "unknown"
 
 
-def push_branch(repo: Path, *, remote: str, branch: str,
+def push_branch(repo: Path, *, remote: str, branch: str, base: str = "main",
                 forbid: list[str] | None = None) -> bool:
     """Push `branch` to `remote`, setting upstream. Refuses forbidden branches; never force-pushes.
 
-    Returns True on a clean push. The forbidden-branch guard is the same safety property the loop
-    uses for commits (Ch 16) carried to the outward edge: a run can push only its own work, never
-    overwrite `main`.
+    Returns True on a clean push. Two refusals before the network: the forbidden-branch guard (a run
+    pushes only its own work, never `main` — Ch 16), and a **pre-push secret scan** — the diff about
+    to reach the forge must carry no credential value/shape (Phase 5a; the branch is public the moment
+    it lands, before any human sees the draft PR). `detail` is redacted so a scanned secret can't leak
+    into the log line itself.
     """
     if branch in (forbid or ["main", "master"]):
         _log.error("push.refused", branch=branch, reason="forbidden_branch")
         return False
+    hits = _scan_push(repo, branch, base)
+    if hits:
+        _log.error("push.refused", branch=branch, reason="secret_scan",
+                   hits=",".join(sorted(set(hits))))
+        return False
     log = _log.bind(remote=remote, branch=branch)
-    proc = _git(repo, "push", "--set-upstream", remote, branch)   # no --force, ever
+    proc = _git_auth(repo, "push", "--set-upstream", remote, branch)   # no --force, ever
     if proc.returncode != 0:
-        log.error("push.failed", detail=(proc.stderr or proc.stdout).strip()[-200:])
+        log.error("push.failed", detail=secrets.redact((proc.stderr or proc.stdout).strip()[-200:]))
         return False
     log.info("push.ok")
     return True
@@ -89,7 +133,9 @@ def open_pull_request(repo: Path, *, provider: str, branch: str, base: str, titl
         return None
 
     try:
-        proc = subprocess.run(cmd, cwd=repo, capture_output=True, text=True)
+        # gh/glab authenticate from GH_TOKEN/GITHUB_TOKEN in env — give them the scrubbed env with
+        # only the git token re-injected (no model key, nothing else).
+        proc = subprocess.run(cmd, cwd=repo, env=git_env(), capture_output=True, text=True)
     except FileNotFoundError:
         cli = "gh" if provider == "github" else "glab"
         log.error("pr.cli_missing", cli=cli, hint=f"install {cli} to open PRs/MRs")
@@ -118,8 +164,8 @@ def sync_done(config: Config, repo: Path, *, title: str | None = None, body: str
         return result
 
     if rc.push:
-        result["pushed"] = push_branch(repo, remote=rc.name, branch=branch,
-                                        forbid=config.safety.forbid_branches)
+        result["pushed"] = push_branch(repo, remote=rc.name, branch=branch, base=rc.pr_base,
+                                       forbid=config.safety.forbid_branches)
         if not result["pushed"]:
             return result                      # don't try to open a PR for an un-pushed branch
 

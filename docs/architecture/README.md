@@ -22,9 +22,24 @@ in sync with the topology. History goes in git and the resume-doc changelog, not
 |---|---|
 | **README** (this page) | The map, the master diagram, the glossary, the status legend |
 | [`01-system-today.md`](01-system-today.md) | **Built:** the single-loop core, its contracts, the **2×2 adapter matrix** + cost (`pricing.py`), the **two-layer observability** (logs + LangSmith traces), the extension seams, the in-process + dev-cluster fleet |
-| [`02-cloud-architecture.md`](02-cloud-architecture.md) | **Designed:** the Part III Kubernetes/DOKS target — topology, run lifecycle, control plane, storage, scaling, triggers. **Built 🟢 (Phase 1):** image & registry (`worker-image` → GHCR). **Built 🟢 (Phase 2):** control-plane foundation — context guard + `loopkit cloud`, `ns/loopkit-system` manifests (Redis AOF+PVC, RBAC, NetworkPolicy) |
+| [`02-cloud-architecture.md`](02-cloud-architecture.md) | **Designed:** the Part III Kubernetes/DOKS target — topology, run lifecycle, control plane, storage, scaling, triggers. **Built 🟢 (Phase 1):** image & registry (`worker-image` → GHCR). **Built 🟢 (Phase 2):** control-plane foundation — context guard + `loopkit cloud`, `ns/loopkit-system` manifests (Redis AOF+PVC, RBAC, NetworkPolicy). **Built 🟢 (Phase 3):** run mechanics — sentinel shutdown + `cloudrun.create_run` (per-run ns + coordinator/worker Jobs) + `cloud run/ls/status/logs/kill`. **Built 🟢 (Phase 4):** triggers — in-cluster auth + CronJob (`cloud schedule`) + GitHub/GitLab webhook listener (HMAC or token + idempotency → `create_run`) |
 | [`03-adapters-and-auth.md`](03-adapters-and-auth.md) | The agent-adapter matrix (CLI/API × Claude/OpenAI), the pluggable credential model, per-submitter keys, billing |
-| [`04-security.md`](04-security.md) | The Ch 16 safety envelope at cloud scale — threat model and defense-in-depth. **Built 🟢 (Phase 2):** context guard, default-deny NetworkPolicy, least-priv RBAC |
+| [`04-security.md`](04-security.md) | The Ch 16 safety envelope at cloud scale — threat model and defense-in-depth. **Built 🟢 (Phase 2):** context guard, default-deny NetworkPolicy, least-priv RBAC. **Built 🟢 (Phase 4):** webhook HMAC + idempotency, in-cluster context guard |
+
+## Deployment tiers
+
+loopkit runs at three escalating tiers — pick the smallest that fits; each reuses the same single-loop
+core, only the *trigger / secrets / isolation* differ:
+
+| Tier | Runs | Trigger · secrets · isolation | For | Status |
+|---|---|---|---|---|
+| **Local** | `loopkit run` on a laptop | a human · local env · the laptop | iterating by hand | 🟢 Built |
+| **CI** | `loopkit run` in a CI job | forge issue/cron/manual · **CI-native** secrets · the **ephemeral runner** | hands-off issue→PR, no cluster | 🟡 Designed ([`../part-iii-ci-mode.md`](../part-iii-ci-mode.md), build next) |
+| **Cloud fleet** | coordinator + worker Jobs on DOKS | CLI/CronJob/webhook · per-submitter resolver + **sidecar** · namespace + container split | concurrent/`evolve`/multi-tenant | 🟢 code-built (Phases 2–5a), live-pending |
+
+The credential machinery (resolver, shred, sidecar) is **cloud-tier only** — the CI tier delegates
+secrets/identity/sandbox to the forge, which is its whole appeal. The cloud tier's remaining hardening
+(the keyless-executor split) is designed in [`../part-iii-agent-isolation.md`](../part-iii-agent-isolation.md).
 
 ## Status legend
 
@@ -47,7 +62,7 @@ flowchart LR
   REDIS["Redis StatefulSet<br/>queue + results<br/>per-run keyspace"]
   COORD["Coordinator Job<br/>enqueue · collect ·<br/>select · sentinel"]
   WORK["Worker Job<br/>parallelism N ·<br/>clone · run_loop · push"]
-  GH["GitHub<br/>clone / branch / PR ·<br/>issues · skills repo"]
+  GH["GitHub / GitLab<br/>clone / branch / PR / MR ·<br/>issues · skills repo"]
   LLM["Agent API<br/>Claude / OpenAI"]
 
   CLI --> CREATE

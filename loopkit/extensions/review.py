@@ -13,11 +13,11 @@ goal-complete yet still be held back by review, which is exactly the roborev dis
 """
 from __future__ import annotations
 
-import os
 import subprocess
 from pathlib import Path
 from typing import Callable, Protocol
 
+from .. import secrets
 from ..gate import GateResult
 
 
@@ -56,9 +56,9 @@ class ShellReviewHook:
         self._tail = feedback_tail
 
     def review(self, workspace: Path, commit_message: str) -> GateResult:
-        # Match ShellGate: don't let a python reviewer litter __pycache__ into the tree (it can
-        # fall under a protected path and trip the safety guard); the verdict is unaffected.
-        env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
+        # Match ShellGate: scrub credentials (the reviewer may run agent-authored code) and keep a
+        # python reviewer from littering __pycache__ into a protected path.
+        env = {**secrets.current().child_env(), "PYTHONDONTWRITEBYTECODE": "1"}
         proc = subprocess.run(self.command, cwd=workspace, shell=True, env=env,
                               capture_output=True, text=True)
         if proc.returncode == 0:

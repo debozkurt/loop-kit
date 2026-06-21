@@ -20,16 +20,18 @@ WORKDIR /opt/loopkit
 COPY pyproject.toml README.md ./
 COPY loopkit ./loopkit
 COPY examples ./examples
-# Editable install with the [fleet] extra: editable so Tilt's live_update (sync ./loopkit) reloads
-# worker code without a rebuild; [fleet] pulls the thin redis client the worker needs. pytest is
-# the demo-repo gates' runner.
-RUN pip install --no-cache-dir -e '.[fleet]' pytest
+# Editable install with [fleet]+[cloud]: editable so Tilt's live_update (sync ./loopkit) reloads
+# worker code without a rebuild; [fleet] pulls the thin redis client the coordinator/worker need,
+# [cloud] the kubernetes client the in-cluster triggers use (the CronJob + webhook listener run
+# `loopkit cloud run --in-cluster`, Part III Phase 4). pytest is the demo-repo gates' runner.
+RUN pip install --no-cache-dir -e '.[fleet,cloud]' pytest
 
 # examples/ ships at the repo root (not inside the package), so point the scenarios at it.
 ENV LOOPKIT_DEMO_REPO=/opt/loopkit/examples/demo-repo
 
-# Run as a non-root user so the blast radius stays small even inside the container.
-RUN useradd --create-home runner \
+# Run as a non-root user so the blast radius stays small even inside the container. Pin uid 1000 so
+# the cloud pod's securityContext (runAsUser/fsGroup 1000, Phase 5a) lands on this exact user.
+RUN useradd --create-home --uid 1000 runner \
  && git config --system --add safe.directory '*'
 USER runner
 WORKDIR /work

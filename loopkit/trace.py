@@ -36,6 +36,7 @@ import os
 from contextlib import contextmanager
 from typing import Iterator
 
+from . import secrets
 from .log import get_logger
 
 # Module-level configuration, set once by `configure()` at an entry point (CLI run / fleet worker).
@@ -225,8 +226,13 @@ def _clean(data: dict | None) -> dict | None:
 
 
 def _cap(value: object) -> object:
-    if isinstance(value, str) and len(value) > _MAX_FIELD_CHARS:
-        return value[:_MAX_FIELD_CHARS] + f"…[+{len(value) - _MAX_FIELD_CHARS} chars]"
+    if isinstance(value, str):
+        # Redact known secret values before anything reaches the (third-party) trace backend — a
+        # backstop for a key that surfaced in tool output / a prompt (the boundary is withholding it).
+        value = secrets.redact(value)
+        if len(value) > _MAX_FIELD_CHARS:
+            return value[:_MAX_FIELD_CHARS] + f"…[+{len(value) - _MAX_FIELD_CHARS} chars]"
+        return value
     if isinstance(value, list):
         return [_cap(v) for v in value]
     if isinstance(value, dict):

@@ -1,0 +1,85 @@
+# The webhook listener — the inbound trigger surface (Part III, Phase 4; see 02-cloud-architecture.md).
+#
+# A long-lived Deployment in loopkit-system that turns signed GitHub issue deliveries into runs
+# through the same create_run() the CLI/CronJob use. It runs as `loopkit-control` (the only SA that
+# may create run namespaces/Jobs) and submits *in-cluster* (its own ServiceAccount), so submissions
+# never depend on a laptop. Hardened per 04-security.md: every delivery is HMAC-verified (fail-closed)
+# and deduped (one run per issue) before a run starts.
+#
+# This manifest lives in k8s/cloud/webhook/ (a subdirectory) ON PURPOSE: `loopkit cloud bootstrap`
+# globs k8s/cloud/*.yaml non-recursively, so it does NOT auto-apply this (or the paid LoadBalancer in
+# service.yaml). Deploy it deliberately once the loopkit-webhook Secret exists:
+#
+#   kubectl apply -f k8s/cloud/webhook/    --context=<your-doks-context>   # after creating the secret
+#
+# The listener carries NO agent/git credentials of its own (Phase 5a): each run resolves the
+# submitter's key from the per-submitter Secrets in loopkit-system at run-creation time (the issue
+# author for GitHub; LOOPKIT_SUBMITTER for GitLab), so no shared key sits in this long-lived pod.
+#
+# Requires (set in the loopkit-webhook Secret, see secret.example.yaml):
+#   LOOPKIT_WEBHOOK_SECRET   the webhook HMAC secret / GitLab token (REQUIRED — refuses to start without it)
+#   LOOPKIT_WORKER_IMAGE     ghcr.io/<owner>/loopkit-worker:<tag> the triggered runs use
+#   LOOPKIT_SUBMITTER        (GitLab only) the single pinned identity whose key its runs spend
+#   REDIS_URL                (optional) shared idempotency store when replicas > 1
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: loopkit-webhook
+  namespace: loopkit-system
+  labels:
+    app.kubernetes.io/part-of: loopkit
+    app.kubernetes.io/component: webhook
+spec:
+  # v1 is single-replica: the in-memory idempotency store is process-local. To scale replicas, set
+  # REDIS_URL (in the Secret) so dedupe is shared via the cluster Redis — then a re-delivery routed
+  # to any pod still maps one issue to one run.
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: webhook
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/part-of: loopkit
+        app.kubernetes.io/component: webhook
+    spec:
+      serviceAccountName: loopkit-control      # may create run namespaces/Jobs/Secrets (20-rbac.yaml)
+      imagePullSecrets:
+        - name: ghcr-pull
+      containers:
+        - name: webhook
+          image: ghcr.io/OWNER/loopkit-worker:latest   # replace OWNER (or set via your overlay)
+          command: ["loopkit"]
+          args: ["cloud", "webhook"]
+          ports:
+            - containerPort: 8080
+          env:
+            # Pin the in-cluster identity so the context guard allows the submission (fail-closed).
+            - name: LOOPKIT_CLOUD_CONTEXT
+              value: in-cluster
+            # Which forge this listener serves: github (HMAC) | gitlab (token). One listener = one
+            # forge; deploy a second listener/Service for the other forge if you need both.
+            - name: LOOPKIT_WEBHOOK_PROVIDER
+              value: github
+          envFrom:
+            - secretRef:
+                name: loopkit-webhook          # HMAC/token + worker image (+ optional REDIS_URL) — NO agent/git keys
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi

@@ -25,8 +25,10 @@ from loopkit.extensions.fleet import (
     RedisQueue,
     Worker,
     WorkerOutcome,
+    is_sentinel,
     make_demo_runner,
     run_workers,
+    sentinel_task,
 )
 from loopkit.gate import CallableGate
 from loopkit.loop import run_loop
@@ -321,4 +323,65 @@ def test_evolve_reseeds_the_validated_winner_across_generations():
     for gen in result.generations:
         assert gen.confirmed is not None and gen.confirmed.task["kind"] == "solver"
         assert gen.inflated is True
+    assert result.winner.task["kind"] == "solver"
+
+
+# --------------------------------------------------------------------------------------------
+# Sentinel shutdown (Part III) — ephemeral worker pods drain the queue, then exit on a poison pill.
+# --------------------------------------------------------------------------------------------
+def _echo_runner():
+    """A trivial TaskRunner: every real task reports DONE. (Sentinels never reach a runner.)"""
+    def run_task(task: dict) -> WorkerOutcome:
+        return WorkerOutcome(task_id=task["id"], branch=task.get("branch", "-"), reason="done")
+    return run_task
+
+
+def test_worker_exits_on_sentinel_after_draining_real_tasks():
+    queue = InMemoryQueue()
+    for i in range(3):
+        queue.push_task({"id": f"t{i}"})
+    queue.push_task(sentinel_task())            # the poison pill ends the pod
+    # No max_tasks and no stop(): the ONLY thing that ends run_forever here is the sentinel.
+    handled = Worker(queue, _echo_runner(), poll_timeout=0.05).run_forever()
+    assert handled == 3                          # all real tasks ran; the sentinel was not counted
+    assert queue.pending() == 0                  # and it was consumed, not left behind
+
+
+def test_sentinel_is_a_control_signal_not_work():
+    assert is_sentinel(sentinel_task()) is True
+    assert is_sentinel({"id": "t0", "goal": "real"}) is False
+    queue = InMemoryQueue()
+    queue.push_task(sentinel_task())
+    # A worker that only ever sees a sentinel runs zero tasks and still exits cleanly.
+    assert Worker(queue, _echo_runner(), poll_timeout=0.05).run_forever() == 0
+
+
+def test_coordinator_drains_one_sentinel_per_worker_after_collecting():
+    queue = InMemoryQueue()
+    workers, threads = run_workers(queue, _echo_runner(), count=3, poll_timeout=0.02)
+    try:
+        result = Coordinator(queue, collect_timeout=10).run_fleet(
+            [{"slug": "a"}, {"slug": "b"}], drain_workers=3)
+    finally:
+        for w in workers:
+            w.stop()
+        for t in threads:
+            t.join(timeout=2)
+    assert len(result.done) == 2
+    # Every worker thread popped its own sentinel and returned, so none are still alive.
+    assert not any(t.is_alive() for t in threads)
+
+
+def test_evolve_drains_only_after_the_final_generation():
+    # Sentinels must NOT appear until evolve is fully done — a worker that exited between
+    # generations would be the correctness bug the sentinel design exists to prevent.
+    queue = InMemoryQueue()
+    wt = run_workers(queue, _evolve_runner(), count=4, poll_timeout=0.02)
+    try:
+        result = Coordinator(queue, collect_timeout=10).evolve(
+            {"goal": "Implement solution"}, generations=2, population=4, keep=2,
+            candidate_task=_evolve_candidate, drain_workers=4)
+    finally:
+        _drain(None, wt)
+    assert len(result.generations) == 2          # both generations completed before any drain
     assert result.winner.task["kind"] == "solver"

@@ -43,12 +43,14 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Callable, Protocol
 
+from .. import secrets
 from ..agent import Agent, MockAgent, build_agent
 from ..config import AgentConfig, Config, GateConfig, RemoteConfig, SafetyConfig, StopsConfig
 from ..gate import ShellGate
 from ..log import get_logger
 from ..loop import RunResult, run_loop
 from ..stops import StopReason
+from . import remote
 from .orchestrate import (
     Candidate,
     EvolutionResult,
@@ -64,6 +66,25 @@ from .orchestrate import (
 TaskRunner = Callable[[dict], "WorkerOutcome"]
 
 _DEFAULT_REDIS_URL = "redis://localhost:6379"
+
+# Sentinel shutdown (Part III) — the poison pill that ends an ephemeral worker pod cleanly.
+# The dev fleet's workers are long-lived Deployments, so they never see one; on the cloud the
+# workers are a `Job` (parallelism N, completions unset, drain-the-queue-then-exit), and a momentarily
+# empty queue does NOT mean "done" — between `evolve` generations the queue is empty but more work is
+# coming. So the *coordinator* owns "the run is over": when the run truly completes it enqueues N
+# sentinels, one per worker, and each worker exits 0 on popping one. A reserved key keeps a sentinel
+# unambiguously distinct from any real task dict.
+_SENTINEL_KEY = "__loopkit_sentinel__"
+
+
+def sentinel_task() -> dict:
+    """One poison-pill task; popping it tells a worker to drain-and-exit (cloud Job shutdown)."""
+    return {_SENTINEL_KEY: True}
+
+
+def is_sentinel(task: dict) -> bool:
+    """True iff `task` is a shutdown sentinel rather than real work."""
+    return bool(task.get(_SENTINEL_KEY))
 
 
 # --------------------------------------------------------------------------------------------
@@ -233,13 +254,21 @@ class Worker:
         self._stop.set()
 
     def run_forever(self, max_tasks: int | None = None) -> int:
-        """Pop-and-run until stopped (a long-lived pod) or `max_tasks` handled (tests). Count run."""
+        """Pop-and-run until stopped (a long-lived pod) or `max_tasks` handled (tests). Count run.
+
+        A **sentinel** pop is the third way out: it ends the loop cleanly so an ephemeral worker Job
+        pod exits 0 (cloud shutdown). The sentinel is consumed, never run and never counted — it is a
+        control signal, not work. The dev fleet never enqueues one, so its workers are unaffected.
+        """
         handled = 0
         self._log.info("worker.up", poll=self._poll, maxTasks=max_tasks if max_tasks else "-")
         while not self._stop.is_set() and (max_tasks is None or handled < max_tasks):
             task = self._q.pop_task(timeout=self._poll)
             if task is None:                              # idle tick — re-check the stop flag
                 continue
+            if is_sentinel(task):                         # coordinator says the run is over
+                self._log.info("worker.sentinel", handled=handled)
+                break
             self._handle(task)
             handled += 1
         self._log.info("worker.down", handled=handled)
@@ -299,10 +328,17 @@ class Coordinator:
         self._poll = poll_interval
         self._log = get_logger("fleet", run_id)
 
-    def run_fleet(self, tasks: list[dict]) -> FleetResult:
-        """Blind fan-out over the queue: enqueue every task, collect every outcome (a barrier)."""
+    def run_fleet(self, tasks: list[dict], *, drain_workers: int | None = None) -> FleetResult:
+        """Blind fan-out over the queue: enqueue every task, collect every outcome (a barrier).
+
+        `drain_workers=N` (the cloud path) enqueues N sentinels once every result is in, so the N
+        ephemeral worker pods drain and exit 0. Left None (the dev fleet / tests), nothing is drained
+        and long-lived workers keep polling.
+        """
         if not tasks:
             self._log.info("fleet.enqueue", tasks=0)
+            if drain_workers:
+                self.drain(drain_workers)                 # release idle workers even on an empty run
             return FleetResult(workers=[])
         prepared = [self._with_id(task, i) for i, task in enumerate(tasks)]
         for task in prepared:
@@ -314,10 +350,23 @@ class Coordinator:
         result = FleetResult(workers=workers)
         self._log.info("fleet.collect", done=len(result.done), failed=len(result.failed),
                        total=len(prepared))
+        if drain_workers:                                 # the run is over — shut the pods down
+            self.drain(drain_workers)
         return result
 
+    def drain(self, workers: int) -> None:
+        """Enqueue one sentinel per worker so each ephemeral pod pops one and exits 0 (cloud).
+
+        Called only once the run has *truly* finished (after the last generation, for `evolve`) —
+        never mid-run — because a worker that exits early between generations would be a correctness
+        bug. The coordinator is the only component that knows the run is over, so it owns this.
+        """
+        for _ in range(max(0, workers)):
+            self._q.push_task(sentinel_task())
+        self._log.info("fleet.drain", sentinels=max(0, workers))
+
     def evolve(self, base_task: dict, *, generations: int, population: int, keep: int,
-               candidate_task=None) -> EvolutionResult:
+               candidate_task=None, drain_workers: int | None = None) -> EvolutionResult:
         """Generational search over the queue, preserving the Ch 9 selection-inflation guard.
 
         Each generation enqueues `population` attempts at one goal, collects their scored outcomes,
@@ -326,6 +375,10 @@ class Coordinator:
         is **prompt-level** (the winner's seed note is appended to the goal by the candidate-task
         builder); tree-level reseed (gen+1 branches off the winner's branch) needs the winner's tree
         on a shared volume the next generation can clone — that's v2.
+
+        `drain_workers=N` shuts the N worker pods down **after the final generation only** — workers
+        must survive the empty-queue gaps *between* generations, which is exactly why a worker can't
+        decide on its own to exit on an empty queue.
         """
         builder = candidate_task or _default_candidate_task
         result = EvolutionResult()
@@ -361,6 +414,8 @@ class Coordinator:
         self._log.info("evolve.done", winner=winner.branch if winner else "-",
                        winnerScore=round(winner.score, 4) if winner else None,
                        inflationCaught=result.inflation_caught)
+        if drain_workers:                                 # all generations done — release the pods
+            self.drain(drain_workers)
         return result
 
     # -- internals ---------------------------------------------------------------------------
@@ -451,7 +506,10 @@ def _demo_src() -> Path:
 
 
 def _git(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess:
-    return subprocess.run(["git", *args], cwd=repo, check=check, capture_output=True, text=True)
+    # loopkit's own git runs with a scrubbed env + the git token re-injected (the agent's run_bash
+    # gets none); never the ambient env that would also carry the model key.
+    return subprocess.run(["git", *args], cwd=repo, env=remote.git_env(),
+                          check=check, capture_output=True, text=True)
 
 
 def _source_origin(src: str) -> str | None:
@@ -481,10 +539,16 @@ def _prepare_repo(src: str, scratch: Path, *, mode: str) -> Path:
         _git(repo, "add", "-A")
         _git(repo, "commit", "-qm", "seed")
     else:
-        _git(scratch, "clone", "--quiet", src, str(repo))
+        # Sanitize any `user:token@` userinfo from the clone source and origin so a token can never
+        # be persisted in `.git/config` (which the agent could `cat`). Auth flows via the env-fed
+        # credential helper instead, into loopkit's own git only (Phase 5a).
+        safe_src = remote.sanitize_git_url(src)
+        subprocess.run(["git", "-c", f"credential.helper={remote.CRED_HELPER}",
+                        "clone", "--quiet", safe_src, str(repo)],
+                       cwd=scratch, env=remote.git_env(), check=True, capture_output=True, text=True)
         origin = _source_origin(src)
         if origin:
-            _git(repo, "remote", "set-url", "origin", origin)
+            _git(repo, "remote", "set-url", "origin", remote.sanitize_git_url(origin))
         _git(repo, "config", "user.email", "loopkit@local")
         _git(repo, "config", "user.name", "loopkit")
     return repo

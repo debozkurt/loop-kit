@@ -43,9 +43,18 @@ rules:
   - apiGroups: [""]
     resources: ["pods/log"]
     verbs: ["get"]
-  # Per-run config + credentials, GC'd with the namespace.
+  # Per-run config + credentials, GC'd with the namespace. Phase 5a (least privilege on the one
+  # long-lived internet-facing identity — the webhook listener + CronJobs run as this SA):
+  #   * NO `update`/`patch` on secrets — a listener RCE must not be able to REWRITE a stored
+  #     per-submitter key to an attacker's. Registration (`cloud creds set/rm`) uses the human
+  #     kubeconfig, not this SA (a scoped self-service Role is the deferred per-engineer hardening).
+  #   * `get` (read a source key to project into a run) — NOT `list`: the resolver reads one Secret
+  #     by its computed name, so it never needs to enumerate every tenant's Secret.
   - apiGroups: [""]
-    resources: ["secrets", "configmaps", "serviceaccounts"]
+    resources: ["secrets"]
+    verbs: ["create", "get", "delete"]
+  - apiGroups: [""]
+    resources: ["configmaps", "serviceaccounts"]
     verbs: ["create", "get", "list", "delete"]
   # The tenancy + isolation primitives stamped into each run namespace.
   - apiGroups: [""]

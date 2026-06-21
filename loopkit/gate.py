@@ -9,11 +9,12 @@ Chapter 9).
 """
 from __future__ import annotations
 
-import os
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Protocol
+
+from . import secrets
 
 
 @dataclass
@@ -34,9 +35,10 @@ class ShellGate:
         self._tail = feedback_tail
 
     def check(self, workspace: Path) -> GateResult:
-        # Don't let a python gate litter __pycache__ into the tree (it can fall under a
-        # protected path and trip the safety guard); the run's verdict is unaffected.
-        env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
+        # The held-out gate runs the project's tests — including any conftest/test the AGENT wrote —
+        # so it must carry no credentials (the trust anchor was an exfil sink otherwise; Phase 5a).
+        # PYTHONDONTWRITEBYTECODE keeps a python gate from littering __pycache__ into a protected path.
+        env = {**secrets.current().child_env(), "PYTHONDONTWRITEBYTECODE": "1"}
         proc = subprocess.run(self.command, cwd=workspace, shell=True, env=env,
                               capture_output=True, text=True)
         if proc.returncode == 0:

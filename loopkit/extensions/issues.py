@@ -16,8 +16,9 @@ import json
 import subprocess
 from pathlib import Path
 
+from .. import secrets
 from ..log import get_logger
-from .remote import detect_provider
+from .remote import detect_provider, git_env
 
 _log = get_logger("issues")
 
@@ -90,12 +91,15 @@ def issues_to_tasks(issues: list[dict], *, base_branch: str = "loopkit") -> list
 def _run_json(repo: Path, cmd: list[str], *, cli: str) -> list[dict]:
     """Run a forge CLI expected to print a JSON array; return [] on any failure (logged)."""
     try:
-        proc = subprocess.run(cmd, cwd=repo, capture_output=True, text=True)
+        # gh/glab read GH_TOKEN/GITHUB_TOKEN from env — give them the scrubbed env with only the git
+        # token re-injected. Redact the error detail so a token can't leak into the log line.
+        proc = subprocess.run(cmd, cwd=repo, env=git_env(), capture_output=True, text=True)
     except FileNotFoundError:
         _log.error("cli.missing", cli=cli, hint=f"install {cli} and authenticate it")
         return []
     if proc.returncode != 0:
-        _log.error("cli.failed", cli=cli, detail=(proc.stderr or proc.stdout).strip()[-200:])
+        _log.error("cli.failed", cli=cli,
+                   detail=secrets.redact((proc.stderr or proc.stdout).strip()[-200:]))
         return []
     try:
         data = json.loads(proc.stdout or "[]")

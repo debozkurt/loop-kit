@@ -41,6 +41,14 @@ log = get_logger("cloud")
 # Fail-closed: with nothing here and no explicit --context, the guard refuses to mutate anything.
 ENV_CONTEXT = "LOOPKIT_CLOUD_CONTEXT"
 
+# The synthetic "context" name for the in-cluster control path (Phase-4 CronJob + webhook listener).
+# A pod has no kubeconfig context; instead it authenticates with its ServiceAccount via
+# `load_incluster_config()`, which only succeeds *inside* a real pod. So we treat that success as the
+# in-cluster identity and report this name as the current context — the guard is then unchanged: it
+# still refuses unless this name is explicitly pinned (manifests set `LOOPKIT_CLOUD_CONTEXT=in-cluster`).
+# This keeps the guard fail-closed and impossible to spoof from a laptop (where load_incluster fails).
+IN_CLUSTER_CONTEXT = "in-cluster"
+
 # Where the system manifests live (applied by `bootstrap`). Resolved relative to the repo root so it
 # works from a checkout; overridable by callers/tests.
 DEFAULT_MANIFEST_DIR = Path(__file__).resolve().parents[2] / "k8s" / "cloud"
@@ -105,15 +113,29 @@ def check_context(current: str | None, expected: str | Sequence[str] | None) -> 
 # --------------------------------------------------------------------------------------------
 # Cluster access — these defer-import the kubernetes client (the `[cloud]` extra).
 # --------------------------------------------------------------------------------------------
-def current_context(kubeconfig: str | os.PathLike[str] | None = None) -> str | None:
+def current_context(kubeconfig: str | os.PathLike[str] | None = None, *,
+                    in_cluster: bool = False) -> str | None:
     """The active context name from a kubeconfig file, or None if there is no active context.
 
     Deferred import: `kubernetes` is only needed here and in `api_client`/`bootstrap`, so importing
     this module stays dependency-free. We read the *named* contexts (never `load_incluster_config`)
     because the guard is about which laptop/CI kubeconfig context a human is pointed at.
+
+    `in_cluster=True` (the Phase-4 CronJob + webhook path) reports `IN_CLUSTER_CONTEXT` *after*
+    proving we really are in a pod — `load_incluster_config()` reads the mounted SA token and raises
+    off-cluster. So a laptop can never claim the in-cluster identity, and the guard still refuses
+    unless `in-cluster` is the pinned context.
     """
     from kubernetes import config  # deferred — only the cloud path needs the client
 
+    if in_cluster:
+        try:
+            config.load_incluster_config()           # proves we're in a pod (SA token present)
+        except config.config_exception.ConfigException as exc:
+            raise ContextError(
+                f"--in-cluster set but not running in a cluster (no ServiceAccount token): {exc}"
+            ) from exc
+        return IN_CLUSTER_CONTEXT
     try:
         _contexts, active = config.list_kube_config_contexts(
             config_file=str(kubeconfig) if kubeconfig else None
@@ -123,16 +145,20 @@ def current_context(kubeconfig: str | os.PathLike[str] | None = None) -> str | N
     return active.get("name") if active else None
 
 
-def api_client(kubeconfig: str | os.PathLike[str] | None = None):
-    """Build an `ApiClient` from a kubeconfig file (laptop/CI path).
+def api_client(kubeconfig: str | os.PathLike[str] | None = None, *, in_cluster: bool = False):
+    """Build an `ApiClient` for the cluster — kubeconfig (laptop/CI) or in-cluster SA (trigger pods).
 
     Cloud-agnostic by construction — the client speaks the k8s API, identical across DOKS/EKS/GKE/
-    kind. In-cluster triggers (the Phase-4 webhook listener, CronJobs) will instead use
-    `load_incluster_config()`; that path attaches in Phase 4, not here.
+    kind. `in_cluster=True` is the Phase-4 control path: the webhook listener + CronJob pods load
+    their ServiceAccount credentials with `load_incluster_config()` instead of a kubeconfig, so a
+    submission never depends on one engineer's machine.
     """
     from kubernetes import client, config  # deferred
 
-    config.load_kube_config(config_file=str(kubeconfig) if kubeconfig else None)
+    if in_cluster:
+        config.load_incluster_config()
+    else:
+        config.load_kube_config(config_file=str(kubeconfig) if kubeconfig else None)
     return client.ApiClient()
 
 

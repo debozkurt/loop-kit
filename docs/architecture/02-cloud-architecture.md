@@ -1,10 +1,20 @@
-# 02 — Cloud architecture, Part III (Designed 🟡 · foundation Built 🟢 Phase 2)
+# 02 — Cloud architecture, Part III (foundation + run mechanics + triggers + per-submitter creds Built 🟢 Phases 2–5a)
 
 > **Built 🟢 (Phase 2):** the control-plane *foundation* — the **context-safety guard** + `loopkit
 > cloud` sub-app ([`loopkit/extensions/cloud.py`](../../loopkit/extensions/cloud.py)) and the
 > **`ns/loopkit-system` manifests** ([`k8s/cloud/`](../../k8s/cloud/)): the **Redis StatefulSet (AOF
-> + PVC)**, `loopkit-control` RBAC, and default-deny NetworkPolicy. The run *mechanics* below
-> (coordinator/worker Jobs, per-run namespaces, `create_run()`) remain 🟡 until Phase 3.
+> + PVC)**, `loopkit-control` RBAC, and default-deny NetworkPolicy.
+> **Built 🟢 (Phase 3):** the **run mechanics** — **sentinel shutdown** (`fleet.py`) and the per-run
+> topology in [`loopkit/extensions/cloudrun.py`](../../loopkit/extensions/cloudrun.py): `create_run()`
+> builds `ns/run-<id>` + coordinator/worker Jobs (work-queue pattern), with
+> `run/ls/status/logs/kill` on the CLI.
+> **Built 🟢 (Phase 4):** the **triggers** — the **in-cluster auth path** (`cloud.api_client(in_cluster=True)`,
+> guard still pins a synthetic `in-cluster` context), the **CronJob** builder + `loopkit cloud
+> schedule/schedules/unschedule`, and the **webhook listener**
+> ([`loopkit/extensions/triggers.py`](../../loopkit/extensions/triggers.py): HMAC verify +
+> idempotency → `create_run`) with `loopkit cloud webhook` and the opt-in
+> [`k8s/cloud/webhook/`](../../k8s/cloud/webhook/) manifests. What remains 🟡 is **live execution on a
+> real DOKS cluster** (no cluster yet).
 
 The target system: loopkit **deployed to a managed cloud cluster (DigitalOcean DOKS), running many
 jobs in production** — concurrent, scheduled, and event-triggered — with the Ch 16 safety envelope
@@ -43,12 +53,12 @@ ns/loopkit-system   (long-lived, shared infra)
   ├─ StatefulSet redis-0 + PVC        queue + results, AOF-durable, per-run keyspaces
   ├─ Deployment webhook-listener      push/PR/issue → create_run()   (+ DO LoadBalancer)
   ├─ ServiceAccount loopkit-control   the only SA permitted to create run namespaces/Jobs/Secrets
-  └─ Secret sources (per env/adapter/engineer)   resolved + copied into each run ns
+  └─ Secret sources (per env/submitter)   resolved → adapter key projected into each run ns
 
 ns/run-<id>         (ephemeral, one per run, TTL-GC'd)
-  ├─ Job coordinator    enqueue → collect → select → sentinel → report → exit
+  ├─ Job coordinator    enqueue → collect → select → sentinel → report → exit  (git-only creds)
   ├─ Job worker         parallelism N; BRPOP → clone → run_loop → push → HSET; exit on sentinel
-  ├─ Secret loopkit-creds   git creds + the resolved agent key (mounted into pods only)
+  ├─ Secret loopkit-creds   adapter key + git, delivered via init→memory-tmpfs→SHRED (never envFrom)
   ├─ ResourceQuota + LimitRange   loose to start; tightenable later
   └─ emptyDir scratch (per worker pod)   clone target here; no PVC
 ```
@@ -67,7 +77,7 @@ sequenceDiagram
   participant R as Redis
   participant EXT as GitHub and LLM
   S->>CP: submit run
-  Note over CP: resolve (env,adapter,submitter) then create ns + Secret
+  Note over CP: resolve (env, submitter) + project adapter key, then create ns + Secret
   CP->>CO: create coordinator Job
   CP->>WK: create worker Job xN
   CO->>R: LPUSH tasks
@@ -83,18 +93,21 @@ sequenceDiagram
   Note over CP: Job TTL - GC ns/run-id
 ```
 
-Two mechanics are load-bearing:
+Two mechanics are load-bearing (**both Built 🟢 Phase 3**):
 
 - **The "fine-grained work-queue Job" pattern.** The worker Job sets `parallelism: N` with
   `completions` unset; pods drain the shared queue and exit `0`. This is the canonical Kubernetes
   pattern for queue-backed batch — throughput scales with `N`, `backoffLimit` retries a crashed pod,
-  and `ttlSecondsAfterFinished` cleans up. `Worker.run_forever` already has the `max_tasks` + `stop`
-  hooks; the only addition is a **drain-then-exit-on-sentinel** mode.
+  and `ttlSecondsAfterFinished` cleans up. Built in [`cloudrun.build_worker_job`](../../loopkit/extensions/cloudrun.py)
+  (`parallelism: N`, `completions` unset, `emptyDir` scratch); `Worker.run_forever` gained the
+  **exit-on-sentinel** path that ends the pod.
 - **Sentinel shutdown — the coordinator owns "the run is over."** Rather than guess from a
   momentarily-empty queue, the coordinator enqueues `N` poison-pill tasks when the run truly
   completes; each worker exits `0` on one. This is **required for `evolve`**: workers must survive the
-  gaps *between* generations, so "exit when the queue looks empty" would be a correctness bug. The
-  coordinator already drives the generational loop, so it is the right owner of run completion.
+  gaps *between* generations, so "exit when the queue looks empty" would be a correctness bug. Built
+  in `fleet.py` (`sentinel_task`/`is_sentinel`, `Coordinator.drain(N)`, `run_fleet/evolve(drain_workers=N)`
+  — evolve drains **only after the final generation**); the coordinator already drives the
+  generational loop, so it is the right owner of run completion.
 
 **Why a coordinator Job at all (vs. enqueue-at-submit):** fan-out alone could enqueue at submit time,
 but `evolve` needs a stateful driver across generations (collect → select with the held-out guard →
@@ -133,28 +146,35 @@ behavior identical no matter how a run starts.
 **`loopkit cloud` talks to the Kubernetes API via the official Python client** (behind a
 `loopkit[cloud]` extra). This is the *cloud-agnostic* choice: the client speaks the k8s API, which
 is identical across DOKS/EKS/GKE/kind — nothing DO-specific — and the *same* `create_run()` runs in
-three places with auth auto-detected: laptop/CI via kubeconfig (`load_kube_config`), and the
-webhook-listener + CronJob pods via in-cluster ServiceAccount (`load_incluster_config`). So
-submissions **never depend on one engineer's machine**: the in-cluster triggers stand alone, and the
-CLI is a convenience client usable anywhere.
+three places with auth selected by a flag: laptop/CI via kubeconfig (`load_kube_config`), and the
+webhook-listener + CronJob pods via in-cluster ServiceAccount (`load_incluster_config`, **Built 🟢
+Phase 4** — `--in-cluster` on `cloud run`). So submissions **never depend on one engineer's
+machine**: the in-cluster triggers stand alone, and the CLI is a convenience client usable anywhere.
+The guard is preserved on the in-cluster path: `load_incluster_config()` only succeeds inside a real
+pod, so it reports a synthetic `in-cluster` context that the trigger manifests must explicitly pin
+(`LOOPKIT_CLOUD_CONTEXT=in-cluster`) — fail-closed and un-spoofable from a laptop.
 
 The CLI surface (the "simple management system") — **Built 🟢 Phase 2:** `bootstrap` + the
-`context`/`doctor` status helpers; **🟡 Phase 3:** `run`/`ls`/`status`/`logs`/`kill`; **🟡 Phase
-4–5:** `register`/`schedule`/`creds`:
+`context`/`doctor` status helpers; **Built 🟢 Phase 3:** `run`/`ls`/`status`/`logs`/`kill`; **Built 🟢
+Phase 4:** `schedule`/`schedules`/`unschedule`/`webhook`; **Built 🟢 Phase 5a:** `creds set/ls/rm` +
+`--as`/`--allow-fleet-fallback` on run/schedule:
 
 ```bash
 loopkit cloud bootstrap                                 # one-time: ns/loopkit-system, Redis, RBAC, NetworkPolicy (guarded)
 loopkit cloud context                                   # show active context + whether the guard allows mutations (read-only)
-loopkit cloud doctor                                    # pre-flight: [cloud] extra, kubeconfig, context pinned + matching
-loopkit cloud register <repo> --env … --adapter …       # target ConfigMap: gates, budget, workers, key map
-loopkit cloud run --target <repo> [--goal G | --from-issues --label L] [--workers N] [--env prod|dev] [--adapter claude-code|claude-api|codex|openai-api]  # start a run (one of --goal | --from-issues)
+loopkit cloud doctor                                    # pre-flight: [cloud] extra, kubeconfig, context, + registered creds (fleet default present?)
+loopkit cloud creds set --as <eng> --adapter <a>        # register a per-engineer key — read from env, NEVER an argument (Phase 5a)
+loopkit cloud creds ls                                  # list registered submitters (key NAMES only, never values)
+loopkit cloud creds rm --as <eng>                       # delete a submitter's credential Secret (guarded)
+loopkit cloud run --target <repo> [--goal G | --from-issues --label L] [--as <eng>] [--allow-fleet-fallback] [--workers N] [--env prod|dev] [--adapter claude-api|openai-api|claude-code|codex] [--in-cluster]  # start a run
 loopkit cloud ls                                        # list runs across run-* namespaces: phase, done/total, cost
 loopkit cloud status <run>                              # one run, from Redis results + Job status
-loopkit cloud logs <run> [--worker N] [-f]              # tail (kubectl logs under the hood, filtered)
+loopkit cloud logs <run> [--role worker|coordinator] [--tail N]  # pod logs (kubectl logs under the hood, filtered)
 loopkit cloud kill <run>                                # delete the run's namespace + Jobs
-loopkit cloud schedule <repo> --cron "0 9 * * *" --from-issues  # create a CronJob
-loopkit cloud schedules | unschedule <name>             # list / remove schedules
-loopkit cloud creds set --as <eng> --adapter …          # register a per-engineer key (see 03)
+loopkit cloud schedule <name> --target <repo> --cron "0 9 * * *" --from-issues --image <img> [--as <eng>]  # create a CronJob (guarded)
+loopkit cloud schedules                                 # list CronJobs in loopkit-system (read-only)
+loopkit cloud unschedule <name>                         # remove a CronJob (guarded)
+loopkit cloud webhook --secret $SECRET --image <img> [--provider github|gitlab] [--as <eng>] [--label L]  # serve the in-cluster webhook listener
 ```
 
 **Non-negotiable — the context-safety guard. (Built 🟢 Phase 2 —
@@ -227,16 +247,31 @@ spec:
 
 ## Triggers (the Ch 12 "trigger" idea as infrastructure)
 
-All three reuse `create_run()`:
+**Built 🟢 (Phase 4).** All three reuse `create_run()`
+([`extensions/triggers.py`](../../loopkit/extensions/triggers.py)):
 
-- **CronJob** (`loopkit cloud schedule`): e.g. nightly `--from-issues` per repo. Each firing enqueues
-  a run.
-- **Webhook listener** (a Deployment behind a DO LoadBalancer): GitHub push/PR/issue → a run.
-  Requires **HMAC signature verification** (reject forged triggers) and **idempotency/dedupe** on the
-  delivery/issue id (re-delivery must not start two runs for one issue). Untrusted issue bodies are a
-  prompt-injection surface — see [`04-security.md`](04-security.md).
-- **Issue-sourced tasks**: `--from-issues` (`extensions/issues.py`) maps open issues to tasks; the
-  issue # rides through so the PR closes it.
+- **CronJob** (`loopkit cloud schedule`): e.g. nightly `--from-issues` per repo. The CronJob's
+  container *is* the worker image; each firing runs **`loopkit cloud run --in-cluster`** as the
+  `loopkit-control` SA — the same CLI path a human runs, on a timer. `build_cronjob` is a pure
+  builder (schedule, `concurrencyPolicy: Forbid` so a slow run isn't lapped, the in-cluster context
+  pin); `create_schedule`/`delete_schedule`/`list_schedules` run the guard first.
+- **Webhook listener** (a Deployment behind a DO LoadBalancer): a **GitHub *or* GitLab** issue event
+  → one run. The security-critical path is a pure, testable `WebhookApp.dispatch`: **authenticate**
+  (fail-closed) → **parse** → **dedupe** → `create_run`, with the two forge-specific bits behind a
+  small `WebhookProvider`. GitHub authenticates by **HMAC-SHA256 of the body** (`X-Hub-Signature-256`,
+  `hmac.compare_digest`); GitLab by a **static secret token** (`X-Gitlab-Token`) — both
+  constant-time, both 401 on mismatch/missing. **Idempotency** is keyed on the *issue identity*
+  (`repo#issue`, identical across forges) so a re-delivery (or a second matching event) maps to
+  **exactly one run**. The HTTP shell is stdlib `http.server` (no new dependency); dedupe is
+  in-memory for a single replica, Redis-backed (`SET … NX EX`) when scaled. One listener serves one
+  forge (`--provider github|gitlab`). Untrusted issue bodies are a prompt-injection surface — see
+  [`04-security.md`](04-security.md). The listener manifests live in
+  [`k8s/cloud/webhook/`](../../k8s/cloud/webhook/) and are **opt-in** (not in the bootstrap glob —
+  they provision a paid LoadBalancer).
+- **Issue-sourced tasks**: `--from-issues` (`extensions/issues.py`) maps open issues to tasks for
+  **both forges** (`gh` / `glab`, auto-detected from the remote, or forced with `--provider`); the
+  issue # rides through so the PR/MR closes it. The CronJob sweeps a backlog; the webhook fires on one
+  issue (its title+body becomes the goal, the issue # rides in the run's labels for traceability).
 
 ## What's deferred (⚪ Planned)
 
