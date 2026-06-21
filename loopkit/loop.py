@@ -61,7 +61,8 @@ def _finish(run_span, result: RunResult) -> RunResult:
 
 
 def run_loop(config, agent: Agent, *, iteration_gate: Gate | None = None,
-             acceptance_gate: Gate | None = None, review_hook: "ReviewHook | None" = None,
+             acceptance_gate: Gate | None = None, regression_gate: Gate | None = None,
+             review_hook: "ReviewHook | None" = None,
              skills: "SkillRegistry | None" = None, dry_run: bool = False,
              trace_metadata: dict | None = None,
              executor: "ToolExecutor | None" = None) -> RunResult:
@@ -83,6 +84,11 @@ def run_loop(config, agent: Agent, *, iteration_gate: Gate | None = None,
     iteration_gate = iteration_gate or ShellGate(config.gate.iteration, executor=executor)
     acceptance_gate = acceptance_gate or (
         ShellGate(config.gate.acceptance, executor=executor) if config.gate.acceptance else AlwaysPass()
+    )
+    # The second oracle (Ch 9, two-oracle): held-out PASS_TO_PASS. None / unconfigured ⇒ AlwaysPass,
+    # so DONE is certified by acceptance alone — exact prior behavior.
+    regression_gate = regression_gate or (
+        ShellGate(config.gate.regression, executor=executor) if config.gate.regression else AlwaysPass()
     )
     # Per-tick hard stops, in precedence order. The iteration cap is the loop's own bound.
     hard_stops = [BudgetCeiling(config.agent.max_cost_usd),
@@ -179,22 +185,37 @@ def run_loop(config, agent: Agent, *, iteration_gate: Gate | None = None,
                             acc_span.outputs(passed=acc.passed, feedback=acc.feedback or None)
                         tick.info("gate.acceptance", passed=acc.passed)
                         if acc.passed:
-                            tick.info("run.done", iterations=i, costUsd=round(cost, 4))
-                            done = RunResult(StopReason.DONE, i, cost)
-                            # Write edge of the flywheel (Ch 17): distil this success into a skill —
-                            # but only through the registry's gate, so a thin win can't mint a lesson.
-                            if skills is not None:
-                                minted = skills.write_back(done, repo, config.goal)
-                                tick.info("skill.write_back", minted=minted is not None,
-                                          name=minted.name if minted else "-")
-                            tick_span.outputs(result="done")
-                            return _finish(run_span, done)
-                        # Overfit: passed what it saw, failed what it didn't. Feed that back (Ch 9).
-                        overfit = True
-                        tick.warn("gate.overfit", detail="iteration_pass_acceptance_fail")
-                        feedback = ("The visible checks pass but the held-out acceptance checks "
-                                    "fail: you have fit the visible tests, not solved the goal. Make "
-                                    "the behaviour correct.\n" + secrets.redact(acc.feedback or ""))
+                            # Second oracle (Ch 9): the fix works AND previously-passing behavior is
+                            # preserved. AlwaysPass when no regression gate is configured (prior behavior).
+                            with trace.span("regression gate", run_type="tool",
+                                            inputs={"command": config.gate.regression}) as reg_span:
+                                reg = regression_gate.check(repo)
+                                reg_span.outputs(passed=reg.passed, feedback=reg.feedback or None)
+                            tick.info("gate.regression", passed=reg.passed)
+                            if reg.passed:
+                                tick.info("run.done", iterations=i, costUsd=round(cost, 4))
+                                done = RunResult(StopReason.DONE, i, cost)
+                                # Write edge of the flywheel (Ch 17): distil this success into a skill —
+                                # but only through the registry's gate, so a thin win can't mint a lesson.
+                                if skills is not None:
+                                    minted = skills.write_back(done, repo, config.goal)
+                                    tick.info("skill.write_back", minted=minted is not None,
+                                              name=minted.name if minted else "-")
+                                tick_span.outputs(result="done")
+                                return _finish(run_span, done)
+                            # Regression: the target is fixed but previously-passing behavior broke.
+                            tick.warn("gate.regression_failed", detail="acceptance_pass_regression_fail")
+                            feedback = ("The held-out acceptance check passes, but a regression check "
+                                        "shows your change broke previously-passing behavior. Fix the "
+                                        "goal WITHOUT regressing existing behavior.\n"
+                                        + secrets.redact(reg.feedback or ""))
+                        else:
+                            # Overfit: passed what it saw, failed what it didn't. Feed that back (Ch 9).
+                            overfit = True
+                            tick.warn("gate.overfit", detail="iteration_pass_acceptance_fail")
+                            feedback = ("The visible checks pass but the held-out acceptance checks "
+                                        "fail: you have fit the visible tests, not solved the goal. Make "
+                                        "the behaviour correct.\n" + secrets.redact(acc.feedback or ""))
                     else:
                         feedback = secrets.redact(gate.feedback)
 

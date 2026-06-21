@@ -23,6 +23,7 @@ from pathlib import Path
 
 from .. import secrets
 from ..config import Config, RemoteConfig
+from ..durability import HARDENED_GIT_FLAGS
 from ..log import get_logger
 
 _log = get_logger("remote")
@@ -47,14 +48,30 @@ def git_env() -> dict[str, str]:
     return secrets.current().child_env(add=secrets.GIT_ENV)
 
 
+def run_git(repo: Path, *args: str, authenticated: bool = False) -> subprocess.CompletedProcess:
+    """Run a git command in `repo` with loopkit's scrubbed, token-reinjected env (`git_env`).
+
+    `authenticated=True` configures the env-fed credential helper for a network op (clone/fetch/push),
+    so the token is read from the env at call time and never appears in argv (visible in `ps`) nor is
+    persisted in `.git/config`. The helper list is **reset first** (`credential.helper=` empty) so an
+    injected `.git/config` helper — which the untrusted executor could write into the shared workspace —
+    is dropped rather than also invoked (it would otherwise capture the token; Finding A). Every call
+    also carries `HARDENED_GIT_FLAGS` (no hooks, no fsmonitor), so a workspace-planted hook/config can't
+    make loopkit-core run attacker code. This is the single git-with-hygiene entrypoint the rest of the
+    package reuses — `_git`/`_git_auth` here, and the skills-repo transport (`extensions/skills.py`).
+    """
+    auth = ["-c", "credential.helper=", "-c", f"credential.helper={CRED_HELPER}"] if authenticated else []
+    return subprocess.run(["git", *HARDENED_GIT_FLAGS, *auth, *args], cwd=repo, env=git_env(),
+                          capture_output=True, text=True)
+
+
 def _git(repo: Path, *args: str) -> subprocess.CompletedProcess:
-    return subprocess.run(["git", *args], cwd=repo, env=git_env(), capture_output=True, text=True)
+    return run_git(repo, *args)
 
 
 def _git_auth(repo: Path, *args: str) -> subprocess.CompletedProcess:
     """git for an authenticated op (push), with the env-fed credential helper (no token in argv)."""
-    return subprocess.run(["git", "-c", f"credential.helper={CRED_HELPER}", *args],
-                          cwd=repo, env=git_env(), capture_output=True, text=True)
+    return run_git(repo, *args, authenticated=True)
 
 
 def _scan_push(repo: Path, branch: str, base: str) -> list[str]:

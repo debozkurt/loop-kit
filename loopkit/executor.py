@@ -44,6 +44,62 @@ log = get_logger("executor")
 # Cap tool output so one tick can't blow up the context (and the socket frame stays small).
 MAX_OUTPUT = 8000
 
+# Generic failure-signal markers for shaping a long gate log (test-runner-agnostic — pytest/unittest/
+# jest/compilers/make all emit these). Used to surface the failing lines a blind tail would drop.
+_FAILURE_MARKERS = ("error", "fail", "assert", "traceback", "exception", "panic", "not ok", "✗")
+
+
+def shape_failure_output(text: str, *, budget: int = 2000) -> str:
+    """Bound + shape a failing gate's output into high-signal feedback.
+
+    A gate's feedback is the agent's primary signal *and* it spends the budget stop, so a 10k-line
+    blind tail is both context-rot and money (Anthropic, *Writing tools for agents*; SWE-agent's ACI:
+    feed the agent the failing lines + a steer, not raw output). Short output passes through unchanged
+    (exact prior behavior). Long output keeps the **tail** — where test runners print their summary —
+    and **surfaces failure-marker lines** from the part the tail truncated, so a failure early in a
+    long log isn't lost behind teardown noise. Bounded to ~2×budget.
+    """
+    text = text or ""
+    if len(text) <= budget:
+        return text                                   # short: unchanged (preserves the prior contract)
+    tail = text[-budget:]
+    seen: set[str] = set()
+    signal: list[str] = []
+    for line in text[:-budget].splitlines():          # only the region the tail dropped
+        stripped = line.rstrip()
+        if stripped and stripped not in seen and any(m in line.lower() for m in _FAILURE_MARKERS):
+            seen.add(stripped)
+            signal.append(stripped)
+    if not signal:
+        return tail
+    digest = "\n".join(signal[-12:])[:budget]         # the dozen most-recent failure lines, bounded
+    return f"--- key failures (earlier in the log) ---\n{digest}\n--- output tail ---\n{tail}"
+
+
+def validate_syntax(path: str, content: str) -> str | None:
+    """Best-effort syntax check for languages we can parse cheaply (Python, JSON). Returns an error
+    string to surface, or None when the content is acceptable / the language is unguarded.
+
+    SWE-agent's most-cited ACI win: **reject a syntactically-broken edit at the tool boundary** so the
+    bad state never lands, instead of letting the agent write garbage and spend turns discovering and
+    unwinding it. We only guard what we can validate with the stdlib and no I/O; everything else writes
+    as before. Empty content is allowed (an empty `.py` module is valid; an empty file is a legitimate
+    intermediate).
+    """
+    suffix = Path(path).suffix.lower()
+    if not content.strip():
+        return None
+    try:
+        if suffix == ".py":
+            compile(content, path, "exec")
+        elif suffix == ".json":
+            json.loads(content)
+    except SyntaxError as exc:
+        return f"{suffix} syntax error at line {exc.lineno}: {exc.msg}"
+    except ValueError as exc:                          # json.JSONDecodeError is a ValueError
+        return f"{suffix} parse error: {exc}"
+    return None
+
 
 class _WorkspaceTools:
     """Executes the API adapter's tool calls against the run's workspace, sandboxed to its root.
@@ -85,6 +141,11 @@ class _WorkspaceTools:
 
     def _write(self, path: str, content: str) -> tuple[str, bool]:
         target = self._resolve(path)
+        # Edit-time guardrail (SWE-agent ACI): refuse a syntactically-broken edit before it lands.
+        problem = validate_syntax(path, content)
+        if problem is not None:
+            return (f"edit REJECTED — {path} was NOT written ({problem}). "
+                    f"Fix the syntax and write the complete, valid file.", True)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content)
         return f"wrote {path} ({len(content)} bytes)", False
@@ -131,7 +192,8 @@ class LocalToolExecutor:
                               capture_output=True, text=True)
         if proc.returncode == 0:
             return GateResult(True, None)
-        feedback = ((proc.stdout or "") + (proc.stderr or ""))[-tail:]
+        # Shape the failing output into high-signal, budget-bounded feedback (not a blind tail).
+        feedback = shape_failure_output((proc.stdout or "") + (proc.stderr or ""), budget=tail)
         return GateResult(False, feedback)
 
 

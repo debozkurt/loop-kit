@@ -138,6 +138,8 @@ class RunSpec:
     max_cost_usd: float = 5.0
     env_name: str = "prod"
     submitter: str = "fleet"                     # whose key this run spends (Phase 5a; a run label)
+    skills_repo: str | None = None               # loopkit-skills git repo: cross-run flywheel (Phase 5b)
+    skills_branch: str = "main"                  # branch of the skills repo to read/write
     redis_url: str = DEFAULT_REDIS_URL
     image_pull_secret: str | None = "ghcr-pull"  # None for a public GHCR package
     creds_secret: str = "loopkit-creds"          # worker Secret: adapter key + git creds
@@ -207,12 +209,17 @@ def worker_command(spec: RunSpec) -> list[str]:
 
     `--executor-socket` is the Phase-6 seam: loopkit-core dispatches the agent's tool calls + the
     held-out gate to the keyless executor sidecar over this socket, so the model's chosen commands
-    never run in the key-holding container.
+    never run in the key-holding container. `--skills-repo` (Phase 5b) wires the cross-run flywheel:
+    loopkit-core (which holds the git token) clones the shared skills repo per task and pushes a gated
+    write-back on DONE — only the worker, never the coordinator (which does no write-back).
     """
-    return ["fleet", "worker",
-            "--redis-url", spec.redis_url, "--redis-namespace", spec.redis_namespace,
-            "--adapter", spec.adapter, "--target", spec.target, "--max-iter", str(spec.max_iter),
-            "--executor-socket", EXECUTOR_SOCKET]
+    cmd = ["fleet", "worker",
+           "--redis-url", spec.redis_url, "--redis-namespace", spec.redis_namespace,
+           "--adapter", spec.adapter, "--target", spec.target, "--max-iter", str(spec.max_iter),
+           "--executor-socket", EXECUTOR_SOCKET]
+    if spec.skills_repo:
+        cmd += ["--skills-repo", spec.skills_repo, "--skills-branch", spec.skills_branch]
+    return cmd
 
 
 def executor_command() -> list[str]:

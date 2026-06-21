@@ -510,8 +510,10 @@ def _demo_src() -> Path:
 
 def _git(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess:
     # loopkit's own git runs with a scrubbed env + the git token re-injected (the agent's run_bash
-    # gets none); never the ambient env that would also carry the model key.
-    return subprocess.run(["git", *args], cwd=repo, env=remote.git_env(),
+    # gets none); never the ambient env that would also carry the model key. HARDENED_GIT_FLAGS keep a
+    # workspace-planted hook/config from executing as loopkit-core (Finding A) — the worktree is shared
+    # with the untrusted executor, so even the seed commit runs no model-controlled code.
+    return subprocess.run(["git", *remote.HARDENED_GIT_FLAGS, *args], cwd=repo, env=remote.git_env(),
                           check=check, capture_output=True, text=True)
 
 
@@ -544,11 +546,13 @@ def _prepare_repo(src: str, scratch: Path, *, mode: str) -> Path:
     else:
         # Sanitize any `user:token@` userinfo from the clone source and origin so a token can never
         # be persisted in `.git/config` (which the agent could `cat`). Auth flows via the env-fed
-        # credential helper instead, into loopkit's own git only (Phase 5a).
+        # credential helper instead, into loopkit's own git only (Phase 5a). `run_git(authenticated=…)`
+        # also resets any injected helper + disables hooks/fsmonitor (Finding A).
         safe_src = remote.sanitize_git_url(src)
-        subprocess.run(["git", "-c", f"credential.helper={remote.CRED_HELPER}",
-                        "clone", "--quiet", safe_src, str(repo)],
-                       cwd=scratch, env=remote.git_env(), check=True, capture_output=True, text=True)
+        clone = remote.run_git(scratch, "clone", "--quiet", safe_src, str(repo), authenticated=True)
+        if clone.returncode != 0:
+            raise RuntimeError(
+                f"git clone failed: {secrets.redact((clone.stderr or clone.stdout).strip()[-200:])}")
         origin = _source_origin(src)
         if origin:
             _git(repo, "remote", "set-url", "origin", remote.sanitize_git_url(origin))
@@ -576,6 +580,7 @@ def make_repo_runner(repo_source: str, *, gate_iteration: str, gate_acceptance: 
                      mode: str = "clone", agent_factory: "Callable[[dict], Agent] | None" = None,
                      remote: RemoteConfig | None = None,
                      executor: "ToolExecutor | None" = None,
+                     skills_repo: str | None = None, skills_branch: str = "main",
                      branch_prefix: str = "loopkit") -> TaskRunner:
     """A `TaskRunner` for an arbitrary repo: materialise it, run the loop on the task's branch,
     grade the terminal, and (if `remote.enabled`) push + open a PR.
@@ -590,6 +595,13 @@ def make_repo_runner(repo_source: str, *, gate_iteration: str, gate_acceptance: 
     namespace, no credential). None ⇒ in-process `LocalToolExecutor` — exact prior behavior. The
     clone, the protected-path guard, commit-every-tick, and the push all stay here in loopkit-core,
     which holds the credential; only the model-chosen commands + the gate command are dispatched.
+
+    `skills_repo` is the Phase-5b cross-run flywheel: a dedicated `loopkit-skills` git repo each task
+    clones at start (rendering every prior lesson into the prompt) and pushes a **gated** write-back to
+    on DONE. None ⇒ no skills (exact prior behavior). The write-back gate is the held-out acceptance
+    gate (gated, never ungated — Ch 17), carrying the same `executor`, so on the cloud it runs in the
+    keyless sidecar like every other agent-influenced command. The skills push reuses loopkit-core's
+    git token (no new secret) and is best-effort — it never fails a run that already reached DONE.
     """
     remote = remote or RemoteConfig()
 
@@ -608,12 +620,21 @@ def make_repo_runner(repo_source: str, *, gate_iteration: str, gate_acceptance: 
                                     allow_branches=[f"{branch_prefix}/*"]),
                 remote=remote)
             agent = agent_factory(task) if agent_factory else build_agent(cfg.agent, executor=executor)
+            # Cross-run flywheel (Phase 5b): clone the shared skills repo into this task's own scratch
+            # (kept out of the target clone so it can't land on the work branch). Gated by the held-out
+            # acceptance gate; None when no --skills-repo is configured (exact prior behavior).
+            skills = None
+            if skills_repo:
+                from .skills import GitSkillRegistry
+                skills = GitSkillRegistry(
+                    repo=skills_repo, local_dir=scratch / "skills-repo", branch=skills_branch,
+                    write_back_gate=ShellGate(gate_acceptance, executor=executor))
             # Tag the LangSmith trace with the task id so every run in a fleet is attributable. The
             # gates carry the same executor, so the held-out check runs in the keyless sidecar too.
             result = run_loop(cfg, agent,
                               iteration_gate=ShellGate(gate_iteration, executor=executor),
                               acceptance_gate=ShellGate(gate_acceptance, executor=executor),
-                              executor=executor,
+                              executor=executor, skills=skills,
                               trace_metadata={"task": task_id, "issue": task.get("issue")})
             score, revalidated = _grade(result)
             # Outward edge: a solved branch is pushed + (optionally) a PR opened, only when the

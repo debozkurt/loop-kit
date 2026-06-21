@@ -31,6 +31,12 @@ the two runnable labs (`loopkit demo 20` triggers, `demo 21` the CI tier) — se
 [`../part-iii-ecosystem.md`](../part-iii-ecosystem.md). This wiki describes how the system *is built*;
 that module teaches *how to use it on a real repo*.
 
+**Cross-cutting companion docs:** [`../part-iii-security-review.md`](../part-iii-security-review.md)
+(the adversarial full-flow review — the sidecar git-hook adjacency, flywheel poisoning, the non-dumpable
+key-holder, and the tracked follow-ups) and [`../part-iii-prior-art.md`](../part-iii-prior-art.md)
+(the canonical harnesses mapped to loopkit's design — what validates its bets, the ACI / two-oracle /
+`pass^k` lessons it adopted or should, and where the field is heading).
+
 ## Deployment tiers
 
 loopkit runs at three escalating tiers — pick the smallest that fits; each reuses the same single-loop

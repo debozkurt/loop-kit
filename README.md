@@ -181,7 +181,8 @@ max_cost_usd = 5.0               # budget ceiling — bites on real cost (see `l
 
 [gate]
 iteration  = "python -m pytest tests/seen -q"
-acceptance = "python -m pytest tests/holdout -q"   # held-out
+acceptance = "python -m pytest tests/holdout -q"       # held-out — the fix works
+# regression = "python -m pytest tests/regression -q"  # optional 2nd oracle — old behavior preserved
 
 [stops]
 max_iter = 20

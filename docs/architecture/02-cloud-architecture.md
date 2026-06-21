@@ -141,10 +141,16 @@ The cost-and-complexity win here is recognizing how little needs to survive a po
   pod restart doesn't drop the results hash mid-run and waste paid tokens. Each run uses a distinct **Redis keyspace** (`RedisQueue(namespace=
   run-<id>)` already keys `{ns}:tasks`/`{ns}:results`) so one shared Redis serves every run with no
   cross-talk; the coordinator deletes the keyspace (or sets a TTL) on finish.
-- **Skills flywheel = a dedicated `loopkit-skills` git repo.** The one piece of cross-run *learned*
-  state lives as `.md` files in its own GitHub repo: workers clone/pull it at start
-  (`FileSkillRegistry`) and push **gated** write-backs on `DONE`. Git-native, versioned, reviewable,
-  zero new infra, reuses the existing GitHub auth.
+- **Skills flywheel = a dedicated `loopkit-skills` git repo.** *(Built 🟢 Phase 5b —
+  [`part-iii-skills-repo.md`](../part-iii-skills-repo.md).)* The one piece of cross-run *learned* state
+  lives as `.md` files in its own GitHub repo: a `GitSkillRegistry` (composing `FileSkillRegistry`)
+  **clones it at start** (the read edge — every prior lesson rendered into the prompt) and pushes a
+  **gated** write-back **on `DONE`** (the write edge). Concurrent worker pods are safe — skills are one
+  file per name, so a non-fast-forward push is resolved by `fetch`+`rebase`+retry (file-disjoint). The
+  push runs in **loopkit-core** (which holds the git token, Phase 6) — never the agent's reach — over
+  the already-allowlisted github.com egress, so it adds **zero new infra and no new Secret**. Wired into
+  the worker with one flag: `fleet worker --skills-repo` (and `cloud run --skills-repo` → `RunSpec` →
+  `worker_command`; the coordinator does no write-back). Git-native, versioned, reviewable.
 
 ## Control plane — one path, three entry points
 

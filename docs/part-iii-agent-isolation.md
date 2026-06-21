@@ -84,6 +84,14 @@ cloud-only wiring choice, and nothing changes for the single-loop/dev path.
   close egress too, at the cost of cross-pod IPC — deferred.
 - **CLI adapters stay refused on triggers** — a vendor binary runs its loop internally, so its tool
   execution can't be relocated to a keyless executor. Unchanged.
+- **Adjacency closed (security review, Finding A).** The invariant is "untrusted code never runs as uid
+  1000 in loopkit-core's namespace." One path re-opened it: loopkit-core runs `git` in the **shared
+  workspace**, and the executor can write `.git/` there — a planted `.git/hooks/*` or injected
+  `.git/config` would have executed as the key-holder on the next commit/push. Closed by pinning
+  `core.hooksPath=/dev/null` + `core.fsmonitor=false` and resetting the credential-helper list on every
+  loopkit-core git call (`durability.HARDENED_GIT_FLAGS` / `remote.run_git`), plus marking loopkit-core
+  **non-dumpable** (`prctl(PR_SET_DUMPABLE,0)`) so even a same-uid neighbour can't read its heap/`environ`
+  regardless of node `ptrace_scope`. See [`part-iii-security-review.md`](part-iii-security-review.md).
 
 ## What it replaces (the simplification)
 

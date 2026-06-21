@@ -90,6 +90,16 @@ you contain what a hijacked agent can do.** For loopkit that means:
   sees the diff before it lands.
 - **The held-out gate resists output-gaming** — even a manipulated agent can't declare `DONE` without
   passing a gate it never saw ([`01`](01-system-today.md#the-held-out-acceptance-gate--the-anti-overfit-core-ch-9)).
+- **The skills flywheel is a *stored*-injection surface, contained** (Phase 5b; review Finding B). A skill
+  derives from the goal (an issue body on the trigger paths) and is rendered into **every future run's**
+  prompt, so a run reaching DONE could persist instructions into the shared flywheel. Content guards
+  (`extensions/skills._sanitize_skill`): **refuse** any skill carrying a credential-shaped value (no
+  laundering a leaked secret into the shared repo), **cap** length + strip control chars, the default
+  distiller **quotes a truncated goal as provenance** (not a raw imperative), and the rendered block is
+  framed **advisory, not authoritative**. The blast-radius control is **namespacing the skills home per
+  tenant** (a separate `--skills-repo`/`--skills-branch`), so a poisoned skill only re-enters its own runs —
+  recommended for multi-tenant ([`part-iii-skills-repo.md`](../part-iii-skills-repo.md),
+  [`part-iii-security-review.md`](../part-iii-security-review.md)).
 
 ## Credential handling along the injection flow (Built 🟢 Phase 5a)
 
@@ -145,6 +155,23 @@ the LLM call, git clone/commit/push) and **never executes a model-chosen command
 **local** runs. The sidecar is the cloud-worker kernel boundary; the shred is the everywhere-else
 mitigation, and is harmless/redundant inside the split. (The design doc's "delete the shred globally" was
 scoped to the cloud worker; deleting it would have regressed the CI tier — so we kept it.)
+
+**Adjacency hardening (security review, [`part-iii-security-review.md`](../part-iii-security-review.md) —
+Findings A + C, Built 🟢).** The sidecar invariant is "untrusted code never runs as uid 1000 in
+loopkit-core's namespace." An adversarial pass found one path that re-opened it: loopkit-core runs `git`
+(commit-every-tick, clone, push) **inside the shared workspace**, and the executor can write `.git/` in
+that group-writable emptyDir — so a planted `.git/hooks/pre-commit` (or an injected `.git/config`
+`core.fsmonitor`/`credential.helper`) would have executed **as loopkit-core, the key-holder**, on the
+next commit/push (and could tamper the PR *after* the gate passed). **Closed** by hardening every
+loopkit-core git call (`durability.HARDENED_GIT_FLAGS` + `remote.run_git`): `core.hooksPath=/dev/null` +
+`core.fsmonitor=false` pinned on the command line (highest precedence, so an injected `.git/config` is
+overridden → no hook runs), and the credential-helper list **reset** before loopkit's is set (an injected
+helper can't also capture the token). Applied on **all three tiers**. Independently, the key-holder is now
+marked **non-dumpable** (`prctl(PR_SET_DUMPABLE, 0)` in `secrets._harden`), so a same-uid neighbour can't
+read its heap or `/proc/<pid>/environ` — note `os.environ.pop` does **not** scrub the original block
+`/proc/<pid>/environ` exposes — **regardless of the node's `kernel.yama.ptrace_scope`**. This closes the
+same-uid key-read on the no-sidecar tiers (CI/local `run_bash` is a same-uid child) and is defense in
+depth for cloud loopkit-core.
 
 **Remaining residuals.** (1) The executor shares loopkit-core's **network namespace** (same pod), so it
 keeps the same 443 egress and could exfil *data it holds* (workspace/issue text) — **not the key** —

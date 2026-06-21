@@ -73,12 +73,23 @@ Two gates, deliberately asymmetric:
   tests). It tells the agent whether it's getting warmer.
 - The **held-out acceptance gate** is a check the agent **never sees and never runs** (the holdout
   tests). `DONE` requires it to pass.
+- An **optional held-out regression gate** (`gate.regression`, None-safe) is the *second oracle*
+  (SWE-bench's FAIL_TO_PASS + PASS_TO_PASS): acceptance proves the *target* works, regression proves
+  *previously-passing* behavior was preserved, so a fix that passes its target by breaking something
+  else fails. Unconfigured ⇒ acceptance alone certifies (exact prior behavior). See the field mapping
+  in [`../part-iii-prior-art.md`](../part-iii-prior-art.md).
 
 The principle is the generation–verification gap exploited in reverse: any signal an optimizer can
 observe, it can overfit to (reward-hacking, "memorizing the visible tests"). A gate kept *out* of
 the optimization loop is the only kind whose pass is evidence of real generalization. The bundled
 `examples/demo-repo` is a runnable proof: a bulk-discount boundary bug where the seen tests pass but
 the held-out tests catch the off-by-one — `demo 9` shows the loop being saved by the held-out gate.
+
+The **agent's tool surface is an ACI** (agent-computer interface), not a thin wrapper: `write_file`
+refuses a syntactically-broken `.py`/`.json` edit at the boundary (the bad state never lands), and a
+failing gate's output is **shaped** into the failing lines + the summary tail, budget-bounded, rather
+than a blind dump that burns the budget stop. These are SWE-agent / Anthropic ACI lessons — see
+[`../part-iii-prior-art.md`](../part-iii-prior-art.md).
 This same guard reappears at every layer above (evolutionary selection, the fleet) and must never be
 weakened into "just run more of the same judge."
 
@@ -153,7 +164,7 @@ extension attaches at a keyword-only, typing-only-imported, duck-called, `None`-
 |---|---|---|---|
 | **Orchestration** (Ch 10–12) | `orchestrate.py` | wraps `run_loop` as a worker body | `Supervisor` over git-worktree workers: blind **fan-out** + **evolutionary** select-and-reseed |
 | **Continuous review** (Ch 8) | `review.py` | `run_loop(review_hook=…)`, after a real commit | gates `DONE` on a clean diff; a failing review skips the gate block and feeds findings to the next tick |
-| **Skills flywheel** (Ch 17) | `skills.py` | `build_prompt(skills=…)` read edge + `run_loop` DONE write edge | render learned skills into the prompt; **gated** write-back on `DONE` so solved runs teach future ones |
+| **Skills flywheel** (Ch 17; git home Phase 5b) | `skills.py` | `build_prompt(skills=…)` read edge + `run_loop` DONE write edge | render learned skills into the prompt; **gated** write-back on `DONE` so solved runs teach future ones. Three storage tiers, one Protocol: `InMemory` → `File` (durable on one fs) → **`GitSkillRegistry`** (Part III: durable across machines via a `loopkit-skills` git repo — clone at start, gated push on `DONE`, rebase-retry for concurrent pods) |
 | **Remote sync** | `remote.py` | post-`DONE` in `run` + the worker runner | push branch (never force, refuses forbidden branches) + optional **draft** PR/MR via `gh`/`glab` |
 | **Issue tasks** | `issues.py` | `fleet run --from-issues` | `gh`/`glab issue list` → tasks (goal = title+body, branch `loopkit/issue-N`, issue # rides to the PR) |
 

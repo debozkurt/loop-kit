@@ -192,11 +192,13 @@ class CredentialStore:
         return store
 
     def _harden(self) -> None:
-        """Delete loaded vars from `os.environ`, register them for redaction, drop core dumps."""
+        """Delete loaded vars from `os.environ`, register them for redaction, drop core dumps, and
+        mark the process non-dumpable so the in-heap key can't be read by a same-uid neighbour."""
         for name, value in self._values.items():
             os.environ.pop(name, None)
             register_secret(value, label=name)
         _disable_core_dumps()
+        _set_non_dumpable()
 
     # ---- access -----------------------------------------------------------------------------
     def get(self, name: str) -> str | None:
@@ -271,3 +273,29 @@ def _disable_core_dumps() -> None:
         resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
     except Exception:                                           # noqa: BLE001 — non-POSIX / not permitted
         pass
+
+
+def _set_non_dumpable() -> bool:
+    """Mark this process **non-dumpable** (Linux `prctl(PR_SET_DUMPABLE, 0)`) so its `/proc/<pid>/mem`
+    and `/proc/<pid>/environ` become root-owned and a same-uid neighbour can't read them or `ptrace` it.
+
+    This is the structural close for the residual the env-shred can't cover: the real key lives in this
+    process's heap (the SDK client holds it), and `os.environ.pop` does **not** scrub the original block
+    that `/proc/<pid>/environ` still exposes. On the no-sidecar tiers (CI 5c / untrusted local) the
+    agent's `run_bash` is a same-uid child; in the cloud worker a git-hook planted in the shared
+    workspace would run as the same uid inside loopkit-core. Non-dumpable denies both the heap read and
+    the `/proc/environ` read **regardless of the node's `kernel.yama.ptrace_scope`** (Findings A + C).
+    Linux-only and best-effort: a no-op on macOS/dev (no `prctl`), never raises. Returns whether it set.
+    """
+    try:
+        import ctypes
+        import ctypes.util
+        libc = ctypes.CDLL(ctypes.util.find_library("c") or "libc.so.6", use_errno=True)
+        if not hasattr(libc, "prctl"):                         # macOS / non-Linux libc
+            return False
+        PR_SET_DUMPABLE = 4
+        ok = libc.prctl(PR_SET_DUMPABLE, 0, 0, 0, 0) == 0
+        log.info("creds.non_dumpable", set=ok)
+        return ok
+    except Exception:                                          # noqa: BLE001 — best-effort hardening
+        return False

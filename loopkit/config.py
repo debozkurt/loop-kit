@@ -31,10 +31,16 @@ class PromptConfig(BaseModel):
 
 
 class GateConfig(BaseModel):
-    """The two gates: the in-sample iteration gate and the held-out acceptance gate."""
+    """The gates: the in-sample iteration gate, the held-out acceptance gate, and an optional
+    held-out regression gate (the two-oracle pattern — see `acceptance`/`regression`)."""
 
     iteration: str                        # fast, in-sample — what the loop optimizes (Ch 6-7)
     acceptance: str | None = None         # held-out, run once before DONE (Ch 9)
+    # The second oracle (SWE-bench's FAIL_TO_PASS + PASS_TO_PASS): `acceptance` proves the *target*
+    # behavior now works; `regression` proves previously-passing behavior was *preserved*. A fix that
+    # passes its target by breaking something else must fail. Optional and None-safe — None means the
+    # acceptance gate alone certifies DONE (exact prior behavior).
+    regression: str | None = None
 
 
 class StopsConfig(BaseModel):

@@ -35,6 +35,7 @@ anchors = ["PROMPT.md", "CLAUDE.md"]   # the files reloaded into a fresh context
 [gate]
 iteration  = "pytest tests/seen -q"        # fast, in-sample — optimized every tick
 acceptance = "pytest tests/holdout -q"     # held-out — the honest "done" check (Ch 9)
+regression = "pytest tests/regression -q"  # optional second oracle — previously-passing stays green
 
 [stops]
 max_iter          = 20           # hard cap
@@ -114,10 +115,15 @@ prose, because the whole point is an *objective* check the agent can't argue wit
 - **`tests/seen/`** (the iteration gate) — fast, runs every tick, what the loop optimizes toward.
 - **`tests/holdout/`** (the acceptance gate) — the loop **never optimizes against these**; they run
   once, on a candidate that already passed `seen`, to confirm the green is real not overfit (Ch 9).
+- **`tests/regression/`** (the optional acceptance regression gate, `gate.regression`) — a *second
+  held-out oracle*: `acceptance` proves the target behavior now works; `regression` proves
+  previously-passing behavior was preserved. A fix that passes its target by breaking something else
+  fails. Leave it unset and the acceptance gate alone certifies (exact prior behavior).
 
 The split is the lesson demo-repo teaches: seen tests pass even with a boundary bug; only the
-held-out tests catch it. **Put your edge cases and boundary conditions in `holdout/`.** Keep both
-under `safety.protected_paths` so the loop can't make itself pass by editing the spec.
+held-out tests catch it. **Put your edge cases and boundary conditions in `holdout/`.** Keep all of
+them under `safety.protected_paths` so the loop can't make itself pass by editing the spec — this is
+also the tamper defense (the agent can't touch the verifier).
 
 You don't have to use pytest or this layout — the gates are just shell commands (`gate.iteration`,
 `gate.acceptance`). Any command that exits 0 on pass works: `npm test`, `go test ./...`, a linter, a

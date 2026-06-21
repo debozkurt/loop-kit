@@ -484,6 +484,12 @@ def fleet_worker(
             None, "--executor-socket", envvar="LOOPKIT_EXECUTOR_SOCKET",
             help="Dispatch the agent's tool calls + the held-out gate to a keyless executor sidecar "
                  "over this Unix socket (Phase 6). Unset = run them in-process (local/dev)."),
+        skills_repo: str | None = typer.Option(
+            None, "--skills-repo", envvar="LOOPKIT_SKILLS_REPO",
+            help="A dedicated loopkit-skills git repo: clone its lessons into each prompt and push a "
+                 "gated write-back on DONE (Phase 5b cross-run flywheel). Unset = no skills."),
+        skills_branch: str = typer.Option("main", "--skills-branch", envvar="LOOPKIT_SKILLS_BRANCH",
+                                          help="Branch of the skills repo to read/write (default: main)."),
         name: str = typer.Option("worker", "--name", envvar="WORKER_NAME",
                                  help="Worker name (rides logs as a tag; set from the pod name).")) -> None:
     """The executor: BRPOP a task, run the loop in an isolated clone of the target, HSET the result.
@@ -534,11 +540,13 @@ def fleet_worker(
             target, mode="clone", adapter=adapter, max_iter=max_iter,
             gate_iteration=iteration, gate_acceptance=acceptance,
             protected_paths=tuple(tcfg.safety.protected_paths) if tcfg else ("tests/",),
-            remote=tcfg.remote if tcfg else None, executor=tool_executor)
+            remote=tcfg.remote if tcfg else None, executor=tool_executor,
+            skills_repo=skills_repo, skills_branch=skills_branch)
         console.print(Panel.fit(
             f"worker [bold]{name}[/] · target {target} · adapter {adapter} · {redis_url}\n"
             f"gates: {iteration!r} / {acceptance!r} · remote {'on' if tcfg and tcfg.remote.enabled else 'off'}"
-            + (f" · executor {executor_socket}" if executor_socket else ""),
+            + (f" · executor {executor_socket}" if executor_socket else "")
+            + (f" · skills {skills_repo}" if skills_repo else ""),
             title="loopkit fleet worker"))
     else:
         runner = make_demo_runner(adapter=adapter, max_iter=max_iter)
@@ -845,6 +853,10 @@ def cloud_run(
         keep: int = typer.Option(2, "--keep", "-k"),
         image: str | None = typer.Option(None, "--image", envvar="LOOPKIT_WORKER_IMAGE",
                                          help="Worker image (ghcr.io/<owner>/loopkit-worker:<tag>)."),
+        skills_repo: str | None = typer.Option(None, "--skills-repo", envvar="LOOPKIT_SKILLS_REPO",
+                                               help="loopkit-skills git repo for the cross-run flywheel (Phase 5b)."),
+        skills_branch: str = typer.Option("main", "--skills-branch",
+                                          help="Branch of the skills repo to read/write."),
         env_name: str = typer.Option("prod", "--env", help="Logical env tag (selects per-submitter creds)."),
         as_submitter: str | None = typer.Option(None, "--as", help="Submitter whose registered key this run spends."),
         from_env: bool = typer.Option(False, "--from-env",
@@ -882,7 +894,7 @@ def cloud_run(
             goal=goal, from_issues=from_issues, label=label, provider=provider,
             mode="evolve" if evolve else "fanout",
             generations=generations, population=population, keep=keep, env_name=env_name,
-            submitter=submitter)
+            submitter=submitter, skills_repo=skills_repo, skills_branch=skills_branch)
     except ValueError as exc:
         err.print(f"[red]run[/] {escape(str(exc))}")
         raise typer.Exit(1)

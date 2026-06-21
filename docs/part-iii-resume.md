@@ -5,9 +5,28 @@ phase: state, locked decisions, the build sequence, sharp edges, and the next st
 system is built/designed*, read the architecture wiki: [`architecture/`](architecture/README.md).
 The auto-memory `project_loopkit` only points here.
 
-> **Current state (2026-06-21):** **Phases 0–6 built (Phase 6 = agent isolation, this session); the two
-> live steps (a GitHub remote, a real DOKS cluster) and Phase 5b (skills repo) are what's outstanding.**
-> **Phase 6 (this session) landed agent isolation — the keyless-executor sidecar split**, closing the one
+> **Current state (2026-06-21):** **All of Part III is now built (Phases 0–6, incl. Phase 5b this
+> session); the only outstanding work is the two live steps — a GitHub remote and a real DOKS cluster —
+> and the rest of Phase 6 (observability + the v2 layer).**
+> **Phase 5b (this session) landed the `loopkit-skills` git repo — the cross-run flywheel made durable
+> across machines.** Ch 17's `FileSkillRegistry` was durable across processes on one filesystem; the cloud
+> fleet's ephemeral pods share none, so the flywheel needed a network home. New **`GitSkillRegistry`**
+> (`extensions/skills.py`, composing `FileSkillRegistry`): **clone the skills repo at run start** (read
+> edge — every prior lesson rendered into the prompt), **gated commit + push on `DONE`** (write edge),
+> with a `fetch`+`rebase`+retry so concurrent worker pods don't lose a write (skills are one file per
+> name → file-disjoint). The transport (`_SubprocessGitTransport`, injectable) reuses a new public
+> **`remote.run_git`** for credential hygiene, never force-pushes, and is **best-effort** (a sync failure
+> WARNs, never fails the run that earned the skill). Wired into the worker with one flag —
+> **`fleet worker --skills-repo`** (`make_repo_runner(skills_repo=…)` builds a per-task `GitSkillRegistry`
+> gated by the held-out acceptance gate, executor-aware) — and the cloud path
+> **`cloud run --skills-repo`** → `RunSpec.skills_repo/skills_branch` → `worker_command` (worker only;
+> the coordinator does no write-back). **Reuses loopkit-core's git token (no new Secret) over the
+> already-allowlisted github.com egress — zero new infra.** **264 tests green** (was 252; +12 in
+> `tests/test_skills_repo.py`, all against a real local bare repo, no tokens/network) + the runnable
+> **`loopkit demo 23`** (two pods sharing only a git repo: A learns + pushes, B clones + solves tick 1).
+> Documented in [`part-iii-skills-repo.md`](part-iii-skills-repo.md). Live-pending: pointing it at a real
+> GitHub `loopkit-skills` repo (needs the remote + a cluster).
+> **Phase 6 (prior step this session) landed agent isolation — the keyless-executor sidecar split**, closing the one
 > residual Phase 5a could not close in a single container (a same-uid `ptrace`/heap read of the in-process
 > key) for the cloud worker, by construction. New core **`executor.py`**: a `ToolExecutor` seam
 > (`dispatch`/`run_gate`) with **`LocalToolExecutor`** (in-process default — exact prior behavior) and
@@ -103,7 +122,7 @@ Every load-bearing fork is decided. Detail + rationale live in the architecture 
 | **Adapters** | Full 2×2: `claude-code` / `claude-api` / `codex` / `openai-api` behind the `Agent` protocol | [`03`](architecture/03-adapters-and-auth.md#the-agent-protocol--the-22-adapter-matrix) |
 | **Agent auth** (Built 🟢 Phase 5a) | **Per-submitter** key resolved by `(env, submitter)`, adapter selects/projects the var; registered set = fail-closed allowlist; Vault = a later resolver swap | [`03`](architecture/03-adapters-and-auth.md#the-pluggable-credential-model) |
 | **Billing** | Dedicated **API key for prod** (subscription subsidy ended 2026-06-15); subscription token for dev | [`03`](architecture/03-adapters-and-auth.md#billing--cost-control) |
-| **Skills home** | Dedicated **`loopkit-skills` git repo** (cross-run learned state) | [`02`](architecture/02-cloud-architecture.md#storage-model--almost-nothing-is-persistent-by-design) |
+| **Skills home** (Built 🟢 Phase 5b) | Dedicated **`loopkit-skills` git repo** (cross-run learned state); `GitSkillRegistry` clones at start + gated push on `DONE`, rebase-retry for concurrent pods, loopkit-core's git token | [`02`](architecture/02-cloud-architecture.md#storage-model--almost-nothing-is-persistent-by-design) · [`5b`](part-iii-skills-repo.md) |
 | **Security** (Built 🟢 P2–P6) | Ch 16 envelope extended: default-deny + per-run **Cilium FQDN** egress, least-priv SAs (no write verbs on the listener SA), **credential withheld from the agent** (load-shred + scrub + redact + pre-push scan), branch-only/draft PRs, context guard, **+ P6 agent isolation: the untrusted tool surface runs in a keyless, different-uid/PID-ns executor sidecar (kernel boundary, closes the same-uid in-pod key-read residual)** | [`04`](architecture/04-security.md) |
 | **Observability** (Built 🟢) | Two layers: payload-free logs (`log.py`) **+** full-tree **LangSmith traces** (`trace.py`, optional `[trace]`, auto-on, `None`-safe); per-span cost via `pricing.py` | [`01`](architecture/01-system-today.md#observability--two-layers-logs--traces) |
 
@@ -204,8 +223,19 @@ proven before the trigger surface is built on top of it.
   and `loopkit demo 21` (the CI tier, `--live`-capable) — plus the
   [`part-iii-ecosystem.md`](part-iii-ecosystem.md) module, bring Part III to the Parts I–II
   scenario-per-concept standard.
-- **Phase 5b — Skills repo.** `loopkit-skills` repo wired into the worker (read at start + gated
-  write-back on `DONE`). *Acceptance:* a solved run writes a skill back that a later run reads.
+- **Phase 5b — Skills repo ✅ BUILT (live drop-in pending a remote + cluster).** The `loopkit-skills`
+  repo wired into the worker: a new **`GitSkillRegistry`** (composing `FileSkillRegistry`) clones it at
+  run start (read edge) and pushes a **gated** write-back on `DONE` (write edge), with `fetch`+`rebase`+
+  retry for concurrent pods (skills are one file per name → file-disjoint). Reuses a new public
+  `remote.run_git` for credential hygiene, never force-pushes, best-effort (never fails the run).
+  `fleet worker --skills-repo` (`make_repo_runner(skills_repo=…)`, gated by the held-out acceptance gate,
+  executor-aware) + `cloud run --skills-repo` → `RunSpec` → `worker_command` (worker only). No new Secret
+  (loopkit-core's git token), no new infra (github.com egress already allowlisted). Designed + built in
+  **[`part-iii-skills-repo.md`](part-iii-skills-repo.md)**. *Acceptance met:* a `run_loop` reaching DONE
+  pushes a skill to a local bare repo and a second `run_loop` with a fresh clone **renders it + solves on
+  tick 1** — the literal "a solved run writes a skill back that a later run reads," token-free
+  (`tests/test_skills_repo.py`, 252 → 264 green); gated/idempotent/bootstrap/concurrent-rebase asserted.
+  **Lab `loopkit demo 23`** (two pods sharing only a git repo).
 - **Phase 6 — Agent isolation (the residual-closer) ✅ BUILT (live ptrace-fails proof pending a DOKS
   cluster).** The **sidecar / keyless-executor split** that closes the same-uid in-pod memory-read
   residual 5a can't close in a single container — **built this session**, documented in
@@ -311,28 +341,108 @@ proven before the trigger surface is built on top of it.
    the next firing produces a run. The HMAC/idempotency/CronJob logic + the in-cluster guard are
    already proven locally; only the live firing needs the cluster.
 
-**Phases 5a (per-submitter creds), 5c (CI tier), and 6 (agent isolation) are built and tested.** The
-env-grab is replaced by the identity→Secret resolver, the key is withheld from the agent, the trigger
-paths bind the run to the issue author, the single loop runs forge-CI-natively with no cluster, and the
-cloud worker's untrusted tool surface now runs in a **keyless, isolated executor container** (a kernel
-boundary, not a timed shred). **The next build step is:**
+**Every coded phase of Part III is now built and tested (0–6, incl. 5b).** The env-grab is replaced by
+the identity→Secret resolver, the key is withheld from the agent, the trigger paths bind the run to the
+issue author, the single loop runs forge-CI-natively with no cluster, the cloud worker's untrusted tool
+surface runs in a **keyless, isolated executor container** (a kernel boundary, not a timed shred), and
+the cross-run flywheel has a **durable git-repo home** (`loopkit-skills`, clone-at-start + gated
+push-on-`DONE`). **The remaining build step is Phase 6 (rest); everything else is live-enablement:**
 
-1. **Phase 5b — the `loopkit-skills` cross-run flywheel (BUILD NEXT)** (`SkillRegistry` exists, needs a
-   durable git-repo home: read at run start + gated write-back on `DONE`). Independent of 6. *Acceptance:*
-   a solved run writes a skill back that a later run reads.
-2. **Phase 6 (rest) — observability + the v2 layer** (logs/metrics shipping, the read-only dashboard;
-   KEDA/ESO/Vault/GitHub App; a separate-pod executor split for same-pod 443-exfil of *content*).
+1. **Phase 6 (rest) — observability + the v2 layer (BUILD NEXT)** (logs/metrics shipping, the read-only
+   dashboard; KEDA/ESO/Vault/GitHub App; a separate-pod executor split for same-pod 443-exfil of
+   *content*).
 
-**Still queued:** Phase 5b (the `loopkit-skills` cross-run flywheel — `SkillRegistry` exists, needs a
-durable git-repo home), the two live steps (a GitHub remote → GHCR + the optional CI drop-in; a DOKS
-cluster → live-apply 2–6, including the Phase-6 ptrace-fails proof), and the rest of Phase 6
-(observability, KEDA/ESO/Vault/GitHub App). Carry the invariants in
+**Still queued:** the two live steps (a GitHub remote → GHCR + the optional CI drop-in + the real
+`loopkit-skills` repo for the 5b flywheel; a DOKS cluster → live-apply 2–6, including the Phase-6
+ptrace-fails proof), and the rest of Phase 6 (observability, KEDA/ESO/Vault/GitHub App). Carry the
+invariants in
 [`../CLAUDE.md`](../CLAUDE.md): extend at the seams, `None`-safe, thin stack, test-as-you-go,
 log-as-you-go, **trace-as-you-go**, **credentials never reach the agent's reach**, and **every mutating
 cloud command goes through the context guard**. **Update this doc and the architecture wiki as each
 phase lands** (the documentation contract).
 
 ## Changelog
+
+- **2026-06-21 — Prior-art pass: ACI + two-oracle-gate lessons adopted; lessons doc in both repos.**
+  A grounded survey of the canonical harnesses (Anthropic's own, SWE-agent/OpenHands/Aider/mini-swe,
+  the framework runtimes, the eval harnesses) → **[`part-iii-prior-art.md`](part-iii-prior-art.md)**
+  (source-by-source mapping: what validates loopkit's bets, what it under-weighted, the ranked
+  follow-ups). Verdict: loopkit is unusually well-aligned; the gaps cluster in ACI ergonomics, the
+  measurement layer, and intra-run context. **Three cheap, field-validated wins implemented:**
+  (1) **edit-time validation** — `executor.validate_syntax` + `_WorkspaceTools._write` refuse a
+  broken `.py`/`.json` edit at the tool boundary (SWE-agent's ACI guardrail; the bad state never
+  lands); (2) **shaped gate feedback** — `executor.shape_failure_output` (used by `run_gate`) surfaces
+  the failing lines + the summary tail, budget-bounded, instead of a blind tail (Anthropic, *Writing
+  tools for agents*; short output unchanged); (3) **the two-oracle gate** — optional `gate.regression`
+  (held-out PASS_TO_PASS) + `run_loop(regression_gate=…)`, **None-safe** (unconfigured ⇒ acceptance
+  alone certifies — exact prior behavior); DONE now requires acceptance AND regression, SWE-bench's
+  FAIL_TO_PASS + PASS_TO_PASS. **275 → 287 tests** (+12 `tests/test_aci_gates.py`). Tamper defense
+  ("the diff mustn't touch the verifier") was already enforced by the protected-path guard — documented,
+  not re-built. **Ported to the course (the loops manual):** new **`loops/prior-art.md`** "Prior Art &
+  Lessons from the Field" (the manual's patterns mapped to the canonical sources + the sharper lessons),
+  cross-linked from the README index and Ch 19. **Tracked next (not built):** `pass^k` reliability
+  metric (the measurement-layer roadmap), a persistent agent scratchpad, a `PreToolUse` hook seam, a
+  ranked repo-map, an offline-re-gradeable trajectory log. Docs sweep: updated
+  [`01`](architecture/01-system-today.md) (two-oracle + ACI), [`CONTROL-FILES.md`](CONTROL-FILES.md) +
+  the root README (`gate.regression`), and the architecture [`README`](architecture/README.md)
+  page-map (linked prior-art + security-review).
+
+- **2026-06-21 — Security hardening (full-flow review; Findings A–C fixed).** An adversarial end-to-end
+  pass over the cloud flow (focused on the Phase-6 sidecar + the Phase-5b flywheel) surfaced and closed
+  three issues — documented in **[`part-iii-security-review.md`](part-iii-security-review.md)** (A–G; A–C
+  fixed, D–G tracked). **A (sidecar bypass via git hooks):** loopkit-core runs `git` in the workspace the
+  untrusted executor can write, so a planted `.git/hooks/*` or injected `.git/config` would have executed
+  **as the key-holder** (and could tamper the PR after the gate). Closed by hardening every loopkit-core
+  git call — `durability.HARDENED_GIT_FLAGS` (`core.hooksPath=/dev/null` + `core.fsmonitor=false`, pinned
+  on the command line so an injected `.git/config` is overridden) threaded through `durability._git` /
+  `remote.run_git` / `fleet._git` / the `_prepare_repo` clone, plus a **credential-helper reset** on
+  authenticated ops so an injected helper can't capture the token. **C (CI/local key read):** the
+  in-process key was protected only by the node's `kernel.yama.ptrace_scope`; now the key-holder is marked
+  **non-dumpable** (`prctl(PR_SET_DUMPABLE,0)` in `secrets._harden`), so a same-uid child/sibling can't
+  read its heap or `/proc/<pid>/environ` regardless of `ptrace_scope` (closes the CI/local same-uid read
+  and backstops A's key-disclosure sub-case). **B (flywheel poisoning):** skill content derives from the
+  goal (attacker-controlled) and reaches every future prompt — `skills._sanitize_skill` (in `_vet`, all
+  tiers) refuses credential-shaped content, caps length, strips control chars; the default distiller
+  quotes a truncated goal as provenance; the render header is reframed advisory; **per-tenant namespacing**
+  documented as the multi-tenant blast-radius control. **252 → 275 tests** (+11
+  `tests/test_security_hardening.py`, incl. a behavioral hook-bypass proof). Updated
+  [`04-security.md`](architecture/04-security.md) (adjacency hardening + flywheel containment),
+  [`part-iii-agent-isolation.md`](part-iii-agent-isolation.md) (the closed adjacency), and
+  [`part-iii-skills-repo.md`](part-iii-skills-repo.md) (content guards). **Tracked follow-ups (D–G):**
+  Job/tool timeouts (`activeDeadlineSeconds` + subprocess timeouts), Redis AUTH, separate-pod netns for
+  content-exfil, shallow-clone + render-cap for the skills repo.
+
+- **2026-06-21 — Phase 5b built (the `loopkit-skills` git repo: the cross-run flywheel, durable across
+  machines).** Gave Ch 17's write-back flywheel a network home for the cloud fleet, whose ephemeral pods
+  share no filesystem. New **`GitSkillRegistry`** (`extensions/skills.py`) — **composition, not a fork**:
+  it wraps a `FileSkillRegistry` over a cloned working tree, so the loop's read/write edges
+  (`build_prompt` render / `run_loop` DONE write-back) are untouched. On construction it **clones/pulls**
+  the repo (read edge — `render()` reads the local clone every tick, no per-tick network); `write_back`
+  delegates to the file registry (gate→distil→dedupe→store) and, only on a mint, **commits + pushes** the
+  new `.md`. New **`GitTransport`** seam + default **`_SubprocessGitTransport`**: clone-or-pull (tolerates
+  a brand-new empty remote → bootstrap), gated commit + push with a `fetch`+`rebase origin/<branch>`+retry
+  (concurrent pods land file-disjoint skills, so the rebase doesn't conflict), **never force-pushes**, and
+  is **best-effort** (any failure WARNs + returns False — a skill that can't sync must never fail the run
+  that earned it). Promoted a public **`remote.run_git(repo, *args, authenticated=…)`** (the single
+  git-with-hygiene entrypoint; `_git`/`_git_auth` refactored onto it) so the transport reuses the scrubbed
+  env + env-fed credential helper with no duplication. Wiring: **`make_repo_runner(skills_repo=…,
+  skills_branch=…)`** builds a per-task `GitSkillRegistry` cloned into the task's own scratch
+  (`scratch/skills-repo`, kept out of the target clone), gated by the held-out **acceptance gate**
+  (gated-never-ungated; executor-aware so it runs in the Phase-6 sidecar) → `run_loop(skills=…)`;
+  **`fleet worker --skills-repo/--skills-branch`** (+ envvars) and **`cloud run --skills-repo`** →
+  `RunSpec.skills_repo/skills_branch` → `worker_command` (worker only — the coordinator does no
+  write-back). **No new Secret** (loopkit-core's git token, Phase 6) and **no new infra** (github.com
+  egress already allowlisted). **Decision: direct push to the skills repo's `main`** (it's loopkit's own
+  state store, distinct from a target repo whose `main` the Ch 16 envelope protects; a PR-per-skill would
+  block the flywheel's compounding) — the gate + git history are the guard. **252 → 264 tests**
+  (`tests/test_skills_repo.py` ×12, all against a **real local bare repo** — the full flywheel through
+  `run_loop` [A pushes → B clones + solves tick 1], gated/idempotent/bootstrap/concurrent-rebase, the
+  injectable-transport units, and `worker_command`/`coordinator_command` wiring). New **`loopkit demo 23`**
+  (two pods sharing only a git repo). Deferred-import invariant held (core+skills+fleet pull no
+  kubernetes/redis/langsmith). Documented in [`part-iii-skills-repo.md`](part-iii-skills-repo.md);
+  updated [`01`](architecture/01-system-today.md) (skills row → three storage tiers) and
+  [`02`](architecture/02-cloud-architecture.md) (skills flywheel → Built 🟢). **Live drop-in** (a real
+  `loopkit-skills` GitHub repo, second run reads the first's skill) awaits the remote + a cluster.
 
 - **2026-06-21 — Phase 6 built (agent isolation: the keyless-executor sidecar split).** Closed 5a's one
   residual — a same-uid in-pod `ptrace`/heap read of the in-process key — for the cloud worker, by

@@ -11,9 +11,22 @@ import hashlib
 import subprocess
 from pathlib import Path
 
+# Loopkit-core runs git inside a workspace the (untrusted) executor can also write to — the shared
+# emptyDir in the Phase-6 split, and (on the no-sidecar CI/local tiers) a tree a same-uid `run_bash`
+# can edit. Left alone, git would execute workspace-controlled hooks (`.git/hooks/*`) and honor a
+# workspace-written `.git/config` (`core.fsmonitor` runs a command) — i.e. run attacker-chosen code AS
+# loopkit-core, the credential holder, defeating the agent-isolation boundary (Finding A,
+# docs/part-iii-security-review.md). Pinning these on the command line is highest-precedence, so it
+# overrides anything an injected `.git/config` sets: hooks are looked up under `/dev/null` (none exist)
+# and fsmonitor is forced off. Applied to EVERY loopkit-core git call (here + `remote.run_git`), so the
+# vector is closed on all three tiers. `credential.helper` is additionally reset on authenticated ops
+# (see `remote.run_git`) so an injected helper can't capture the token.
+HARDENED_GIT_FLAGS: tuple[str, ...] = ("-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false")
+
 
 def _git(repo: Path, *args: str, check: bool = False) -> subprocess.CompletedProcess:
-    return subprocess.run(["git", *args], cwd=repo, capture_output=True, text=True, check=check)
+    return subprocess.run(["git", *HARDENED_GIT_FLAGS, *args], cwd=repo,
+                          capture_output=True, text=True, check=check)
 
 
 def is_git_repo(repo: Path) -> bool:
