@@ -126,6 +126,13 @@ def test_coordinator_job_has_no_parallelism_and_no_scratch():
     assert not any(v["name"] == "scratch" for v in pod["volumes"])   # no clone scratch (talks to Redis/gh)
 
 
+def test_both_jobs_have_an_active_deadline_wall():
+    # Finding D: a Job-wide hard wall so a wedged run can't burn a node until it's reaped.
+    spec = cloudrun.RunSpec(run_id="a", image="i", target="t", goal="g", active_deadline_seconds=7200)
+    assert cloudrun.build_worker_job(spec)["spec"]["activeDeadlineSeconds"] == 7200
+    assert cloudrun.build_coordinator_job(spec)["spec"]["activeDeadlineSeconds"] == 7200
+
+
 # --------------------------------------------------------------------------------------------
 # Phase 6 — the worker is a two-container split: loopkit-core holds the key (envFrom), the agent's
 # untrusted surface runs in a keyless, different-uid executor sidecar with no credential anywhere.

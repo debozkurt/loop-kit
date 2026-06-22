@@ -137,3 +137,27 @@ def test_local_and_remote_executors_satisfy_the_protocol():
     # Both are ToolExecutors (duck-typed) — the seam the adapter/gate/run_loop accept.
     for ex in (LocalToolExecutor(), RemoteToolExecutor("/tmp/x.sock")):
         assert hasattr(ex, "dispatch") and hasattr(ex, "run_gate")
+
+
+# --------------------------------------------------------------------------------------------
+# Liveness bounds (Finding D) — a hung tool/gate fails the call instead of wedging the tick.
+# --------------------------------------------------------------------------------------------
+def test_run_bash_times_out_instead_of_wedging(tmp_path, monkeypatch):
+    import loopkit.executor as ex
+    monkeypatch.setattr(ex, "TOOL_TIMEOUT", 1)               # 1s deadline vs a 30s sleep
+    out, is_error = LocalToolExecutor().dispatch("run_bash", {"command": "sleep 30"}, tmp_path)
+    assert is_error and "timed out after 1s" in out          # killed, surfaced as a tool error
+
+
+def test_gate_times_out_and_fails_closed(tmp_path, monkeypatch):
+    import loopkit.executor as ex
+    monkeypatch.setattr(ex, "GATE_TIMEOUT", 1)               # 1s deadline vs a 30s sleep
+    result = LocalToolExecutor().run_gate("sleep 30", tmp_path)
+    assert result.passed is False and "timed out after 1s" in (result.feedback or "")
+
+
+def test_remote_socket_timeout_sits_above_the_gate_deadline():
+    # Nested deadlines: the socket client must outlast the gate's own subprocess deadline so the
+    # executor returns a clean failed-gate result rather than the client severing the connection.
+    import loopkit.executor as ex
+    assert RemoteToolExecutor("/tmp/x.sock")._timeout > ex.GATE_TIMEOUT

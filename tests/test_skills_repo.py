@@ -144,6 +144,34 @@ def test_concurrent_push_rebases_and_keeps_both(tmp_path: Path):
     assert {"alpha", "beta"} <= remote_skill_names(tmp_path, bare)
 
 
+# --- bounded growth (Finding G): shallow clone + a render budget -----------------------------
+def test_clone_is_shallow_but_renders_the_whole_tip(tmp_path: Path):
+    # The remote accumulates history (seed + two skills = 3 commits); a per-task clone only ever needs
+    # the current tip, so it is `--depth 1` (one local commit) yet renders every skill at that tip.
+    bare = make_bare(tmp_path)
+    push_skill_directly(tmp_path, bare, name="one", guidance="lesson one", clone_name="c1")
+    push_skill_directly(tmp_path, bare, name="two", guidance="lesson two", clone_name="c2")
+    assert _git(bare, "rev-list", "--count", "main").stdout.strip() == "3"   # full history on the remote
+    reg = GitSkillRegistry(repo=str(bare), local_dir=tmp_path / "clone", branch="main")
+    assert _git(reg.local_dir, "rev-list", "--count", "HEAD").stdout.strip() == "1"   # shallow clone
+    rendered = reg.render()
+    assert "one" in rendered and "two" in rendered          # the tip's full tree is present
+
+
+def test_render_is_budget_bounded_and_honest(tmp_path: Path):
+    # `render()` injects skills into every prompt, so an ever-growing repo must not grow the prompt
+    # without limit: skills past the budget are dropped, but with a visible note (not silently).
+    from loopkit.extensions.skills import FileSkillRegistry, _MAX_RENDER
+    reg = FileSkillRegistry(tmp_path / "skills")
+    for i in range(20):                                      # ~30k of content vs a 12k budget
+        (reg.directory / f"skill-{i:02d}.md").write_text(f"## skill-{i:02d}\n" + ("x" * 1500) + "\n")
+    rendered = reg.render()
+    assert len(rendered) <= _MAX_RENDER + 500               # bounded — not the full ~30k
+    assert "omitted to bound prompt size" in rendered       # the omission is honest, not silent
+    assert "skill-00" in rendered                           # at least the first name-sorted skill kept
+    assert "skill-19" not in rendered                       # the tail past the budget is dropped
+
+
 # --- the full flywheel through run_loop (the acceptance) -----------------------------------
 class AlwaysSolve:
     """Writes the solution every tick — a run that reaches DONE with no help (mints the lesson)."""

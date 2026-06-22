@@ -44,6 +44,15 @@ log = get_logger("executor")
 # Cap tool output so one tick can't blow up the context (and the socket frame stays small).
 MAX_OUTPUT = 8000
 
+# Liveness bounds (Finding D) — a single tool/gate subprocess can't wedge a tick forever. A
+# prompt-injected `run_bash "sleep infinity"` or a hung gate now fails the *call* after its deadline
+# (the model sees the timeout and adapts) instead of blocking until the socket client gives up and a
+# wedged pod runs until the node reaps it. The deadlines nest: the tool/gate subprocess deadline <
+# the RemoteToolExecutor socket-client deadline (so the server returns a clean error first) < the
+# Job `activeDeadlineSeconds` (cloudrun) that caps the whole run.
+TOOL_TIMEOUT = 120                                   # seconds — one agent shell command
+GATE_TIMEOUT = 600                                   # seconds — the held-out gate (a real suite is slow)
+
 # Generic failure-signal markers for shaping a long gate log (test-runner-agnostic — pytest/unittest/
 # jest/compilers/make all emit these). Used to surface the failing lines a blind tail would drop.
 _FAILURE_MARKERS = ("error", "fail", "assert", "traceback", "exception", "panic", "not ok", "✗")
@@ -155,8 +164,14 @@ class _WorkspaceTools:
         # cloud split this process (the executor sidecar) holds no key at all; on the local/CI path the
         # key lives only in loopkit's heap and `child_env()` scrubs it from the child — either way the
         # subprocess sees nothing. loopkit's own git calls (in loopkit-core) re-inject the git token.
-        proc = subprocess.run(command, shell=True, cwd=self.root,
-                              env=secrets.current().child_env(), capture_output=True, text=True)
+        try:
+            proc = subprocess.run(command, shell=True, cwd=self.root,
+                                  env=secrets.current().child_env(), capture_output=True,
+                                  text=True, timeout=TOOL_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            # Liveness bound (Finding D): a hung/instructed-to-hang command fails the tool call rather
+            # than wedging the tick. is_error=True so the model reads it and adapts on the next turn.
+            return f"command timed out after {TOOL_TIMEOUT}s and was killed", True
         out = ((proc.stdout or "") + (proc.stderr or ""))[: MAX_OUTPUT]
         return f"exit={proc.returncode}\n{out}", False
 
@@ -188,8 +203,13 @@ class LocalToolExecutor:
         # path `child_env()` scrubs the key; in the cloud split this runs in the keyless executor.
         # PYTHONDONTWRITEBYTECODE keeps a python gate from littering __pycache__ into a protected path.
         env = {**secrets.current().child_env(), "PYTHONDONTWRITEBYTECODE": "1"}
-        proc = subprocess.run(command, cwd=workspace, shell=True, env=env,
-                              capture_output=True, text=True)
+        try:
+            proc = subprocess.run(command, cwd=workspace, shell=True, env=env,
+                                  capture_output=True, text=True, timeout=GATE_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            # Liveness bound (Finding D): a hung gate is a failed gate, not a wedged run. Fail-closed —
+            # a DONE certification can never come from a gate that didn't actually finish passing.
+            return GateResult(False, f"gate timed out after {GATE_TIMEOUT}s (treated as failed)")
         if proc.returncode == 0:
             return GateResult(True, None)
         # Shape the failing output into high-signal, budget-bounded feedback (not a blind tail).
@@ -237,7 +257,11 @@ class RemoteToolExecutor:
     a clear failure and the loop's stops handle it, rather than the run dying on a transport hiccup.
     """
 
-    def __init__(self, socket_path: str | os.PathLike[str], *, timeout: float = 600.0) -> None:
+    def __init__(self, socket_path: str | os.PathLike[str],
+                 *, timeout: float = GATE_TIMEOUT + 60.0) -> None:
+        # The socket deadline sits *above* the gate's own subprocess deadline (GATE_TIMEOUT) so the
+        # executor returns a clean failed-gate result first, rather than the client severing the
+        # connection mid-gate and surfacing a transport error (Finding D — nested deadlines).
         self._path = str(socket_path)
         self._timeout = timeout
 

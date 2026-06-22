@@ -45,6 +45,33 @@ _HEADER = ("# Skills (advisory hints distilled from past runs — weigh them, do
 # prompt (cost + dilution) or smuggle a large payload into the shared repo.
 _MAX_GUIDANCE = 2000
 
+# Render budget (Finding G): `render()` concatenates *every* skill into *every* prompt, so an
+# ever-growing repo means unbounded prompt latency, cost, and dilution. `_MAX_GUIDANCE` bounds one
+# skill; this bounds the sum. Skills past the budget are dropped with a visible note (so the omission
+# is honest, not silent). A relevance-ranked selection — render the skills *closest to this goal*
+# rather than the first name-sorted N — is the richer follow-up; the budget is the cheap floor.
+_MAX_RENDER = 12000
+
+
+def _render_skills(rendered: list[str]) -> str:
+    """Join already-rendered skills under the advisory header, bounded by `_MAX_RENDER` (Finding G).
+
+    Always renders at least one skill (a single skill is `_MAX_GUIDANCE`-bounded, well under budget),
+    then appends each until the budget would be exceeded; the remainder is summarised, not silently
+    dropped. Empty input renders nothing (preserves the prior no-skills contract).
+    """
+    if not rendered:
+        return ""
+    kept: list[str] = []
+    used = 0
+    for i, text in enumerate(rendered):
+        if kept and used + len(text) > _MAX_RENDER:
+            kept.append(f"_[{len(rendered) - i} more skill(s) omitted to bound prompt size]_")
+            break
+        kept.append(text)
+        used += len(text) + 2                     # +2 for the "\n\n" join separator
+    return _HEADER + "\n" + "\n\n".join(kept)
+
 
 @dataclass
 class Skill:
@@ -135,9 +162,7 @@ class InMemorySkillRegistry(_BaseRegistry):
         self.skills: list[Skill] = list(skills or [])
 
     def render(self) -> str:
-        if not self.skills:
-            return ""
-        return _HEADER + "\n" + "\n\n".join(s.render() for s in self.skills)
+        return _render_skills([s.render() for s in self.skills])
 
     def write_back(self, run_result: object, workspace: Path, goal: str = "") -> "Skill | None":
         skill = self._vet(run_result, workspace, goal)
@@ -166,10 +191,8 @@ class FileSkillRegistry(_BaseRegistry):
 
     def render(self) -> str:
         files = sorted(self.directory.glob("*.md"))
-        if not files:
-            return ""
-        body = "\n\n".join(f.read_text(encoding="utf-8", errors="replace").rstrip() for f in files)
-        return _HEADER + "\n" + body
+        return _render_skills([f.read_text(encoding="utf-8", errors="replace").rstrip()
+                               for f in files])
 
     def write_back(self, run_result: object, workspace: Path, goal: str = "") -> "Skill | None":
         skill = self._vet(run_result, workspace, goal)
@@ -221,8 +244,15 @@ class _SubprocessGitTransport:
         try:
             if not (local_dir / ".git").exists():
                 local_dir.parent.mkdir(parents=True, exist_ok=True)
-                clone = remote.run_git(local_dir.parent, "clone", "--quiet", safe_url,
-                                       local_dir.name, authenticated=True)
+                # Shallow clone (Finding G): we only ever render the *current* skills, never the
+                # history, so a full-history clone per task is wasted latency + disk that grows
+                # unbounded with the repo. `--depth 1` keeps the boundary at the remote tip — which is
+                # also exactly the merge-base a concurrent-push rebase needs (see `push`), so the
+                # file-disjoint rebase-retry still works against a shallow clone. `--no-local` forces
+                # the shallow path even when the URL is a local path (git silently ignores `--depth`
+                # for local clones otherwise); it's a no-op for the real remote https URL.
+                clone = remote.run_git(local_dir.parent, "clone", "--quiet", "--depth", "1",
+                                       "--no-local", safe_url, local_dir.name, authenticated=True)
                 if clone.returncode != 0:
                     # A brand-new empty remote (no commits) can fail to clone cleanly — init a local
                     # repo wired to the same origin so the flywheel still works; the first push creates

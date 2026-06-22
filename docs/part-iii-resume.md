@@ -363,6 +363,26 @@ phase lands** (the documentation contract).
 
 ## Changelog
 
+- **2026-06-22 — Security follow-ups D + G fixed (liveness bounds + bounded flywheel).** Closed the two
+  code-only items from the 2026-06-21 review that need no cluster or remote (see
+  [`part-iii-security-review.md`](part-iii-security-review.md), D/G now 🟢). **D — liveness bounds:**
+  per-call **subprocess timeouts** (`executor.TOOL_TIMEOUT` 120 s on `run_bash`, `executor.GATE_TIMEOUT`
+  600 s on the held-out gate) so a `run_bash "sleep infinity"` fails the *tool call* and a hung gate
+  **fails closed** instead of wedging the tick; the `RemoteToolExecutor` socket deadline now sits *above*
+  `GATE_TIMEOUT` (clean failed-gate result vs. a severed connection); and a Job-wide
+  **`activeDeadlineSeconds`** (`RunSpec.active_deadline_seconds`, 3 h default) on **both** Jobs as the
+  outer wall against a wedged pod burning a node. (`executor.serve()` stays serial — one loopkit-core peer
+  per pod, and the per-call timeout bounds it.) **G — bounded flywheel:** `_SubprocessGitTransport.pull`
+  now does a **shallow clone** (`--depth 1 --no-local`; the boundary is the rebase merge-base, so the
+  concurrent-push retry still works — and now exercises a *genuinely* shallow clone), and `render()` is
+  bounded by a **render budget** (`skills._MAX_RENDER` 12 KB) that drops the tail with a visible
+  `_[N more … omitted]_` note atop the existing per-skill 2 KB cap. *Still open:* a relevance-ranked skill
+  selection + a repo size cap (G's richer half), and **E/F** (Redis AUTH; separate-pod netns for
+  content-exfil — F's real fix is the deferred separate-pod executor). **287 → 293 tests** (+3 executor,
+  +1 cloudrun, +2 skills). Additive, `None`-safe, no new deps. Updated
+  [`part-iii-security-review.md`](part-iii-security-review.md) (D/G → Fixed) and
+  [`04-security.md`](architecture/04-security.md).
+
 - **2026-06-21 — Prior-art pass: ACI + two-oracle-gate lessons adopted; lessons doc in both repos.**
   A grounded survey of the canonical harnesses (Anthropic's own, SWE-agent/OpenHands/Aider/mini-swe,
   the framework runtimes, the eval harnesses) → **[`part-iii-prior-art.md`](part-iii-prior-art.md)**

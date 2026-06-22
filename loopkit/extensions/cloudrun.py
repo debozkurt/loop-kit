@@ -145,6 +145,7 @@ class RunSpec:
     creds_secret: str = "loopkit-creds"          # worker Secret: adapter key + git creds
     coordinator_creds_secret: str = "loopkit-creds-coord"  # coordinator Secret: git creds only (G1)
     ttl_seconds: int = 3600                      # ttlSecondsAfterFinished — GC finished Jobs
+    active_deadline_seconds: int = 10800         # Job-wide wall (3h): kills a wedged run (Finding D)
     backoff_limit: int = 2
     scratch_size: str = "2Gi"
     cpu_request: str = "250m"
@@ -448,6 +449,11 @@ def _job(spec: RunSpec, *, name: str, role: str, command: list[str],
     labels = {**_labels(spec), "app.kubernetes.io/component": role}
     job_spec: dict = {
         "ttlSecondsAfterFinished": spec.ttl_seconds,
+        # Liveness bound (Finding D): a hard wall on the whole Job so a wedged tick (a tool/gate the
+        # per-call subprocess timeout somehow outlived, or a stuck pod) can't run until the node reaps
+        # it — the kubelet terminates the Job's pods past this deadline. Sits above the per-call
+        # tool/gate deadlines (executor.TOOL_TIMEOUT/GATE_TIMEOUT) that bound a single step.
+        "activeDeadlineSeconds": spec.active_deadline_seconds,
         "backoffLimit": spec.backoff_limit,
         "template": {"metadata": {"labels": labels},
                      "spec": _pod_spec(spec, command=command, scratch=scratch,

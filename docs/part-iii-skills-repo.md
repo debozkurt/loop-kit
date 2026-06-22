@@ -47,6 +47,12 @@ flowchart LR
   accumulated lessons off the local clone — no per-tick network). `write_back` delegates to the file
   registry (which applies the **write-back gate** and stores the `.md`) and, only when a skill is minted,
   **commits + pushes** it back.
+- **Bounded growth** (review Finding G). The per-task clone is **shallow** (`--depth 1`) — only the tip
+  is ever rendered, never the history — and `render()` is **render-budget bounded** (`_MAX_RENDER`, 12 KB)
+  atop the per-skill `_MAX_GUIDANCE` (2 KB) cap, dropping the tail with a visible `_[N more … omitted]_`
+  note. The shallow boundary is exactly the merge-base the file-disjoint concurrent rebase needs, so the
+  retry below still works against a shallow clone. (A *relevance-ranked* render — closest to *this* goal,
+  not the first name-sorted N — is the deferred richer step.)
 - **`GitTransport`** is an injected seam (`pull`/`push`). The default `_SubprocessGitTransport` shells
   out to `git`, reusing `remote.run_git`'s credential hygiene (scrubbed env + the env-fed credential
   helper, never a token in argv) and `remote.sanitize_git_url`. It **never force-pushes**, and every

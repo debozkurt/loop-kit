@@ -31,10 +31,10 @@ every model-/issue-influenced command and never has the key.*
 | A | High | Executor can write `.git/` in the shared workspace → loopkit-core's git runs planted hooks/config as the key-holder (sidecar bypass) | **Fixed 🟢** |
 | B | High | Skills flywheel is a stored-injection channel: attacker goal → skill → shared `main` → every future prompt | **Fixed 🟢** (content) + namespacing (deploy) |
 | C | Med-High | CI/local tier: in-process key protected only by node `ptrace_scope` (unpinned) | **Fixed 🟢** |
-| D | Medium | No subprocess timeouts + serial executor + no Job `activeDeadlineSeconds` → a hung tool wedges the run | Tracked |
+| D | Medium | No subprocess timeouts + serial executor + no Job `activeDeadlineSeconds` → a hung tool wedges the run | **Fixed 🟢** |
 | E | Medium | Shared Redis has no AUTH; the executor shares core's netns + `:6379` is allowed → cross-run keyspace tamper | Tracked |
 | F | Medium | `github.com` must be in the FQDN allowlist → content exfil to an attacker's repo is *within policy* | Tracked (separate-pod) |
-| G | Medium | Skills repo: full-history clone-per-task + unbounded render into the prompt | Tracked |
+| G | Medium | Skills repo: full-history clone-per-task + unbounded render into the prompt | **Fixed 🟢** |
 
 ---
 
@@ -99,12 +99,20 @@ loopkit-core. *Proven:* a subprocess probe asserts `Dumpable:\t0` in `/proc/self
 
 ---
 
-## Tracked follow-ups (D–G)
+## Follow-ups (D–G)
 
-- **D — liveness bounds.** No `timeout=` on `run_bash`/`run_gate`/git; `executor.serve()` is a **serial**
-  accept loop; the worker/coordinator Jobs have **no `activeDeadlineSeconds`**. A `run_bash "sleep
-  infinity"` or hung gate wedges the tick (until the 600 s client timeout) and a wedged pod runs until the
-  node reaps it. *Plan:* per-call subprocess timeouts (tool + gate), `activeDeadlineSeconds` on both Jobs.
+- **D — liveness bounds — Fixed 🟢.** Nested deadlines so nothing wedges a run. Per-call **subprocess
+  timeouts**: `executor.TOOL_TIMEOUT` (120 s) on the agent's `run_bash` and `executor.GATE_TIMEOUT`
+  (600 s) on the held-out gate — a `run_bash "sleep infinity"` now fails the *tool call* (the model reads
+  the timeout and adapts) and a hung gate **fails closed** (a DONE cert can never come from a gate that
+  didn't finish). The `RemoteToolExecutor` socket deadline sits *above* `GATE_TIMEOUT` (so the executor
+  returns a clean failed-gate result rather than the client severing mid-gate). A Job-wide
+  **`activeDeadlineSeconds`** (`RunSpec.active_deadline_seconds`, 3 h default) on **both** Jobs is the
+  outer wall: a pod that somehow outlives the per-call deadlines is terminated by the kubelet instead of
+  burning a node. *Not changed:* `executor.serve()` stays a serial accept loop — there is exactly one
+  loopkit-core peer per pod, so serial is correct, and the per-call timeout bounds how long any one
+  request can hold it. Tests: `test_executor.py` (tool/gate timeout + the socket-above-gate invariant),
+  `test_cloudrun.py::test_both_jobs_have_an_active_deadline_wall`.
 - **E — shared Redis isolation.** `10-redis.yaml` has no `requirepass`/ACL and the per-run NetworkPolicy
   allows `:6379` from all pods in the ns (incl. the executor, which shares core's netns). The per-run
   keyspace is a **prefix, not a boundary** → a prompt-injected agent can read/write other runs' keys.
@@ -113,12 +121,25 @@ loopkit-core. *Proven:* a subprocess probe asserts `Dumpable:\t0` in `/proc/self
   the tool to work, so the executor can `git push`/`curl` workspace + issue content to an
   attacker-controlled repo *within policy* (the pre-push scan only covers core's work-branch push). This
   is the known same-pod-netns residual; the real fix is the deferred **separate-pod** executor (own netns).
-- **G — skills repo growth.** `_SubprocessGitTransport.pull` does a full-history clone per task and
-  `render()` concatenates **all** skills into every prompt — unbounded latency + cost + dilution. *Plan:*
-  shallow clone (`--depth 1`), a render budget / relevance selection, a skills-repo size cap.
+- **G — skills repo growth — Fixed 🟢.** `_SubprocessGitTransport.pull` now does a **shallow clone**
+  (`--depth 1 --no-local`) — a per-task clone only ever needs the current tip, never the history; the
+  shallow boundary is exactly the merge-base the file-disjoint concurrent-push rebase needs, so the
+  rebase-retry still works (and the concurrent test now exercises a *genuinely* shallow clone, matching
+  production). `render()` is bounded by a **render budget** (`skills._MAX_RENDER`, 12 KB): skills past the
+  budget are dropped with a visible `_[N more skill(s) omitted]_` note — honest, not silent — atop the
+  existing per-skill `_MAX_GUIDANCE` (2 KB) cap. *Still open (richer, deferred):* a **relevance-ranked**
+  selection (render the skills closest to *this* goal, not the first name-sorted N) and a skills-repo size
+  cap. Tests: `test_skills_repo.py` (`test_clone_is_shallow_but_renders_the_whole_tip`,
+  `test_render_is_budget_bounded_and_honest`).
 
 ## Test coverage added
 
-`tests/test_security_hardening.py` (11): the pre-commit/post-checkout hook-bypass (behavioral), the
-hardened-flags + credential-helper-reset argv, the skill secret-refusal / length-cap / control-char-strip
-/ distiller-reframe, and the non-dumpable probe (Linux-asserted, no-raise everywhere). **264 → 275 green.**
+**A–C (264 → 275):** `tests/test_security_hardening.py` (11): the pre-commit/post-checkout hook-bypass
+(behavioral), the hardened-flags + credential-helper-reset argv, the skill secret-refusal / length-cap /
+control-char-strip / distiller-reframe, and the non-dumpable probe (Linux-asserted, no-raise everywhere).
+
+**D + G (287 → 293):** liveness bounds — `tests/test_executor.py` (`run_bash` times out → tool error;
+gate times out → fail-closed; the socket deadline sits above the gate deadline) +
+`tests/test_cloudrun.py::test_both_jobs_have_an_active_deadline_wall`; bounded flywheel —
+`tests/test_skills_repo.py` (shallow clone renders the whole tip from one local commit; render is
+budget-bounded and the omission is an honest note).

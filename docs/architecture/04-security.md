@@ -256,12 +256,31 @@ security-critical logic is a pure, exhaustively unit-tested `WebhookApp.dispatch
 - ⚪ later: **External Secrets Operator / Vault** for central rotation + audit + no standing k8s
   secret — the most-secure tier, a localized resolver swap (see [`03`](03-adapters-and-auth.md)).
 
+## Liveness & bounded growth (🟢 Built — review Findings D + G)
+
+Two availability-class hardening items from the [security review](../part-iii-security-review.md):
+
+- **Nothing wedges a run (D).** Per-call **subprocess timeouts** bound the untrusted surface:
+  `executor.TOOL_TIMEOUT` (120 s) on the agent's `run_bash`, `executor.GATE_TIMEOUT` (600 s) on the
+  held-out gate — a `run_bash "sleep infinity"` fails the *tool call* (the model adapts) and a hung gate
+  **fails closed** (a DONE cert can't come from a gate that never finished). The `RemoteToolExecutor`
+  socket deadline sits *above* `GATE_TIMEOUT`, so the executor returns a clean failed-gate result rather
+  than the client severing mid-gate. A Job-wide **`activeDeadlineSeconds`** (3 h default) on both Jobs is
+  the outer wall: a pod that outlives the per-call deadlines is kubelet-terminated, not left to burn a
+  node. (The executor's accept loop stays serial — one loopkit-core peer per pod — and the per-call
+  timeout bounds it.)
+- **The flywheel can't grow the prompt or the clone without limit (G).** The skills repo is **shallow
+  cloned** per task (`--depth 1`) — only the tip is ever rendered — and `render()` is **render-budget
+  bounded** (`_MAX_RENDER`, 12 KB) atop the per-skill 2 KB cap, dropping the tail with an honest
+  `_[N more … omitted]_` note. (A *relevance-ranked* selection — closest-to-this-goal rather than the
+  first name-sorted N — is the deferred richer half.)
+
 ## Open hardening (⚪ Planned)
 
 The one that mattered most — a **separate-PID-namespace, keyless agent container** so the agent's
 `run_bash` can't `ptrace` loopkit's in-process key — is **Built 🟢 (Phase 6)**: the executor sidecar
 above. What remains: a **separate-pod** split (own network namespace) to also close same-pod 443-exfil
-of *content* (not the key); GitHub **App** auth (scoped, revocable) replacing PATs; a validating
+of *content* (not the key; review Finding F), **Redis AUTH** per run (Finding E); GitHub **App** auth (scoped, revocable) replacing PATs; a validating
 **admission webhook** pinning
 `--as` to the authenticated identity (so `--as` is an authorization, not a trust assertion); a scoped
 **per-engineer self-service RBAC** Role for `cloud creds set/rm`; tighter per-run quotas; a
