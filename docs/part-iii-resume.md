@@ -372,7 +372,7 @@ phase lands** (the documentation contract).
 
 - **2026-06-22 — `pass^k` reliability measurement layer built (the open-measurement-layer's first brick).**
   Implemented the top-ranked prior-art follow-up — and loopkit's strategic opening (see
-  [`part-iii-prior-art.md`](part-iii-prior-art.md) and the [contribution candidates]). New
+  [`part-iii-prior-art.md`](part-iii-prior-art.md), the open-measurement-layer roadmap candidate). New
   **`extensions/measure.py`** (stdlib-only, no core runtime dep, duck-types the runner outcome so it
   never imports the fleet) + the **`loopkit measure`** CLI. It runs a goal **N times** as independent
   isolated trials through the fleet's `TaskRunner` seam (each a full `run_loop` graded by the **held-out
