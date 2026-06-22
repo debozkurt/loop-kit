@@ -1,0 +1,36 @@
+# loopkit.toml — loopkit running on ITSELF (the CI "dogfood" config).
+#
+# The CI workflow (.github/workflows/loopkit.yml) overrides `goal` per run via
+# `--from-event`/`--from-issue` (the issue title+body become the goal) and flips `[remote]` on
+# with `--open-pr`. Everything below is the standing safety envelope for those runs.
+# Validate locally with: .venv/bin/loopkit doctor
+goal = "Set per-run from the GitHub issue (overridden by --from-event/--from-issue in CI)."
+repo = "."
+branch = "loopkit/run"           # never main (Ch 16) — every run lands on a branch + draft PR
+
+[agent]
+adapter = "claude-code"          # the Claude Code CLI (`claude -p … --output-format json`)
+# Headless CI has no human to approve tool use, so Claude Code must run non-interactively. loopkit's
+# safety is the gate + branch-only + protected paths + draft-PR review, NOT the agent's own prompts.
+args = ["--dangerously-skip-permissions"]
+max_cost_usd = 5.0               # budget ceiling (Ch 14) — bites on the real cost in claude's JSON
+max_tool_calls = 25
+
+[prompt]
+anchors = ["PROMPT.md"]          # fixed context reloaded each tick (Ch 4-5)
+
+[gate]
+# loopkit's own test suite is the in-sample verification gate: the agent's change must keep it green.
+# (A draft PR + human review is the second oracle here — see PROMPT.md.)
+iteration = "python -m pytest -q"
+
+[stops]
+max_iter = 8                     # bound a first live run (Ch 13)
+no_progress_after = 3
+
+[safety]
+# Protect the gate's tests (so a change can't pass by gutting them) and the CI wiring itself.
+protected_paths = ["tests/", ".github/"]
+require_clean_tree = true
+allow_branches = ["loopkit/*"]
+forbid_branches = ["main", "master"]
