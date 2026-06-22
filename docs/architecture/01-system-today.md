@@ -173,6 +173,17 @@ only a candidate that **re-passes the held-out gate it never competed on** may r
 generation. `test_selection_inflation_is_caught_by_revalidation` proves the 1.0-score "memorizer"
 loses to the 0.9 "solver" that generalizes.
 
+**Reliability measurement (`pass^k`).** `extensions/measure.py` + `loopkit measure` answer the question
+`evolve` doesn't: not *can* the loop solve a goal (discovery), but *how reliably*. It runs a goal N
+times as independent trials through the fleet's `TaskRunner` seam — each a full isolated `run_loop`
+graded by the held-out gate, so a trial passes only on `DONE` — and reports two curves: **`pass^k`**
+(reliability — *all* k trials pass, `C(c,k)/C(n,k)`, **falls** with k; the production metric) and
+**`pass@k`** (discovery — *any* of k, `1−C(n−c,k)/C(n,k)`, rises with k; what `evolve` banks on). The
+`ReliabilityReport` is **harness-stamped** (loopkit version + a signature over gates/adapter/model/
+iter-cap + a timestamp) and JSON-serializable, because a number without its harness isn't a
+measurement. `demo 24` shows reliability collapsing while discovery climbs. This is the first brick of
+the *open measurement layer* ([prior-art](../part-iii-prior-art.md)).
+
 ## The fleet — queue-driven across containers (Ch 12) 🟢
 
 `extensions/fleet.py` graduates the in-process `Supervisor` to a deployed fleet. The change is one

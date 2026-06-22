@@ -41,6 +41,7 @@ cd your-repo
 loopkit init                   # scaffolds loopkit.toml + PROMPT.md
 loopkit doctor                 # preflight: safe to run here? gates set? agent on PATH?
 loopkit run                    # loops to the goal (use --dry-run to rehearse the control flow)
+loopkit measure -n 10          # reliability: run the goal 10× → pass^k / pass@k (harness-stamped)
 ```
 
 Or learn the concepts from the runnable course:
@@ -54,6 +55,7 @@ loopkit demo 11                # Ch 11 — evolutionary search, validated
 loopkit demo 17                # Ch 17 — the skill write-back flywheel
 loopkit demo 20                # Ch 20 — triggers as infrastructure (a signed webhook → one run)
 loopkit demo 21                # Ch 21 — the CI deployment tier (an issue → a draft PR, no cluster)
+loopkit demo 24                # Ch 24 — reliability: pass^k falls while pass@k rises
 loopkit learn 9                # any scenario, narrated, with pauses
 loopkit demo 9 --live          # use the real claude-code agent (where a scenario supports it)
 ```
@@ -212,8 +214,11 @@ loopkit doctor                 # preflight: branch safe? agent on PATH? gates se
 loopkit run --dry-run          # rehearse the control flow — no agent, no tokens
 loopkit run                    # real run (adapter="claude-code" → solves it)
 # or, without cd-ing in:  loopkit run -c ~/code/my-project/loopkit.toml --repo ~/code/my-project
+loopkit measure -n 10          # how *reliably* does it solve this goal? pass^k over 10 trials
 ```
 The four fields that define a run: `goal`, `gate.iteration`, `gate.acceptance`, `safety.protected_paths`.
+(`loopkit measure` reuses them — each trial is a full isolated run graded by `gate.acceptance`, so it
+needs a held-out acceptance gate set; the report is harness-stamped and `--out report.json`-able.)
 
 **2 · Sync the result to GitHub / GitLab.** Add a `[remote]` block — the loop pushes *its own
 branch* (never `main`) and opens a **draft** PR/MR when it's done:

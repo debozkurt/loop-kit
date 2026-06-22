@@ -346,11 +346,18 @@ the identity→Secret resolver, the key is withheld from the agent, the trigger 
 issue author, the single loop runs forge-CI-natively with no cluster, the cloud worker's untrusted tool
 surface runs in a **keyless, isolated executor container** (a kernel boundary, not a timed shred), and
 the cross-run flywheel has a **durable git-repo home** (`loopkit-skills`, clone-at-start + gated
-push-on-`DONE`). **The remaining build step is Phase 6 (rest); everything else is live-enablement:**
+push-on-`DONE`). **Code-only build tracks remaining (no cluster/remote needed), then live-enablement:**
 
-1. **Phase 6 (rest) — observability + the v2 layer (BUILD NEXT)** (logs/metrics shipping, the read-only
-   dashboard; KEDA/ESO/Vault/GitHub App; a separate-pod executor split for same-pod 443-exfil of
-   *content*).
+1. **Security E — Redis AUTH (BUILD NEXT, per the plan).** Shared Redis has no `requirepass`/ACL and the
+   per-run NetworkPolicy allows `:6379` from all pods → a prompt-injected agent can read/write other
+   runs' keyspaces. Add a per-run Redis password (in the run Secret) or an ACL per keyspace
+   ([`part-iii-security-review.md`](part-iii-security-review.md), Finding E).
+2. **Measurement layer (rest)** — `pass^k` (`loopkit measure`) is built (2026-06-22); the open thread is
+   a persisted corpus of harness-stamped reports + the pass^k-vs-cost / convergence axes (fed by an
+   offline-re-gradeable trajectory log). This is loopkit's strategic contribution candidate.
+3. **Phase 6 (rest) — observability + the v2 layer** (logs/metrics shipping, the read-only dashboard;
+   KEDA/ESO/Vault/GitHub App; a separate-pod executor split = Finding F's real fix for same-pod 443
+   content-exfil).
 
 **Still queued:** the two live steps (a GitHub remote → GHCR + the optional CI drop-in + the real
 `loopkit-skills` repo for the 5b flywheel; a DOKS cluster → live-apply 2–6, including the Phase-6
@@ -362,6 +369,29 @@ cloud command goes through the context guard**. **Update this doc and the archit
 phase lands** (the documentation contract).
 
 ## Changelog
+
+- **2026-06-22 — `pass^k` reliability measurement layer built (the open-measurement-layer's first brick).**
+  Implemented the top-ranked prior-art follow-up — and loopkit's strategic opening (see
+  [`part-iii-prior-art.md`](part-iii-prior-art.md) and the [contribution candidates]). New
+  **`extensions/measure.py`** (stdlib-only, no core runtime dep, duck-types the runner outcome so it
+  never imports the fleet) + the **`loopkit measure`** CLI. It runs a goal **N times** as independent
+  isolated trials through the fleet's `TaskRunner` seam (each a full `run_loop` graded by the **held-out
+  acceptance gate** — a trial passes only on `DONE`), then reports two curves: **`pass^k`** (reliability
+  — *all* k trials pass, `C(c,k)/C(n,k)`, **falls** with k — the production metric `evolve` doesn't
+  measure) and **`pass@k`** (discovery — *any* of k, `1−C(n−c,k)/C(n,k)`, rises with k — what `evolve`
+  optimizes). Every `ReliabilityReport` is **harness-stamped** (loopkit version + a signature over
+  gates/adapter/model/iter-cap + a timestamp) and JSON-serializable (`--out`) — *a number without its
+  harness isn't a measurement*. Runner-agnostic (tests/demos inject a fake; the CLI builds a
+  `make_repo_runner`), trace-wrapped (a `measure` span; each trial's run nests under it). New scenario
+  **`demo 24`** (a flaky scripted agent on the demo-repo — 3/5 solve — shows reliability collapsing
+  0.6→0.0 while discovery climbs to 1.0, token-free). **293 → 303 tests** (+10 `tests/test_measure.py`:
+  estimator known-values + monotonicity + edge cases, the harness over a fake runner incl. a
+  crash-is-a-fail, JSON round-trip, and an end-to-end through the real `make_repo_runner`). Note:
+  best-of-N + held-out **re-validation** was already built (`evolve`/`_first_revalidated`); this adds the
+  reliability **metric** on top. Additive, None-safe, no new deps. Docs: prior-art (pass^k → Built),
+  [`01-system-today.md`](architecture/01-system-today.md) (measurement section), README + this changelog.
+  Next on the measurement track: a persisted corpus of harness-stamped reports + the pass^k-vs-cost /
+  convergence axes (the offline-re-gradeable trajectory log feeds it).
 
 - **2026-06-22 — Security follow-ups D + G fixed (liveness bounds + bounded flywheel).** Closed the two
   code-only items from the 2026-06-21 review that need no cluster or remote (see

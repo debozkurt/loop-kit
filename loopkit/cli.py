@@ -14,6 +14,7 @@ import json
 import os
 import shutil
 import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
 
 import typer
@@ -412,6 +413,90 @@ def _goal_from_issue(repo: Path, number: int, provider: str) -> tuple[str, int]:
         raise typer.Exit(1)
     task = issues.issue_to_task(issue)                    # reuse the shared goal builder
     return task["goal"], number
+
+
+@app.command()
+def measure(config: Path = typer.Option(DEFAULT_CONFIG, "--config", "-c"),
+            repo: str | None = typer.Option(None, "--repo", help="Override the target repo (config `repo`)."),
+            adapter: str | None = typer.Option(None, "--adapter", help="Override the configured agent adapter."),
+            trials: int = typer.Option(5, "--trials", "-n", min=1,
+                                       help="How many independent trials of the goal to run."),
+            k: int | None = typer.Option(None, "--k", help="Largest k to report (default: trials)."),
+            mode: str = typer.Option("clone", "--mode",
+                                     help="How each trial materialises the repo: clone | copy."),
+            max_iter: int | None = typer.Option(None, "--max-iter", help="Override stops.max_iter per trial."),
+            out: Path | None = typer.Option(None, "--out",
+                                            help="Write the full JSON ReliabilityReport here.")) -> None:
+    """Measure how *reliably* the loop solves a goal: run it N times, report pass^k and pass@k.
+
+    `pass@k` (discovery, rises with k) is what `evolve` optimizes — *can* the loop do it. `pass^k`
+    (reliability, falls with k) is the production question — does it succeed on *every* one of k
+    independent attempts. Each trial is a full isolated `run_loop` graded by the held-out acceptance
+    gate, so a trial counts as a pass only when that gate certifies DONE. The report carries the
+    loopkit version + a harness signature + a timestamp — a number without its harness isn't a
+    measurement.
+    """
+    secrets.install(secrets.CredentialStore.load(os.environ.get("LOOPKIT_CREDS_DIR")))
+    cfg = _load(config)
+    if repo is not None:
+        cfg.repo = repo
+    if adapter is not None:
+        cfg.agent.adapter = adapter
+    if max_iter is not None:
+        cfg.stops.max_iter = max_iter
+    if not cfg.gate.acceptance:
+        # pass^k is defined by the held-out oracle: "pass" == the acceptance gate certified DONE.
+        # Without it there is nothing to measure reliability against.
+        err.print("[red]measure[/] needs a held-out [bold]gate.acceptance[/] — pass^k is the rate at "
+                  "which that gate certifies the goal. Set it in loopkit.toml.")
+        raise typer.Exit(1)
+    trace.configure(cfg.trace)
+
+    from .extensions.fleet import make_repo_runner
+    from .extensions.measure import measure_reliability
+    runner = make_repo_runner(
+        cfg.repo, mode=mode, adapter=cfg.agent.adapter, max_iter=cfg.stops.max_iter,
+        gate_iteration=cfg.gate.iteration, gate_acceptance=cfg.gate.acceptance,
+        protected_paths=tuple(cfg.safety.protected_paths))   # remote stays off: trials never push
+    harness_params = {"adapter": cfg.agent.adapter, "model": cfg.agent.model,
+                      "gate_iteration": cfg.gate.iteration, "gate_acceptance": cfg.gate.acceptance,
+                      "gate_regression": cfg.gate.regression, "max_iter": cfg.stops.max_iter,
+                      "protected_paths": sorted(cfg.safety.protected_paths)}
+    console.print(Panel.fit(
+        f"[bold]{_pr_title(cfg.goal).removeprefix('loopkit: ')}[/]\nrepo {cfg.repo} · adapter "
+        f"{cfg.agent.adapter} · model {cfg.agent.model} · [bold]{trials}[/] trials",
+        title="loopkit measure"))
+
+    with trace.span("loopkit measure", run_type="chain", tags=["loopkit", "measure"],
+                    inputs={"goal": cfg.goal, "repo": cfg.repo},
+                    metadata={"trials": trials, "adapter": cfg.agent.adapter}) as span:
+        report = measure_reliability(
+            runner, {"id": "measure", "goal": cfg.goal}, trials=trials, k_max=k,
+            timestamp=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            adapter=cfg.agent.adapter, model=cfg.agent.model, target=cfg.repo,
+            harness_params=harness_params)
+        span.outputs(successes=report.successes, pass_hat_1=report.success_rate,
+                     pass_hat_k=report.pass_hat_k.get(trials), signature=report.harness.signature)
+
+    console.print(_reliability_table(report))
+    console.print(f"[dim]harness loopkit {report.harness.loopkit_version} · sig "
+                  f"{report.harness.signature} · {report.timestamp} · cost ${report.total_cost_usd:.2f}[/]")
+    if out is not None:
+        out.write_text(report.to_json())
+        console.print(f"[green]wrote[/] {out}")
+    raise typer.Exit(0)
+
+
+def _reliability_table(report) -> Table:
+    """The pass^k / pass@k curve — reliability falling, discovery rising, side by side."""
+    table = Table(title=f"reliability — {report.trials} trials, {report.successes} passed "
+                        f"(pass^1 = {report.success_rate:.0%})")
+    table.add_column("k", justify="right")
+    table.add_column("pass^k  (reliability ↓)", justify="right")
+    table.add_column("pass@k  (discovery ↑)", justify="right")
+    for kk in sorted(report.pass_hat_k):
+        table.add_row(str(kk), f"{report.pass_hat_k[kk]:.3f}", f"{report.pass_at_k[kk]:.3f}")
+    return table
 
 
 @app.command()
