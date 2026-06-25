@@ -194,6 +194,8 @@ no_progress_after = 3
 protected_paths = ["tests/"]     # the loop may not touch these
 require_clean_tree = true
 allow_branches = ["loopkit/*"]
+# gate_stability_runs = 5        # opt-in: run the iteration gate N× on the initial tree and refuse to
+                                 # start unless every run agrees (a flaky gate corrupts the stop oracle)
 
 # [trace]                          # optional LangSmith tracing (auto-on when langsmith + a key set)
 # enabled = true                   # omit for auto; true/false forces it
@@ -218,7 +220,9 @@ loopkit measure -n 10          # how *reliably* does it solve this goal? pass^k 
 ```
 The four fields that define a run: `goal`, `gate.iteration`, `gate.acceptance`, `safety.protected_paths`.
 (`loopkit measure` reuses them — each trial is a full isolated run graded by `gate.acceptance`, so it
-needs a held-out acceptance gate set; the report is harness-stamped and `--out report.json`-able.)
+needs a held-out acceptance gate set; the report is harness-stamped, carries `cost_per_accepted` — spend
+over gate-accepted trials, the honest unit cost — and is `--out report.json`-able.) Trusting a gate as a
+stop oracle? `loopkit run --check-gate 5` proves it's deterministic first — a flaky gate is worse than none.
 
 **2 · Sync the result to GitHub / GitLab.** Add a `[remote]` block — the loop pushes *its own
 branch* (never `main`) and opens a **draft** PR/MR when it's done:

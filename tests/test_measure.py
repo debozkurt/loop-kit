@@ -117,6 +117,29 @@ def test_trials_must_be_positive():
         measure_reliability(_runner(set()), {"id": "g"}, trials=0, timestamp=TS)
 
 
+# --- cost per accepted change (the economically honest unit cost) ---------------------------
+def test_cost_per_accepted_divides_spend_by_accepted_not_attempted():
+    # 10 trials @ $0.01 each = $0.10 spent; only 6 reached DONE. You paid for every attempt, but the
+    # honest unit cost is spend / *accepted* — $0.10/6, not $0.10/10.
+    report = measure_reliability(_runner({0, 1, 2, 5, 6, 9}), {"id": "g", "goal": "x"},
+                                 trials=10, timestamp=TS)
+    assert report.total_cost_usd == pytest.approx(0.10)
+    assert report.cost_per_accepted == pytest.approx(0.10 / 6)
+
+
+def test_cost_per_accepted_is_none_when_nothing_accepted():
+    # Undefined, not zero: spend with no accepted change is pure waste, and 0 would hide that.
+    report = measure_reliability(_runner(set()), {"id": "g", "goal": "x"}, trials=3, timestamp=TS)
+    assert report.successes == 0 and report.cost_per_accepted is None
+
+
+def test_cost_per_accepted_serializes():
+    import json
+    report = measure_reliability(_runner({0}), {"id": "g", "goal": "x"}, trials=2, timestamp=TS)
+    data = json.loads(report.to_json())
+    assert data["cost_per_accepted"] == pytest.approx(0.02)          # $0.02 spent / 1 accepted
+
+
 # --- end to end over the real make_repo_runner (token-free flaky agent) ---------------------
 _WRONG = '''\
 """Line-item pricing (no discount — fails the seen gate)."""

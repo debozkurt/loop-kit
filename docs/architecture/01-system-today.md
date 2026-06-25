@@ -99,6 +99,12 @@ Blast-radius containment, enforced before the loop ever runs and on every commit
 
 - **Preflight** (`doctor` / `run` startup): refuses to operate on a dirty tree or the default branch;
   confirms gates are set and the agent is on `PATH`.
+- **Gate-determinism preflight** (opt-in, `safety.gate_stability_runs` / `run --check-gate N`): runs
+  the iteration gate N times on the *unchanged* initial tree and refuses to start unless every run
+  agrees. A gate that flips verdict on identical state corrupts every stop decision the loop makes —
+  it "fixes" correct code or halts on broken code — so a flaky gate is worse than no gate (Ch 9). The
+  verdict need not be *pass* (a loop legitimately starts red), only *stable*. Default off ⇒ exact
+  prior behavior; `safety.gate_stability(gate, tree, runs)` is the reusable check.
 - **Protected-path guard**: a pre-commit check that fails the tick if the agent touched a protected
   path (e.g. `tests/`) — the agent cannot "fix" the test that judges it.
 - **Branch allowlist**: pushes are confined to an allowed pattern (e.g. `loopkit/*`); never `main`.
@@ -181,8 +187,11 @@ graded by the held-out gate, so a trial passes only on `DONE` — and reports tw
 **`pass@k`** (discovery — *any* of k, `1−C(n−c,k)/C(n,k)`, rises with k; what `evolve` banks on). The
 `ReliabilityReport` is **harness-stamped** (loopkit version + a signature over gates/adapter/model/
 iter-cap + a timestamp) and JSON-serializable, because a number without its harness isn't a
-measurement. `demo 24` shows reliability collapsing while discovery climbs. This is the first brick of
-the *open measurement layer* ([prior-art](../part-iii-prior-art.md)).
+measurement. It also carries **`cost_per_accepted`** — total spend over the trials the held-out gate
+*accepted* (`None` when none were, undefined ≠ zero) — the economically honest unit cost: tokens spent
+and trials attempted flatter you; what ships is what was accepted (the cost axis of the open
+measurement layer). `demo 24` shows reliability collapsing while discovery climbs. This is the first
+brick of the *open measurement layer* ([prior-art](../part-iii-prior-art.md)).
 
 ## The fleet — queue-driven across containers (Ch 12) 🟢
 

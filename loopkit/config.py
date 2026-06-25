@@ -57,6 +57,10 @@ class SafetyConfig(BaseModel):
     require_clean_tree: bool = True
     allow_branches: list[str] = Field(default_factory=lambda: ["loopkit/*"])
     forbid_branches: list[str] = Field(default_factory=lambda: ["main", "master"])
+    # >=2 → run the iteration gate N times on the initial tree at run start and refuse to start unless
+    # every run agrees (a flaky gate corrupts the stop oracle, Ch 9). 0/1 = skip (default; exact prior
+    # behavior). `run --check-gate N` overrides this per-invocation.
+    gate_stability_runs: int = 0
 
 
 class RemoteConfig(BaseModel):

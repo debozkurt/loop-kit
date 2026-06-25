@@ -20,6 +20,36 @@ class Preflight:
     problems: list[str] = field(default_factory=list)
 
 
+@dataclass
+class GateStability:
+    """The result of running one gate N times on an unchanged tree (see `gate_stability`)."""
+
+    deterministic: bool
+    runs: int
+    verdicts: list[bool] = field(default_factory=list)   # one pass/fail per run
+
+    @property
+    def passes(self) -> int:
+        return sum(self.verdicts)
+
+
+def gate_stability(gate, workspace: Path, runs: int) -> GateStability:
+    """Run `gate` `runs` times on the unchanged `workspace` and report whether the verdict is stable.
+
+    A non-deterministic gate (a different pass/fail on identical state) corrupts every stop decision
+    the loop makes: it will "fix" code that is already correct, or halt on code that is broken. A
+    flaky gate is worse than no gate (Ch 9). Run this once, on the initial tree, before trusting the
+    gate as the loop's stop oracle. The verdict need not be *pass* — a loop legitimately starts red —
+    only *stable*: all `runs` agree.
+
+    `gate` is duck-typed (anything with `.check(workspace).passed`), so this stays decoupled from the
+    concrete `Gate` implementations. It is read-only with respect to the loop's state; the caller runs
+    it before any tick, on a frozen tree.
+    """
+    verdicts = [bool(gate.check(workspace).passed) for _ in range(runs)]
+    return GateStability(deterministic=len(set(verdicts)) <= 1, runs=runs, verdicts=verdicts)
+
+
 def preflight(config) -> Preflight:
     """Return the list of reasons it is unsafe to start this run (empty == safe)."""
     repo = config.repo_path()

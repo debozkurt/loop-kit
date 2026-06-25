@@ -299,6 +299,11 @@ def run(config: Path = typer.Option(DEFAULT_CONFIG, "--config", "-c"),
                                      help="Enable push + draft PR for this run (overrides [remote]). CI tier."),
         dry_run: bool = typer.Option(False, "--dry-run", help="Run the control flow, skip the agent."),
         max_iter: int | None = typer.Option(None, "--max-iter", help="Override stops.max_iter."),
+        check_gate: int | None = typer.Option(None, "--check-gate",
+                                              help="Run the iteration gate N times on the initial tree "
+                                                   "and refuse to start unless every run agrees — a flaky "
+                                                   "gate corrupts the stop oracle (Ch 9). Overrides "
+                                                   "safety.gate_stability_runs."),
         force: bool = typer.Option(False, "--force", help="Run even if preflight fails."),
         sandbox: bool = typer.Option(False, "--sandbox",
                                      help="Run the loop inside the loopkit Docker container (Ch 16).")) -> None:
@@ -349,6 +354,20 @@ def run(config: Path = typer.Option(DEFAULT_CONFIG, "--config", "-c"),
             err.print(f"[red]preflight[/] {problem}")
         err.print("Fix these or pass [bold]--force[/]  (see [bold]loopkit doctor[/]).")
         raise typer.Exit(1)
+
+    # Gate-determinism preflight (opt-in): a gate that flips verdict on an unchanged tree corrupts
+    # every stop decision the loop makes (Ch 9). Run it N times on the initial tree before charging
+    # the agent; refuse on disagreement. 0/1 = skip = exact prior behavior.
+    runs = check_gate if check_gate is not None else cfg.safety.gate_stability_runs
+    if runs and runs >= 2:
+        from .gate import ShellGate
+        stab = safety.gate_stability(ShellGate(cfg.gate.iteration), cfg.repo_path(), runs)
+        if not stab.deterministic and not force:
+            err.print(f"[red]preflight[/] iteration gate is non-deterministic: {runs} runs on an "
+                      f"unchanged tree gave {stab.passes} pass / {runs - stab.passes} fail. A flaky "
+                      f"gate corrupts every stop decision — fix the gate, or pass [bold]--force[/].")
+            raise typer.Exit(1)
+        console.print(f"[green]gate[/] deterministic over {runs} runs")
 
     try:
         agent = build_agent(cfg.agent)
@@ -479,8 +498,11 @@ def measure(config: Path = typer.Option(DEFAULT_CONFIG, "--config", "-c"),
                      pass_hat_k=report.pass_hat_k.get(trials), signature=report.harness.signature)
 
     console.print(_reliability_table(report))
+    cpa = report.cost_per_accepted
+    cpa_str = f"${cpa:.2f}/accepted" if cpa is not None else "—/accepted (none accepted)"
     console.print(f"[dim]harness loopkit {report.harness.loopkit_version} · sig "
-                  f"{report.harness.signature} · {report.timestamp} · cost ${report.total_cost_usd:.2f}[/]")
+                  f"{report.harness.signature} · {report.timestamp} · cost ${report.total_cost_usd:.2f} · "
+                  f"{cpa_str}[/]")
     if out is not None:
         out.write_text(report.to_json())
         console.print(f"[green]wrote[/] {out}")

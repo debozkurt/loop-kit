@@ -352,9 +352,10 @@ push-on-`DONE`). **Code-only build tracks remaining (no cluster/remote needed), 
    per-run NetworkPolicy allows `:6379` from all pods → a prompt-injected agent can read/write other
    runs' keyspaces. Add a per-run Redis password (in the run Secret) or an ACL per keyspace
    ([`part-iii-security-review.md`](part-iii-security-review.md), Finding E).
-2. **Measurement layer (rest)** — `pass^k` (`loopkit measure`) is built (2026-06-22); the open thread is
-   a persisted corpus of harness-stamped reports + the pass^k-vs-cost / convergence axes (fed by an
-   offline-re-gradeable trajectory log). This is loopkit's strategic contribution candidate.
+2. **Measurement layer (rest)** — `pass^k` (`loopkit measure`) is built (2026-06-22), and `cost_per_accepted`
+   (the first cut of the cost axis) landed 2026-06-25; the open thread is a persisted corpus of
+   harness-stamped reports + the full pass^k-vs-cost / convergence axes (fed by an offline-re-gradeable
+   trajectory log). This is loopkit's strategic contribution candidate.
 3. **Phase 6 (rest) — observability + the v2 layer** (logs/metrics shipping, the read-only dashboard;
    KEDA/ESO/Vault/GitHub App; a separate-pod executor split = Finding F's real fix for same-pod 443
    content-exfil).
@@ -369,6 +370,29 @@ cloud command goes through the context guard**. **Update this doc and the archit
 phase lands** (the documentation contract).
 
 ## Changelog
+
+- **2026-06-25 — gate-determinism preflight + cost-per-accepted metric (two small reliability/measurement
+  wins from the loop-engineering prior-art sweep).** Both surfaced by cross-referencing three external
+  "loop engineering" write-ups (Deviatkin/Pachaar/IEEE) against loopkit + the course; the sweep's verdict
+  was that loopkit is *ahead* of the articles (network egress, reward-hacking, two-oracle gate, sidecar,
+  pass^k all already built), so only these two genuine gaps survived the no-bloat/no-conflict filter.
+  **① Gate-determinism preflight (IEEE "Step 0"):** `safety.gate_stability(gate, tree, runs)` runs a gate
+  N times on the *unchanged* initial tree and reports whether the verdict is unanimous; a flaky gate
+  corrupts every stop decision (it "fixes" correct code or halts on broken code), so it's worse than no
+  gate (Ch 9). Wired opt-in via `safety.gate_stability_runs` (config) + `run --check-gate N` (per-invocation
+  override), refusing to start on disagreement unless `--force`; checks the **iteration gate** (the per-tick
+  stop oracle) for v1 (acceptance-gate determinism is a noted extension). **Default off ⇒ exact prior
+  behavior.** Also a precondition for the measurement layer — `pass^k` is meaningless if the gate isn't
+  stable. **② `cost_per_accepted`:** `ReliabilityReport` already held `total_cost_usd` + `successes`; the
+  property divides them (spend / held-out-gate-accepted trials, `None` when none accepted — undefined ≠
+  zero), surfaced in `to_dict()` + the `measure` CLI summary. The cost axis of the open measurement layer.
+  **303 → 312 tests** (+6 `tests/test_gate_stability.py` — callable + real-shell flaky gates, CLI refuse/pass;
+  +3 `tests/test_measure.py` — divide/None/JSON). Additive, `None`/0-safe, no new deps; `measure` stays
+  stdlib-only/no-core-dep. Docs: [`CONTROL-FILES.md`](CONTROL-FILES.md) (`gate_stability_runs` + `--check-gate`),
+  [`01-system-today.md`](architecture/01-system-today.md) (safety-envelope + measurement sections). **Mirrored
+  into the course** (loops manual): Ch 9 (prove the gate is stable before trusting it as a stop oracle;
+  cost-per-accepted as the cost companion to the `pass^k` curve), Ch 7 (pointer), Ch 14 (cost-per-accepted as
+  the output metric beside the `roi_ok` input estimate) — concept only, citing loopkit as the reference impl.
 
 - **2026-06-22 — `pass^k` reliability measurement layer built (the open-measurement-layer's first brick).**
   Implemented the top-ranked prior-art follow-up — and loopkit's strategic opening (see

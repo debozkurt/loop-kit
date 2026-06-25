@@ -122,12 +122,21 @@ class ReliabilityReport:
         """`pass^1` == `pass@1` == c/n — the base single-shot success rate."""
         return self.successes / self.trials if self.trials else 0.0
 
+    @property
+    def cost_per_accepted(self) -> float | None:
+        """Total spend over accepted (held-out-gate-certified) trials — the unit cost of a *trustworthy*
+        change, not of an attempt. The economically honest yardstick: tokens spent and trials attempted
+        flatter you; what ships is what was accepted. `None` when nothing was accepted — undefined, not
+        zero, because spend with no accepted change is pure waste and dividing would hide that."""
+        return self.total_cost_usd / self.successes if self.successes else None
+
     def to_dict(self) -> dict:
         d = asdict(self)
         # JSON object keys must be strings; the curves are keyed by int k.
         d["pass_hat_k"] = {str(k): v for k, v in self.pass_hat_k.items()}
         d["pass_at_k"] = {str(k): v for k, v in self.pass_at_k.items()}
         d["success_rate"] = self.success_rate
+        d["cost_per_accepted"] = self.cost_per_accepted
         return d
 
     def to_json(self, *, indent: int = 2) -> str:

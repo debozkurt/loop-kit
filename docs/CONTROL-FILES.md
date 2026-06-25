@@ -45,6 +45,9 @@ no_progress_after = 3            # halt if N ticks change nothing
 protected_paths = ["tests/"]     # the loop may not touch these (so it can't game its gates)
 require_clean_tree = true
 allow_branches = ["loopkit/*"]
+gate_stability_runs = 0          # >=2 → run the iteration gate N× on the initial tree and refuse
+                                 #        to start unless every run agrees (a flaky gate corrupts the
+                                 #        stop oracle, Ch 9). 0/1 = skip. `run --check-gate N` overrides.
 
 [remote]                         # the outward edge — all off by default
 enabled = false                  # nothing pushes unless true
