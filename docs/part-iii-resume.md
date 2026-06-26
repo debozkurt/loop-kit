@@ -371,6 +371,19 @@ phase lands** (the documentation contract).
 
 ## Changelog
 
+- **2026-06-26 — bugfix: `loopkit measure` silently failed on a relative `repo` (found during a
+  full step-by-step CLI walkthrough).** Every entry point that takes the config's `repo` resolves it
+  via `Config.repo_path()` (`run`, `doctor`) — except `measure`, which passed the raw `cfg.repo` to
+  `make_repo_runner`. Because each trial clones into its own temp scratch (a different cwd), the
+  default `repo = "."` (what `init` scaffolds and the dogfood config uses) became `git clone .` from
+  an empty scratch dir → every trial raised `RuntimeError("git clone failed")`, which the harness
+  scores as a failed trial — so `measure` reported **pass^k = 0% for a perfectly solvable goal** (a
+  silently-wrong measurement, the worst kind). Fix is one line in `cli.py:measure` — resolve
+  `repo_src = str(cfg.repo_path())` before building the runner — matching `run`/`doctor`. **+1 test**
+  (`tests/test_measure.py::test_measure_cli_resolves_a_relative_repo`: drives the CLI with `repo = "."`
+  and asserts all trials reach DONE; verified to fail `0 == 3` without the fix). Additive, no new deps;
+  no architecture/contract change (resume-doc changelog is the right home per the docs contract).
+
 - **2026-06-25 — gate-determinism preflight + cost-per-accepted metric (two small reliability/measurement
   wins from the loop-engineering prior-art sweep).** Both surfaced by cross-referencing three external
   "loop engineering" write-ups (Deviatkin/Pachaar/IEEE) against loopkit + the course; the sweep's verdict

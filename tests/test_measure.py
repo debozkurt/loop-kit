@@ -179,3 +179,44 @@ def test_measure_over_make_repo_runner_with_a_flaky_agent(tmp_path: Path):
     assert report.pass_hat_k[1] == pytest.approx(2 / 3)
     assert report.pass_hat_k[3] == pytest.approx(0.0)               # not all three solved
     assert isinstance(report, ReliabilityReport)
+
+
+# --- the measure CLI resolves a relative repo (regression) ----------------------------------
+def test_measure_cli_resolves_a_relative_repo(git_repo: Path, tmp_path: Path, monkeypatch):
+    """Regression: `measure` with the default relative `repo = "."` must resolve to an absolute path
+    before handing it to the runner. Each trial clones into its own temp scratch (a different cwd), so
+    a relative `.` would `git clone .` from the empty scratch dir, fail every trial, and the harness
+    would silently report pass^k = 0 for a perfectly solvable goal. `run`/`doctor` resolve via
+    `repo_path()`; measure must match.
+    """
+    import json
+    import subprocess
+
+    from typer.testing import CliRunner
+
+    from loopkit.cli import app
+
+    # Both oracles `true` ⇒ a no-op MockAgent reaches DONE every trial, so a correct (resolved) clone
+    # gives pass^k = 1. The pre-fix bug made every trial reason="error" instead.
+    (git_repo / "loopkit.toml").write_text(
+        'goal = "reliability over a relative repo"\nrepo = "."\nbranch = "loopkit/run"\n'
+        '[agent]\nadapter = "mock"\n'
+        '[gate]\niteration = "true"\nacceptance = "true"\n'
+        '[safety]\nprotected_paths = []\n')
+    subprocess.run(["git", "add", "-A"], cwd=git_repo, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-qm", "cfg"], cwd=git_repo, check=True, capture_output=True)
+
+    nocreds = tmp_path / "nocreds"
+    nocreds.mkdir()
+    monkeypatch.setenv("LOOPKIT_CREDS_DIR", str(nocreds))           # don't scrub the dev env
+    for var in ("LANGSMITH_API_KEY", "LANGSMITH_TRACING", "LANGCHAIN_API_KEY", "LANGCHAIN_TRACING_V2"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.chdir(git_repo)                                    # so repo_path() resolves "." here
+
+    out = tmp_path / "report.json"
+    result = CliRunner().invoke(app, ["measure", "-c", "loopkit.toml", "-n", "3", "--out", str(out)])
+    assert result.exit_code == 0, result.output
+    report = json.loads(out.read_text())
+    assert report["successes"] == 3                                # all three clones resolved + solved
+    assert report["pass_hat_k"]["1"] == 1.0
+    assert all(o["reason"] != "error" for o in report["outcomes"])  # no swallowed clone failure

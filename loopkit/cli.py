@@ -473,8 +473,13 @@ def measure(config: Path = typer.Option(DEFAULT_CONFIG, "--config", "-c"),
 
     from .extensions.fleet import make_repo_runner
     from .extensions.measure import measure_reliability
+    # Resolve the target to an absolute path before handing it to the runner: each trial clones into
+    # its own temp scratch (a different cwd), so a relative `repo` (the default `repo = "."`) would
+    # `git clone .` from the empty scratch dir and fail every trial. `run`/`doctor` use repo_path()
+    # for the same reason — measure must match, or it silently reports pass^k=0 for a solvable goal.
+    repo_src = str(cfg.repo_path())
     runner = make_repo_runner(
-        cfg.repo, mode=mode, adapter=cfg.agent.adapter, max_iter=cfg.stops.max_iter,
+        repo_src, mode=mode, adapter=cfg.agent.adapter, max_iter=cfg.stops.max_iter,
         gate_iteration=cfg.gate.iteration, gate_acceptance=cfg.gate.acceptance,
         protected_paths=tuple(cfg.safety.protected_paths))   # remote stays off: trials never push
     harness_params = {"adapter": cfg.agent.adapter, "model": cfg.agent.model,
