@@ -1,0 +1,46 @@
+# loopkit CI tier (Claude Code subscription) — a labelled issue → a draft PR, no cluster required.
+# This variant bills your Claude Code SUBSCRIPTION via an OAuth token, not a metered API key.
+# Setup:
+#   1. Create the token:    claude setup-token
+#   2. Add the repo secret: gh secret set CLAUDE_CODE_OAUTH_TOKEN   (do NOT set ANTHROPIC_API_KEY —
+#      claude-code defaults to the subscription and withholds an API key)
+#   3. Keep a loopkit.toml in the repo (run `loopkit init`). Label an issue `loopkit` to dispatch.
+name: loopkit
+on:
+  issues:
+    types: [opened, labeled]
+  workflow_dispatch:
+    inputs:
+      issue:
+        description: Issue number to run loopkit on
+        required: true
+permissions:
+  contents: write          # push the loop's branch
+  pull-requests: write     # open the draft PR
+  issues: read             # read the issue (manual-dispatch path)
+jobs:
+  loopkit:
+    # Act on issues carrying the `loopkit` label (the opt-in switch); always act on a manual run.
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.issue.labels.*.name, 'loopkit')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0     # full history so the loop can branch from + PR against the base
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - run: npm install -g @anthropic-ai/claude-code      # the agent binary (claude-code adapter)
+      - run: pip install 'loopkit[remote]'                 # the CLI adapter needs no provider SDK
+      - name: loopkit run (issue event)
+        if: github.event_name == 'issues'
+        run: loopkit run --from-event "$GITHUB_EVENT_PATH" --adapter claude-code --open-pr
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}   # subscription, not a billed key
+          GH_TOKEN: ${{ github.token }}                                     # scoped, ephemeral — push + PR
+      - name: loopkit run (manual dispatch)
+        if: github.event_name == 'workflow_dispatch'
+        run: loopkit run --from-issue "${{ inputs.issue }}" --adapter claude-code --open-pr
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          GH_TOKEN: ${{ github.token }}

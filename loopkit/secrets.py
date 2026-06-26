@@ -45,7 +45,9 @@ log = get_logger("secrets")
 # loopkit's OWN forge subprocess (git/gh/glab) authenticates on either — `gh`/git read
 # `GITHUB_TOKEN`/`GH_TOKEN`, `glab` reads `GITLAB_TOKEN`; the agent's scrubbed shell still gets none.
 GIT_ENV: tuple[str, ...] = ("GITHUB_TOKEN", "GH_TOKEN", "GITLAB_TOKEN")
-# Adapter → the env var(s) that adapter's SDK/binary authenticates with (first present wins).
+# Adapter → the env var(s) that adapter's SDK/binary CAN authenticate with (first present wins). This
+# is the projection/redaction set (cloud creds.py + the redaction registry) — NOT necessarily what a
+# run injects. The claude-code CLI defaults to the subscription only (see CLAUDE_CODE_SUBSCRIPTION_KEYS).
 ADAPTER_KEYS: dict[str, tuple[str, ...]] = {
     "claude-code": ("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"),
     "claude-api": ("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"),
@@ -53,6 +55,11 @@ ADAPTER_KEYS: dict[str, tuple[str, ...]] = {
     "openai-api": ("OPENAI_API_KEY",),
     "mock": (),
 }
+# What `claude-code` injects BY DEFAULT: the subscription token only (or, when absent, the agent's
+# scrubbed env carries no key and the `claude` CLI falls back to its on-disk login). ANTHROPIC_API_KEY
+# is withheld so an ambient shell key can't silently bill the API at subscription-billing rates — opt
+# into it with `run --api-key` / `[agent] use_api_key`, which switches the adapter to ADAPTER_KEYS.
+CLAUDE_CODE_SUBSCRIPTION_KEYS: tuple[str, ...] = ("CLAUDE_CODE_OAUTH_TOKEN",)
 # The key an API adapter's SDK authenticates with — precise, NOT the projection set: a
 # `CLAUDE_CODE_OAUTH_TOKEN` is valid for the claude-code CLI but NOT the Anthropic SDK, so it must
 # never be handed to `anthropic.Anthropic(api_key=…)`. CLI adapters have no SDK key (they get the

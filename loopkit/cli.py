@@ -135,6 +135,57 @@ jobs:
           GH_TOKEN: ${{ github.token }}
 """
 
+# Subscription variant: `claude-code` billed to a Claude Code OAuth token, not a metered API key.
+# Shipped as examples/ci/github-actions-claude-code.yml (a drift test keeps them identical).
+_CI_GITHUB_CLAUDE_CODE_TEMPLATE = """\
+# loopkit CI tier (Claude Code subscription) — a labelled issue → a draft PR, no cluster required.
+# This variant bills your Claude Code SUBSCRIPTION via an OAuth token, not a metered API key.
+# Setup:
+#   1. Create the token:    claude setup-token
+#   2. Add the repo secret: gh secret set CLAUDE_CODE_OAUTH_TOKEN   (do NOT set ANTHROPIC_API_KEY —
+#      claude-code defaults to the subscription and withholds an API key)
+#   3. Keep a loopkit.toml in the repo (run `loopkit init`). Label an issue `loopkit` to dispatch.
+name: loopkit
+on:
+  issues:
+    types: [opened, labeled]
+  workflow_dispatch:
+    inputs:
+      issue:
+        description: Issue number to run loopkit on
+        required: true
+permissions:
+  contents: write          # push the loop's branch
+  pull-requests: write     # open the draft PR
+  issues: read             # read the issue (manual-dispatch path)
+jobs:
+  loopkit:
+    # Act on issues carrying the `loopkit` label (the opt-in switch); always act on a manual run.
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.issue.labels.*.name, 'loopkit')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0     # full history so the loop can branch from + PR against the base
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - run: npm install -g @anthropic-ai/claude-code      # the agent binary (claude-code adapter)
+      - run: pip install 'loopkit[remote]'                 # the CLI adapter needs no provider SDK
+      - name: loopkit run (issue event)
+        if: github.event_name == 'issues'
+        run: loopkit run --from-event "$GITHUB_EVENT_PATH" --adapter claude-code --open-pr
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}   # subscription, not a billed key
+          GH_TOKEN: ${{ github.token }}                                     # scoped, ephemeral — push + PR
+      - name: loopkit run (manual dispatch)
+        if: github.event_name == 'workflow_dispatch'
+        run: loopkit run --from-issue "${{ inputs.issue }}" --adapter claude-code --open-pr
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+"""
+
 _CI_GITLAB_TEMPLATE = """\
 # loopkit CI tier (GitLab) — run the loop on one issue, open a draft MR. No cluster required.
 # GitLab has no native issue->pipeline trigger, so this fires on: a manual "Run pipeline" with an
@@ -235,6 +286,19 @@ _API_REQUIREMENTS = {"claude-api": ("anthropic", "ANTHROPIC_API_KEY", "claude"),
                      "openai-api": ("openai", "OPENAI_API_KEY", "openai")}
 
 
+def _claude_code_auth_note(cfg: Config) -> str:
+    """How `claude-code` will authenticate — surfaced so a run's BILLING is visible before it starts.
+    doctor doesn't install/scrub creds, so os.environ still reflects the shell as the agent would see it."""
+    have_key = bool(os.environ.get("ANTHROPIC_API_KEY"))
+    if cfg.agent.use_api_key:
+        return ("auth [yellow]ANTHROPIC_API_KEY → billed API[/]" if have_key
+                else "[yellow]--api-key set but ANTHROPIC_API_KEY not in env[/]")
+    note = "auth subscription (claude login / CLAUDE_CODE_OAUTH_TOKEN)"
+    if have_key:
+        note += " [dim]· ANTHROPIC_API_KEY present but withheld (--api-key to bill it)[/]"
+    return note
+
+
 def _doctor_agent(table: Table, cfg: Config) -> None:
     """Is the configured adapter actually runnable here — binary on PATH, or SDK + key present?"""
     adapter = cfg.agent.adapter
@@ -243,8 +307,10 @@ def _doctor_agent(table: Table, cfg: Config) -> None:
     elif adapter in _CLI_BINARIES:
         binary = _CLI_BINARIES[adapter]
         found = shutil.which(binary)
-        table.add_row("agent", "[green]ok[/]" if found else "[red]missing[/]",
-                      found or f"{binary} not on PATH")
+        detail = found or f"{binary} not on PATH"
+        if found and adapter == "claude-code":             # surface which credential will be billed
+            detail = f"{found} · {_claude_code_auth_note(cfg)}"
+        table.add_row("agent", "[green]ok[/]" if found else "[red]missing[/]", detail)
     elif adapter in _API_REQUIREMENTS:
         pkg, env, extra = _API_REQUIREMENTS[adapter]
         have_sdk = importlib.util.find_spec(pkg) is not None
@@ -305,6 +371,9 @@ def run(config: Path = typer.Option(DEFAULT_CONFIG, "--config", "-c"),
                                                    "gate corrupts the stop oracle (Ch 9). Overrides "
                                                    "safety.gate_stability_runs."),
         force: bool = typer.Option(False, "--force", help="Run even if preflight fails."),
+        api_key: bool = typer.Option(False, "--api-key",
+                                     help="claude-code: bill ANTHROPIC_API_KEY instead of the subscription "
+                                          "(default). Sets [agent] use_api_key for this run."),
         sandbox: bool = typer.Option(False, "--sandbox",
                                      help="Run the loop inside the loopkit Docker container (Ch 16).")) -> None:
     """Run the loop until it reaches a terminal. Point it at any repo via `repo` (or `--repo`).
@@ -324,6 +393,8 @@ def run(config: Path = typer.Option(DEFAULT_CONFIG, "--config", "-c"),
         cfg.repo = repo
     if adapter is not None:
         cfg.agent.adapter = adapter
+    if api_key:
+        cfg.agent.use_api_key = True            # opt into the billed API key for claude-code this run
     # CI tier: source the goal from a forge issue (event JSON or a number). Mutually exclusive — they
     # are two routes to the same thing. The issue number is captured so a `Closes #N` lands in the PR.
     issue_number: int | None = None

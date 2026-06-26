@@ -1,0 +1,39 @@
+# loopkit.example.toml — a GENERIC, fully-annotated starter config. Copy it, delete what you don't
+# need, point it at any repo. Validate with `loopkit doctor`. Nothing here is loopkit-internal: every
+# field is a knob you set per task.
+
+goal = "Describe exactly what 'done' means — the one condition the loop drives toward."
+repo = "."                                 # path or git URL; resolved relative to where you run loopkit
+branch = "loopkit/run"                     # NEVER main/master — every run lands on a branch (Ch 16)
+
+[agent]
+adapter = "claude-code"                    # mock | claude-code | codex | claude-api | openai-api
+# claude-code bills your SUBSCRIPTION by default (an ambient ANTHROPIC_API_KEY is withheld). Opt into
+# the billed API key with `run --api-key` or `use_api_key = true`. `loopkit doctor` shows which.
+# use_api_key = false
+max_cost_usd = 5.0                         # budget ceiling (Ch 14); for subscription runs, also cap with --max-iter
+max_tool_calls = 25
+# args = ["--dangerously-skip-permissions"]  # headless claude-code: the gates are the safety, not prompts
+
+[prompt]
+anchors = ["PROMPT.md"]                    # files reloaded VERBATIM each tick (Ch 5) — the durable brief
+
+[gate]
+# A GATE IS ANY SHELL COMMAND. exit 0 = pass · non-zero = fail · stdout = the feedback fed back to the
+# agent next tick. That's the entire contract — see the catalog in this folder's README. Examples:
+iteration  = "python -m pytest -q"         # the in-sample VERIFICATION gate (Ch 6-7) — runs every tick
+acceptance = "python -m pytest tests/holdout -q"   # the HELD-OUT gate (Ch 9) — run once before DONE
+# regression = "python -m pytest tests/seen -q"    # optional 2nd held-out oracle: don't break what worked
+
+[stops]
+max_iter = 12                              # hard iteration cap (Ch 13)
+no_progress_after = 3                      # halt if the tree hasn't changed for N ticks
+# gate_stability_runs = 5                  # preflight: run the iteration gate N× on the unchanged tree;
+                                           # refuse to start if the verdict isn't unanimous (a flaky gate
+                                           # corrupts every stop decision). Or per-run: `run --check-gate 5`.
+
+[safety]
+protected_paths = ["tests/", "gate/"]      # the loop may NOT touch these — guards the VERIFIER (Ch 9, 16)
+require_clean_tree = true                  # refuse to start on uncommitted changes (durability needs it)
+allow_branches = ["loopkit/*"]
+forbid_branches = ["main", "master"]

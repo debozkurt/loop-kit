@@ -7,10 +7,16 @@ sandbox — so loopkit is just the loop. This is the middle of loopkit's three d
 (*local* · **CI** · *cloud fleet*); the full rationale is in
 [`docs/part-iii-ci-mode.md`](../../docs/part-iii-ci-mode.md).
 
-| File | Forge | Drop it at |
-|---|---|---|
-| [`github-actions.yml`](github-actions.yml) | GitHub Actions | `.github/workflows/loopkit.yml` |
-| [`gitlab-ci.yml`](gitlab-ci.yml) | GitLab CI | `.gitlab-ci.yml` |
+| File | Forge | Adapter / billing | Drop it at |
+|---|---|---|---|
+| [`github-actions.yml`](github-actions.yml) | GitHub Actions | `claude-api` · `ANTHROPIC_API_KEY` | `.github/workflows/loopkit.yml` |
+| [`github-actions-claude-code.yml`](github-actions-claude-code.yml) | GitHub Actions | `claude-code` · **Claude Code subscription** (`CLAUDE_CODE_OAUTH_TOKEN`, no API key) | `.github/workflows/loopkit.yml` |
+| [`gitlab-ci.yml`](gitlab-ci.yml) | GitLab CI | `claude-api` · `ANTHROPIC_API_KEY` | `.gitlab-ci.yml` |
+
+Pick the `claude-code` variant to bill your **subscription** instead of a metered API key: it installs
+the `claude` CLI on the runner and authenticates with a `CLAUDE_CODE_OAUTH_TOKEN` repo secret (from
+`claude setup-token`). Do **not** set `ANTHROPIC_API_KEY` alongside it — `claude-code` defaults to the
+subscription and withholds an API key (`run --api-key` opts back into billing).
 
 The fastest way to get either is to let loopkit scaffold it (it also writes a starter `loopkit.toml`
 + `PROMPT.md`, which the workflow needs):

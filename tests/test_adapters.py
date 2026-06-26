@@ -84,11 +84,65 @@ def test_claude_json_empty_is_zero():
     assert _parse_claude_json("not json") == (0.0, "")
 
 
+def test_claude_json_array_carries_cost():
+    # Current `claude -p --output-format json` returns a top-level ARRAY of events; the final
+    # subtype:"success" element carries total_cost_usd. Parsing the array is what keeps the budget
+    # ceiling alive on current builds (without it the cost read 0.0 and the stop never fired).
+    array = ('[{"type":"system","subtype":"init"},'
+             '{"type":"assistant"},'
+             '{"type":"result","subtype":"success","total_cost_usd":0.0839,"result":"done"}]')
+    cost, text = _parse_claude_json(array)
+    assert cost == 0.0839 and text == "done"
+
+
 def test_claude_code_adapter_requests_json_and_parses_cost():
     adapter = ClaudeCodeAdapter()
     assert "--output-format" in adapter._command("do it")  # json output is added automatically
     result = adapter._result(_proc('{"total_cost_usd": 0.25, "result": "done"}'))
     assert result.ok and result.cost_usd == 0.25 and result.raw_tail == "done"
+
+
+def test_claude_code_defaults_to_subscription_withholding_the_api_key():
+    # Default: the agent's env carries only the subscription token — an ambient ANTHROPIC_API_KEY is
+    # NOT handed to `claude`, so it can't silently bill the API instead of the subscription.
+    from loopkit import secrets
+    adapter = ClaudeCodeAdapter()
+    assert adapter.cred_keys == secrets.CLAUDE_CODE_SUBSCRIPTION_KEYS
+    base = {"PATH": "/bin", "ANTHROPIC_API_KEY": "sk-ant-x", "CLAUDE_CODE_OAUTH_TOKEN": "oauth-y"}
+    env = secrets.CredentialStore().child_env(base=base, add=adapter.cred_keys)
+    assert "ANTHROPIC_API_KEY" not in env                  # withheld → claude uses the subscription
+    assert env["CLAUDE_CODE_OAUTH_TOKEN"] == "oauth-y"     # subscription token passed through
+
+
+def test_claude_code_api_key_opt_in_injects_the_billed_key():
+    from loopkit import secrets
+    adapter = ClaudeCodeAdapter(use_api_key=True)
+    assert "ANTHROPIC_API_KEY" in adapter.cred_keys
+    base = {"PATH": "/bin", "ANTHROPIC_API_KEY": "sk-ant-x"}
+    env = secrets.CredentialStore().child_env(base=base, add=adapter.cred_keys)
+    assert env["ANTHROPIC_API_KEY"] == "sk-ant-x"          # opt-in → the billed API key is used
+
+
+def test_build_agent_threads_use_api_key():
+    sub = build_agent(AgentConfig(adapter="claude-code"))                       # default
+    api = build_agent(AgentConfig(adapter="claude-code", use_api_key=True))     # opt-in
+    assert "ANTHROPIC_API_KEY" not in sub.cred_keys
+    assert "ANTHROPIC_API_KEY" in api.cred_keys
+
+
+def test_doctor_claude_code_auth_note_surfaces_billing(monkeypatch):
+    # doctor must make the BILLING path visible before a run (this is the gap that caused a surprise
+    # API charge): subscription by default, the billed API key only on explicit opt-in.
+    from loopkit.cli import _claude_code_auth_note
+    sub = Config(goal="g", gate=GateConfig(iteration="true"),
+                 agent=AgentConfig(adapter="claude-code"))
+    api = Config(goal="g", gate=GateConfig(iteration="true"),
+                 agent=AgentConfig(adapter="claude-code", use_api_key=True))
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-x")
+    assert "subscription" in _claude_code_auth_note(sub) and "withheld" in _claude_code_auth_note(sub)
+    assert "billed API" in _claude_code_auth_note(api)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    assert "withheld" not in _claude_code_auth_note(sub)        # nothing to withhold
 
 
 def test_codex_usage_parse_and_cost():

@@ -50,6 +50,7 @@ def test_held_out_gate_runs_without_credentials(tmp_path, monkeypatch):
 
 def test_cli_adapter_gets_only_its_model_key_not_git_or_other_provider(tmp_path, monkeypatch):
     secrets.install(secrets.CredentialStore({"ANTHROPIC_API_KEY": "sk-ant-x",
+                                             "CLAUDE_CODE_OAUTH_TOKEN": "oauth-z",
                                              "GITHUB_TOKEN": "ghp_tok", "OPENAI_API_KEY": "sk-oa-y"}))
     captured = {}
 
@@ -58,12 +59,22 @@ def test_cli_adapter_gets_only_its_model_key_not_git_or_other_provider(tmp_path,
         return subprocess.CompletedProcess(cmd, 0, stdout="{}", stderr="")
 
     monkeypatch.setattr("loopkit.agent.subprocess.run", fake_run)
+
+    # Default: SUBSCRIPTION — the OAuth token is re-injected; an ambient ANTHROPIC_API_KEY is WITHHELD
+    # (no surprise API billing); and never the git token or another provider's key.
     ClaudeCodeAdapter().act("do it", tmp_path)
     env = captured["env"]
     assert env is not None
-    assert env.get("ANTHROPIC_API_KEY") == "sk-ant-x"          # its model key, re-injected
+    assert env.get("CLAUDE_CODE_OAUTH_TOKEN") == "oauth-z"     # subscription token re-injected
+    assert "ANTHROPIC_API_KEY" not in env                      # billed key withheld by default
     assert "GITHUB_TOKEN" not in env                           # no git token
     assert "OPENAI_API_KEY" not in env                         # no other provider's key
+
+    # Opt-in (run --api-key / [agent] use_api_key): the billed API key IS injected.
+    ClaudeCodeAdapter(use_api_key=True).act("do it", tmp_path)
+    env = captured["env"]
+    assert env.get("ANTHROPIC_API_KEY") == "sk-ant-x"          # billed key, on explicit opt-in
+    assert "GITHUB_TOKEN" not in env and "OPENAI_API_KEY" not in env
 
 
 # --------------------------------------------------------------------------------------------

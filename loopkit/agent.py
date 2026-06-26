@@ -121,16 +121,24 @@ class ClaudeCodeAdapter(_CLIAdapter):
     `total_cost_usd` (and `usage`) alongside the `result` text, so we get a real per-tick cost
     without scraping human prose. The `--output-format json` flag is added automatically unless the
     caller already pinned an output format in their own args.
+
+    Billing: by default the agent's scrubbed env carries only the **subscription** token (or nothing,
+    so `claude` uses its on-disk login) — `ANTHROPIC_API_KEY` is withheld so an ambient shell key can't
+    silently bill the API. `use_api_key=True` (run --api-key / `[agent] use_api_key`) re-injects the
+    full `ADAPTER_KEYS` set, so a present `ANTHROPIC_API_KEY` is used (the billed API).
     """
 
     binary = "claude"
-    cred_keys = secrets.ADAPTER_KEYS["claude-code"]
+    cred_keys = secrets.CLAUDE_CODE_SUBSCRIPTION_KEYS          # default: subscription only
 
-    def __init__(self, model: str | None = None, extra_args: list[str] | None = None) -> None:
+    def __init__(self, model: str | None = None, extra_args: list[str] | None = None,
+                 use_api_key: bool = False) -> None:
         args = list(extra_args or [])
         if "--output-format" not in args:
             args += ["--output-format", "json"]
         super().__init__(model=model, extra_args=args)
+        self.cred_keys = (secrets.ADAPTER_KEYS["claude-code"] if use_api_key
+                          else secrets.CLAUDE_CODE_SUBSCRIPTION_KEYS)
 
     def _result(self, proc: subprocess.CompletedProcess) -> AgentResult:
         out = (proc.stdout or "") + (proc.stderr or "")
@@ -161,21 +169,28 @@ class CodexAdapter(_CLIAdapter):
 def _parse_claude_json(stdout: str) -> tuple[float, str]:
     """Pull (cost_usd, result_text) out of `claude -p --output-format json` output.
 
-    Accepts either a single JSON object (the default) or stream-json (one object per line — we take
-    the last parseable line, which carries the final cost). Returns (0.0, "") if nothing parses."""
+    Handles the three shapes the CLI has shipped across versions: a single result object; a top-level
+    **JSON array** of events (current `--output-format json` — the final `subtype:"success"` element
+    carries the cost); and stream-json (one object per line). Without the array case the cost parsed
+    as 0.0 on current claude builds, which silently defeats the budget ceiling (Ch 14). Returns
+    (0.0, "") if nothing parses."""
     text = stdout.strip()
     if not text:
         return 0.0, ""
     data = _loads_lenient(text)
-    if not isinstance(data, dict):
+    if isinstance(data, list):
+        # Array of events (current CLI): the last element carrying a cost is the final result object.
+        data = next((o for o in reversed(data)
+                     if isinstance(o, dict) and ("total_cost_usd" in o or "cost_usd" in o)), None)
+    elif not isinstance(data, dict):
         # stream-json: one JSON object per line — take the last line that carries a cost.
         for line in reversed(text.splitlines()):
             obj = _loads_lenient(line.strip())
             if isinstance(obj, dict) and ("total_cost_usd" in obj or "cost_usd" in obj):
                 data = obj
                 break
-        if not isinstance(data, dict):
-            return 0.0, ""
+    if not isinstance(data, dict):
+        return 0.0, ""
     raw = data.get("total_cost_usd")
     cost = _as_float(raw if raw is not None else data.get("cost_usd"))
     return cost, str(data.get("result") or "")
@@ -543,7 +558,7 @@ def build_agent(cfg, *, executor: ToolExecutor | None = None) -> Agent:
     if name == "mock":
         return MockAgent()
     if name == "claude-code":
-        return ClaudeCodeAdapter(model=cfg.model, extra_args=cfg.args)
+        return ClaudeCodeAdapter(model=cfg.model, extra_args=cfg.args, use_api_key=cfg.use_api_key)
     if name == "codex":
         return CodexAdapter(model=cfg.model, extra_args=cfg.args)
     if name == "claude-api":

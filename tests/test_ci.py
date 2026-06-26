@@ -16,7 +16,12 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from loopkit.cli import _CI_GITHUB_TEMPLATE, _CI_GITLAB_TEMPLATE, app
+from loopkit.cli import (
+    _CI_GITHUB_CLAUDE_CODE_TEMPLATE,
+    _CI_GITHUB_TEMPLATE,
+    _CI_GITLAB_TEMPLATE,
+    app,
+)
 
 runner = CliRunner()
 _REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -230,3 +235,6 @@ def test_shipped_ci_examples_match_the_scaffold_constants():
     # Guard against drift: examples/ci/ is what `loopkit init --ci` writes, for repo browsers.
     assert (_REPO_ROOT / "examples/ci/github-actions.yml").read_text() == _CI_GITHUB_TEMPLATE
     assert (_REPO_ROOT / "examples/ci/gitlab-ci.yml").read_text() == _CI_GITLAB_TEMPLATE
+    # The Claude Code subscription variant (claude-code + CLAUDE_CODE_OAUTH_TOKEN, no API key).
+    assert (_REPO_ROOT / "examples/ci/github-actions-claude-code.yml").read_text() \
+        == _CI_GITHUB_CLAUDE_CODE_TEMPLATE

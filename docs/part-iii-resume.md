@@ -371,6 +371,37 @@ phase lands** (the documentation contract).
 
 ## Changelog
 
+- **2026-06-26 — claude-code billing safety: subscription by default + the budget stop un-blinded
+  (surfaced by a real, painful lab run).** Driving `loopkit run` with `claude-code` on a developer
+  laptop **silently billed the Anthropic API** (draining real credits, then erroring `rc=1`) instead
+  of the Claude Code subscription — and loopkit logged the run cost as **`$0`**, so the budget ceiling
+  never fired. Two distinct framework bugs, both fixed:
+  **(1) Cost parser (`agent._parse_claude_json`) returned `0.0` on the current CLI's top-level
+  JSON-array output** (it only handled a single object / line-delimited stream). With the array
+  unparsed the per-tick cost read `0.0` and the **budget stop (Ch 14) silently never triggered for any
+  claude-code run**. Fixed by scanning a top-level array for the final cost-bearing element (+test in
+  `test_adapters.py`).
+  **(2) `claude-code` now defaults to the SUBSCRIPTION.** The CLI adapter inherited an ambient
+  `ANTHROPIC_API_KEY` (first in `ADAPTER_KEYS`) and the `claude` CLI prefers a billed key over the
+  on-disk login → surprise API billing. Now `claude-code` injects only `CLAUDE_CODE_SUBSCRIPTION_KEYS`
+  (`CLAUDE_CODE_OAUTH_TOKEN`) by default and **withholds** an ambient API key (scrubbed from the agent
+  env, like every other provider's key), so a logged-in dev runs on the subscription. **Opt into the
+  billed key** with `run --api-key` / `[agent] use_api_key` (`AgentConfig.use_api_key`, default False =
+  near-prior behavior but safe). `ADAPTER_KEYS` (the projection/redaction set for cloud `creds.py`) is
+  unchanged; the cloud/trigger paths use `claude-api` (CLI refused), so they are untouched.
+  **(3) `loopkit doctor` now surfaces the billing path** for `claude-code` (`auth: subscription …`
+  vs `auth: ANTHROPIC_API_KEY → billed API`, with a withheld-key hint) so spend is visible *before* a
+  run — the gap that caused the incident.
+  **(4) A `claude-code` + `CLAUDE_CODE_OAUTH_TOKEN` CI template variant**
+  (`examples/ci/github-actions-claude-code.yml` + `_CI_GITHUB_CLAUDE_CODE_TEMPLATE`, drift-guarded) so
+  the forge tier can bill the subscription. **(5) A generic `examples/gates/` recipe** (annotated
+  starter `loopkit.toml` + a catalog) making the "a gate is *any* shell command; the config is fully
+  declarative" model explicit. Tests: **+5 new** in `test_adapters.py` (array cost-parse, subscription
+  default + api-key opt-in, build_agent threading, doctor billing note); updated `test_ci.py` drift
+  guard + `test_hygiene.py` credential assertion (**313 → 318 green**); additive, `None`/0-safe, no new
+  deps. Docs: [`03-adapters-and-auth.md`](architecture/03-adapters-and-auth.md) (subscription default +
+  doctor visibility + the array fix), [`CONTROL-FILES.md`](CONTROL-FILES.md) (`use_api_key`).
+
 - **2026-06-26 — bugfix: `loopkit measure` silently failed on a relative `repo` (found during a
   full step-by-step CLI walkthrough).** Every entry point that takes the config's `repo` resolves it
   via `Config.repo_path()` (`run`, `doctor`) — except `measure`, which passed the raw `cfg.repo` to

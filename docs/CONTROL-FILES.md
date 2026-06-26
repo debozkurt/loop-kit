@@ -26,8 +26,11 @@ repo   = "."                                            # which repo (or --repo)
 branch = "loopkit/run"                                  # the loop's own branch — never main
 
 [agent]
-adapter      = "claude-code"     # mock | claude-code | codex
+adapter      = "claude-code"     # mock | claude-code | codex | claude-api | openai-api
 max_cost_usd = 5.0               # budget ceiling (the loop halts here regardless of progress)
+use_api_key  = false             # claude-code: false = bill your SUBSCRIPTION (an ambient
+                                 # ANTHROPIC_API_KEY is withheld); true (or `run --api-key`) = bill the
+                                 # API key. `loopkit doctor` prints which path is active before a run.
 
 [prompt]
 anchors = ["PROMPT.md", "CLAUDE.md"]   # the files reloaded into a fresh context each tick

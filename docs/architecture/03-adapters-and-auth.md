@@ -70,9 +70,11 @@ no-sidecar CI/local tiers still use the memory-tmpfs load + shred. See
 
 - **Adapter → which key:**
   - Claude (`claude-code`/`claude-api`): **either** `ANTHROPIC_API_KEY` **or**
-    `CLAUDE_CODE_OAUTH_TOKEN` (subscription). Both are supported with no adapter change — the Claude
-    Code CLI honors either (API key wins if both are set, so the Secret carries exactly one). The
-    `claude-api` adapter uses the API key path.
+    `CLAUDE_CODE_OAUTH_TOKEN` (subscription). The `claude-code` CLI adapter **defaults to the
+    subscription** and *withholds* an ambient `ANTHROPIC_API_KEY` (so a shell key can't silently bill
+    the API at agent-credit rates) — opt into the billed key with `run --api-key` / `[agent]
+    use_api_key`. The `claude-api` adapter always uses the API-key path. (In the cloud the per-run
+    Secret carries exactly one key.)
   - OpenAI (`codex`/`openai-api`): `OPENAI_API_KEY` (+ `OPENAI_BASE_URL` for Azure/compatible).
   - Plus **git creds** for clone/push/PR (PAT/deploy-key now; GitHub App ⚪ later).
 - **Environment → segmentation:** `prod` and `dev` map to different namespaces, different Secrets,
@@ -133,12 +135,22 @@ fast. So the subscription gives **no cost advantage** at fleet scale and runs ou
 Both remain *configurable* per environment (the pluggable model above) — this is the recommended
 default, not a lock-in.
 
+**Local default is subscription, by construction.** Because the surprise is expensive (an ambient
+`ANTHROPIC_API_KEY` silently billing the API), `claude-code` injects only the **subscription** token by
+default and scrubs an ambient API key from the agent's env — so a developer who is "logged in to Claude
+Code" actually runs on the subscription. `run --api-key` (`[agent] use_api_key`) re-injects the billed
+key. **`loopkit doctor` surfaces the active path** (`auth: subscription …` vs `auth: ANTHROPIC_API_KEY →
+billed API`) so the billing is visible *before* a run, not discovered on the invoice.
+
 **Two independent budget backstops:**
 
 1. **loopkit's budget stop** (`stops.py`) — per-run, fed by the adapter's cost. This is where the
    **API adapters pay off**: native `usage` → accurate `cost_usd` → the budget stop bites mid-run.
-   (CLI adapters can parse `claude -p --output-format json`, which emits cost/usage; the API adapters
-   make it exact.) Real per-adapter cost parsing is now **built** — `pricing.py` holds the per-model
+   (CLI adapters parse `claude -p --output-format json`, which emits cost/usage; the API adapters
+   make it exact. The CLI parser handles the current **top-level JSON-array** output — a build that
+   returned the array would otherwise read cost `0.0` and the stop would never fire. Note: on a
+   **subscription** the dollar figure can read low/0, so also bound a subscription run with
+   `--max-iter`.) Real per-adapter cost parsing is now **built** — `pricing.py` holds the per-model
    price table (input/output/cache tiers), the API adapters sum native `usage` into an exact
    `cost_usd`, `claude-code` parses `total_cost_usd`, and `codex` derives cost from token usage; each
    span in a LangSmith trace carries the same number (see [`01`](01-system-today.md#observability--two-layers-logs--traces)).

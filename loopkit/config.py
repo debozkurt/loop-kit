@@ -22,6 +22,10 @@ class AgentConfig(BaseModel):
     max_cost_usd: float = Field(default=10.0, ge=0)
     max_tool_calls: int = Field(default=25, ge=1)   # per-tick tool-call cap for the API adapters
     args: list[str] = Field(default_factory=list)
+    # claude-code billing: False (default) = the subscription (on-disk `claude` login / OAuth token),
+    # with ANTHROPIC_API_KEY withheld so an ambient shell key can't silently bill the API. True (or
+    # `run --api-key`) opts into the billed ANTHROPIC_API_KEY. No effect on the API adapters (always API).
+    use_api_key: bool = False
 
 
 class PromptConfig(BaseModel):
