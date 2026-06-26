@@ -89,3 +89,35 @@ def test_safety_halt_on_protected_path(git_repo: Path):
     result = run_loop(cfg, MockAgent(behaviors=[touch_protected]),
                       iteration_gate=CallableGate(lambda ws: False))
     assert result.reason is StopReason.SAFETY
+
+
+# --- liveness heartbeat: a long, silent phase must not look hung -----------------------------------
+def test_heartbeat_pings_during_a_slow_phase():
+    import time
+
+    from loopkit.loop import _heartbeat
+
+    pings: list = []
+
+    class FakeLog:
+        def info(self, event, **kw):
+            pings.append((event, kw))
+
+    with _heartbeat(FakeLog(), "agent", interval=0.02):
+        time.sleep(0.09)                                  # ~4 intervals → at least one ping
+    progress = [kw for e, kw in pings if e == "tick.progress"]
+    assert progress and all(p["phase"] == "agent" and p["elapsedSec"] >= 0 for p in progress)
+
+
+def test_heartbeat_silent_for_a_fast_phase():
+    from loopkit.loop import _heartbeat
+
+    pings: list = []
+
+    class FakeLog:
+        def info(self, event, **kw):
+            pings.append((event, kw))
+
+    with _heartbeat(FakeLog(), "agent", interval=5.0):
+        pass                                              # returns immediately → no ping fires
+    assert pings == []

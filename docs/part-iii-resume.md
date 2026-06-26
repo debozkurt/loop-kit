@@ -371,6 +371,25 @@ phase lands** (the documentation contract).
 
 ## Changelog
 
+- **2026-06-26 — operator UX: run-liveness heartbeat + a docs/examples build-out (from the lab
+  session's rough edges).** **Code:** a **liveness heartbeat** in `run_loop` — the agent call and each
+  gate are captured subprocesses that can run for minutes with no output, so a healthy run looked hung.
+  A stdlib daemon-thread context manager (`loop._heartbeat`) now emits `tick.progress phase=…
+  elapsedSec=…` every 20 s during the agent / iteration / acceptance / regression phases; it fires only
+  *past* the interval, so fast mock/test ticks stay silent (zero log noise, no test churn). +2 tests
+  (`test_loop.py`). **Examples:** a second gate flavor — `examples/gates/docs-gate.sh` (a
+  structural/markdown gate for prose repos: markdownlint-or-pure-shell + relative-link resolution,
+  bash-3.2-safe) — so the two-oracle pattern is shown for **both** a code repo (the existing demo-repo
+  seen/holdout split) and a prose repo; and a worked **`examples/walkthrough/`** (copy-the-demo-repo →
+  `doctor` → token-free mock dry-run → real run → `DONE`, with the exact captured output + advanced
+  features to try). **Docs:** new operator quickstarts — **`OPERATING.md`** (silent-vs-hung,
+  never-edit-a-live-tree, resume, output-per-tier), **`BILLING.md`** (subscription default + `--api-key`
+  + doctor path + budget-blind-on-subscription → `--max-iter`), **`TROUBLESHOOTING.md`** (`cost $0.00`,
+  `rc=1`, `safety_halt`, dirty tree, flaky gate, `AF_UNIX too long`, `measure` clone) — and a
+  **`docs/README.md` index** grouping the cluttered `docs/` (operator guides · architecture · phase
+  records) **non-destructively** (no files moved — the `part-iii-*` cross-links are load-bearing) + a
+  README "Documentation" section. **318 → 320 tests.** Additive, `None`/0-safe, no new deps.
+
 - **2026-06-26 — claude-code billing safety: subscription by default + the budget stop un-blinded
   (surfaced by a real, painful lab run).** Driving `loopkit run` with `claude-code` on a developer
   laptop **silently billed the Anthropic API** (draining real credits, then erroring `rc=1`) instead

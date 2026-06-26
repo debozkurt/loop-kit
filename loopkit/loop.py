@@ -16,6 +16,9 @@ adapter's `llm`/`tool` spans nest under the `agent` span automatically via LangS
 """
 from __future__ import annotations
 
+import threading
+import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -32,6 +35,34 @@ if TYPE_CHECKING:
     from .executor import ToolExecutor
     from .extensions.review import ReviewHook
     from .extensions.skills import SkillRegistry
+
+
+_HEARTBEAT_INTERVAL = 20.0          # seconds between liveness pings during a long, silent phase
+
+
+@contextmanager
+def _heartbeat(log, phase: str, interval: float = _HEARTBEAT_INTERVAL):
+    """Emit a periodic liveness log while a blocking phase runs.
+
+    The agent call and the gates are captured subprocesses that can run for *minutes* with no output —
+    so a perfectly healthy run looks hung from the terminal. This pings `tick.progress phase=…
+    elapsedSec=…` every `interval` seconds until the phase returns. It fires only *past* the interval,
+    so fast ticks (mock/tests, sub-second) stay completely silent — no log noise. stdlib-only; the
+    worker is a daemon thread joined on exit, so it never outlives the run."""
+    stop = threading.Event()
+
+    def beat() -> None:
+        start = time.monotonic()
+        while not stop.wait(interval):
+            log.info("tick.progress", phase=phase, elapsedSec=round(time.monotonic() - start))
+
+    worker = threading.Thread(target=beat, daemon=True)
+    worker.start()
+    try:
+        yield
+    finally:
+        stop.set()
+        worker.join(timeout=1.0)
 
 
 @dataclass
@@ -128,7 +159,8 @@ def run_loop(config, agent: Agent, *, iteration_gate: Gate | None = None,
                 with trace.span("agent", run_type="chain", inputs={"prompt": prompt},
                                 metadata={"adapter": config.agent.adapter,
                                           "model": config.agent.model}) as agent_span:
-                    result = _DryResult() if dry_run else agent.act(prompt, repo)
+                    with _heartbeat(tick, "agent"):       # liveness pings during the silent agent call
+                        result = _DryResult() if dry_run else agent.act(prompt, repo)
                     agent_span.outputs(ok=result.ok, summary=result.summary,
                                        tail=result.raw_tail or None)
                     agent_span.metadata(cost_usd=round(result.cost_usd, 6))
@@ -175,13 +207,15 @@ def run_loop(config, agent: Agent, *, iteration_gate: Gate | None = None,
                 if review_ok:
                     with trace.span("iteration gate", run_type="tool",
                                     inputs={"command": config.gate.iteration}) as gate_span:
-                        gate = iteration_gate.check(repo)
+                        with _heartbeat(tick, "iteration_gate"):
+                            gate = iteration_gate.check(repo)
                         gate_span.outputs(passed=gate.passed, feedback=gate.feedback or None)
                     tick.info("gate.iteration", passed=gate.passed)
                     if gate.passed:
                         with trace.span("acceptance gate", run_type="tool",
                                         inputs={"command": config.gate.acceptance}) as acc_span:
-                            acc = acceptance_gate.check(repo)
+                            with _heartbeat(tick, "acceptance_gate"):
+                                acc = acceptance_gate.check(repo)
                             acc_span.outputs(passed=acc.passed, feedback=acc.feedback or None)
                         tick.info("gate.acceptance", passed=acc.passed)
                         if acc.passed:
@@ -189,7 +223,8 @@ def run_loop(config, agent: Agent, *, iteration_gate: Gate | None = None,
                             # preserved. AlwaysPass when no regression gate is configured (prior behavior).
                             with trace.span("regression gate", run_type="tool",
                                             inputs={"command": config.gate.regression}) as reg_span:
-                                reg = regression_gate.check(repo)
+                                with _heartbeat(tick, "regression_gate"):
+                                    reg = regression_gate.check(repo)
                                 reg_span.outputs(passed=reg.passed, feedback=reg.feedback or None)
                             tick.info("gate.regression", passed=reg.passed)
                             if reg.passed:

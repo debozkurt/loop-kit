@@ -49,29 +49,46 @@ acceptance = "python -m pytest tests/holdout -q"
 
 ## A ready-to-copy two-oracle kit
 
-Three runnable starters in this folder — copy them into a `gate/` dir, edit, and point your config at
-them. Together they are the two-oracle pattern (Ch 9) in the smallest possible form:
+Runnable starters in this folder — copy them into a `gate/` dir, edit, and point your config at them:
 
-| File | Role | Wire it as |
+| File | Role | Typical wiring |
 |---|---|---|
-| [`mechanical.sh`](mechanical.sh) | deterministic **verification** — replace the skeleton checks with your tests / lint / build / structural asserts | `gate.iteration` |
+| [`mechanical.sh`](mechanical.sh) | deterministic **verification** skeleton — drop in your tests / lint / build / structural asserts | `gate.iteration` (code) |
+| [`docs-gate.sh`](docs-gate.sh) | deterministic **structural** check for a **prose/docs** repo — markdownlint (or a pure-shell fallback) + relative-link resolution | `gate.iteration` (prose) |
 | [`review.sh`](review.sh) | **peer LLM review** — a second model scores the change's *diff* against a rubric it can't edit; `VERDICT: ACCEPT` → exit 0 | `gate.acceptance` |
 | [`rubric.md`](rubric.md) | the grading criteria `review.sh` applies — make it task-specific | (read by `review.sh`) |
 
+### The same pattern in two flavors
+
+**Code repo — the test gate (a held-out test split).** The canonical two-oracle: the *iteration* gate
+runs the visible tests; the *acceptance* gate runs a **held-out** split the agent can't see (SWE-bench's
+FAIL_TO_PASS + PASS_TO_PASS). The runnable example is [`../demo-repo/`](../demo-repo/) — `tests/seen/`
+vs `tests/holdout/`:
+
 ```toml
 [gate]
-iteration  = "bash gate/mechanical.sh"     # every tick — fast, deterministic
-acceptance = "bash gate/review.sh"          # once before DONE — held-out peer review
-
+iteration  = "python -m pytest tests/seen -q"      # visible — optimized every tick
+acceptance = "python -m pytest tests/holdout -q"   # held-out — certifies DONE (catches overfit)
 [safety]
-protected_paths = ["gate/"]                # so a run can't weaken review.sh OR rubric.md
+protected_paths = ["tests/"]                       # the agent may not edit either split
+```
+
+**Prose / docs repo — structural + peer review.** When the artifact is Markdown, structure is the
+deterministic check and substance is the held-out one:
+
+```toml
+[gate]
+iteration  = "bash gate/docs-gate.sh"     # structure + links — deterministic, every tick
+acceptance = "bash gate/review.sh"          # peer LLM review of substance — held-out, once
+[safety]
+protected_paths = ["gate/"]                # so a run can't weaken docs-gate.sh, review.sh, OR rubric.md
 ```
 
 `review.sh` is the *generic* shape of the held-out reviewer: it diffs the run's change against the base
-branch and asks a fresh `claude` to judge it by the rubric — the same "a second model you don't control
-certifies the work" idea, with nothing task-specific baked in. (Note: in a keyless CI/cloud context the
-gate's `claude` call may not have a credential — there the **draft PR + a human reviewer** is the clean
-held-out oracle; see [`../ci/`](../ci/).)
+branch and asks a fresh `claude` to judge it by the rubric — "a second model you don't control certifies
+the work," nothing task-specific baked in. (Note: in a **keyless CI/cloud** context the gate's `claude`
+call may have no credential — there the **draft PR + a human reviewer** is the clean held-out oracle;
+see [`../ci/`](../ci/).)
 
 ## …and the config is the whole loop, declaratively
 

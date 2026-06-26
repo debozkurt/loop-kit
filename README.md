@@ -382,6 +382,19 @@ The fleet runs on a **dedicated, isolated** local kind cluster; the Makefile exp
 Full cluster walkthrough: [`docs/tilt-fleet-plan.md`](docs/tilt-fleet-plan.md). Using it on your own
 repo: [`docs/USING-ON-YOUR-REPO.md`](docs/USING-ON-YOUR-REPO.md).
 
+## Documentation
+
+Index: [`docs/README.md`](docs/README.md). Operator quickstarts:
+
+- **[Walkthrough](examples/walkthrough/)** — copy-this-run-it-see-`DONE` on the bundled demo repo.
+- **[Billing & credentials](docs/BILLING.md)** — `claude-code` runs on your **subscription** by default;
+  `--api-key` opts into billing; `doctor` shows which pays; bound subscription runs with `--max-iter`.
+- **[Operating a run](docs/OPERATING.md)** — tell a *silent* run from a hung one, never edit a live
+  tree, how to resume, where output goes per tier.
+- **[Troubleshooting](docs/TROUBLESHOOTING.md)** — `cost: $0.00`, `rc=1`, `safety_halt`, flaky gate, …
+- **[Gates](examples/gates/)** — a gate is *any shell command*; ready-to-copy two-oracle kits
+  (test split · docs/structural · peer-LLM-review).
+
 ## Develop
 
 ```bash
