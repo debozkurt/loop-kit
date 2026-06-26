@@ -7,6 +7,27 @@ sandbox — so loopkit is just the loop. This is the middle of loopkit's three d
 (*local* · **CI** · *cloud fleet*); the full rationale is in
 [`docs/part-iii-ci-mode.md`](../../docs/part-iii-ci-mode.md).
 
+## How it fits the loopkit flow
+
+A labelled issue is the trigger; the CI runner is the sandbox; the **loop body is identical** to a
+local or cloud run (agent → gates → commit). On `DONE` the loop pushes a branch and opens a draft PR
+that closes the issue — and the **human reviewing that PR is the held-out second oracle** (the
+keyless-CI-friendly stand-in for an in-loop LLM-review gate, Ch 9).
+
+```mermaid
+%%{init: {'theme':'base', 'themeVariables': {'background':'#0d1117','primaryColor':'#21262d','primaryTextColor':'#e6edf3','primaryBorderColor':'#8b949e','lineColor':'#8b949e','fontSize':'13px'}}}%%
+flowchart LR
+  I["issue labelled<br/>loopkit"] -->|trigger| R["CI runner<br/>(the sandbox)"]
+  R --> K["loopkit run<br/>--from-issue --open-pr"]
+  K --> L["the loop body<br/>agent → gates → commit"]
+  L -->|DONE| P["push branch +<br/>draft PR · Closes #N"]
+  P --> H["human review<br/>(held-out 2nd oracle)"]
+  H -->|approve| M["merge"]
+```
+
+*Same loop body in every tier — only the **trigger**, the **secret delivery**, and the **sandbox**
+come from the forge instead of your laptop (local) or Kubernetes (cloud).*
+
 | File | Forge | Adapter / billing | Drop it at |
 |---|---|---|---|
 | [`github-actions.yml`](github-actions.yml) | GitHub Actions | `claude-api` · `ANTHROPIC_API_KEY` | `.github/workflows/loopkit.yml` |

@@ -47,6 +47,32 @@ acceptance = "python -m pytest tests/holdout -q"
 > every stop decision. Keep LLM-judged / nondeterministic checks as the **acceptance** oracle (run
 > once), and probe stability before trusting a gate: `loopkit run --check-gate 5`.
 
+## A ready-to-copy two-oracle kit
+
+Three runnable starters in this folder — copy them into a `gate/` dir, edit, and point your config at
+them. Together they are the two-oracle pattern (Ch 9) in the smallest possible form:
+
+| File | Role | Wire it as |
+|---|---|---|
+| [`mechanical.sh`](mechanical.sh) | deterministic **verification** — replace the skeleton checks with your tests / lint / build / structural asserts | `gate.iteration` |
+| [`review.sh`](review.sh) | **peer LLM review** — a second model scores the change's *diff* against a rubric it can't edit; `VERDICT: ACCEPT` → exit 0 | `gate.acceptance` |
+| [`rubric.md`](rubric.md) | the grading criteria `review.sh` applies — make it task-specific | (read by `review.sh`) |
+
+```toml
+[gate]
+iteration  = "bash gate/mechanical.sh"     # every tick — fast, deterministic
+acceptance = "bash gate/review.sh"          # once before DONE — held-out peer review
+
+[safety]
+protected_paths = ["gate/"]                # so a run can't weaken review.sh OR rubric.md
+```
+
+`review.sh` is the *generic* shape of the held-out reviewer: it diffs the run's change against the base
+branch and asks a fresh `claude` to judge it by the rubric — the same "a second model you don't control
+certifies the work" idea, with nothing task-specific baked in. (Note: in a keyless CI/cloud context the
+gate's `claude` call may not have a credential — there the **draft PR + a human reviewer** is the clean
+held-out oracle; see [`../ci/`](../ci/).)
+
 ## …and the config is the whole loop, declaratively
 
 Every other knob is in the same file — the goal, the fixed-context anchors, the budget + adapter,
