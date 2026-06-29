@@ -20,6 +20,7 @@ loopkit:
     - GLAB_VERSION=1.105.0
     - curl -fsSL "https://gitlab.com/gitlab-org/cli/-/releases/v${GLAB_VERSION}/downloads/glab_${GLAB_VERSION}_linux_amd64.deb" -o /tmp/glab.deb
     - dpkg -i /tmp/glab.deb
+    # loopkit isn't on PyPI yet — private repo? swap this for the README "Installing loopkit" line
     - pip install loopkit                                        # claude-code: no provider SDK
     - git config --system user.name  'loopkit-bot'
     - git config --system user.email 'loopkit-bot@users.noreply.gitlab.com'

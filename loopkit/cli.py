@@ -122,6 +122,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.13'
+      # loopkit isn't on PyPI yet — private repo? swap this for the README "Installing loopkit" line
       - run: pip install 'loopkit[claude]'                 # claude-api adapter → the anthropic SDK
       - name: loopkit run (issue event)
         if: github.event_name == 'issues'
@@ -176,6 +177,7 @@ jobs:
         with:
           python-version: '3.13'
       - run: npm install -g @anthropic-ai/claude-code      # the agent binary (claude-code adapter)
+      # loopkit isn't on PyPI yet — private repo? swap this for the README "Installing loopkit" line
       - run: pip install loopkit                           # claude-code is a CLI adapter — no provider SDK
       - name: loopkit run (issue event)
         if: github.event_name == 'issues'
@@ -214,6 +216,7 @@ loopkit:
     - GLAB_VERSION=1.105.0                                     # glab: issue fetch + MR
     - curl -fsSL "https://gitlab.com/gitlab-org/cli/-/releases/v${GLAB_VERSION}/downloads/glab_${GLAB_VERSION}_linux_amd64.deb" -o /tmp/glab.deb
     - dpkg -i /tmp/glab.deb
+    # loopkit isn't on PyPI yet — private repo? swap this for the README "Installing loopkit" line
     - pip install 'loopkit[claude]'                           # claude-api: anthropic SDK
     - git config --system user.name  'loopkit-bot'            # loopkit commits each tick -> needs identity
     - git config --system user.email 'loopkit-bot@users.noreply.gitlab.com'
@@ -249,6 +252,7 @@ loopkit:
     - GLAB_VERSION=1.105.0
     - curl -fsSL "https://gitlab.com/gitlab-org/cli/-/releases/v${GLAB_VERSION}/downloads/glab_${GLAB_VERSION}_linux_amd64.deb" -o /tmp/glab.deb
     - dpkg -i /tmp/glab.deb
+    # loopkit isn't on PyPI yet — private repo? swap this for the README "Installing loopkit" line
     - pip install loopkit                                        # claude-code: no provider SDK
     - git config --system user.name  'loopkit-bot'
     - git config --system user.email 'loopkit-bot@users.noreply.gitlab.com'

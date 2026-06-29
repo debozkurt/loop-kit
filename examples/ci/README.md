@@ -62,6 +62,23 @@ loopkit init --ci github     # or: --ci gitlab
 These files are byte-identical to what `loopkit init --ci <forge>` writes (a test enforces it) —
 they live here so you can read them without running the CLI.
 
+## Installing loopkit on the runner
+
+loopkit isn't on PyPI yet — install it from the `loop-kit` git repo. Swap the template's `pip install`
+line for whichever applies (token injected so it never lands in argv/logs):
+
+- **Private `loop-kit` on GitHub** — add CI/CD var **`LOOPKIT_GH_PAT`** (fine-grained PAT, Contents:
+  read on the repo), then:
+  ```
+  pip install "loopkit[claude] @ git+https://x-access-token:${LOOPKIT_GH_PAT}@github.com/<owner>/loop-kit.git@main"
+  ```
+  (claude-code adapter: drop `[claude]` — no provider SDK needed.)
+- **`loop-kit` mirrored to the same GitLab instance** — use the built-in job token, **no extra var**:
+  ```
+  pip install "loopkit @ git+https://gitlab-ci-token:${CI_JOB_TOKEN}@${CI_SERVER_HOST}/<group>/loop-kit.git@main"
+  ```
+- **Published** (PyPI or your package index) — plain `pip install 'loopkit[claude]'`, as the templates show.
+
 ## What you supply
 
 1. **A `loopkit.toml`** in the repo (gates, branch, safety envelope). `loopkit init` scaffolds one;

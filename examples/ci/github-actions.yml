@@ -28,6 +28,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.13'
+      # loopkit isn't on PyPI yet — private repo? swap this for the README "Installing loopkit" line
       - run: pip install 'loopkit[claude]'                 # claude-api adapter → the anthropic SDK
       - name: loopkit run (issue event)
         if: github.event_name == 'issues'

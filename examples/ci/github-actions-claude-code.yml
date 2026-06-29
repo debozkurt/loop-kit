@@ -33,6 +33,7 @@ jobs:
         with:
           python-version: '3.13'
       - run: npm install -g @anthropic-ai/claude-code      # the agent binary (claude-code adapter)
+      # loopkit isn't on PyPI yet — private repo? swap this for the README "Installing loopkit" line
       - run: pip install loopkit                           # claude-code is a CLI adapter — no provider SDK
       - name: loopkit run (issue event)
         if: github.event_name == 'issues'
