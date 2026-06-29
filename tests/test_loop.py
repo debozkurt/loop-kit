@@ -8,10 +8,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from loopkit import durability
 from loopkit.agent import MockAgent
 from loopkit.config import AgentConfig, Config, GateConfig, StopsConfig
 from loopkit.gate import CallableGate
-from loopkit.loop import run_loop
+from loopkit.loop import _make_run_id, run_loop
 from loopkit.stops import StopReason
 
 
@@ -27,6 +28,16 @@ def _writes(name: str, content: str = "ok"):
         (workspace / name).write_text(content)
         return f"wrote {name}"
     return behavior
+
+
+def test_run_id_unique_per_run_off_the_same_base(git_repo: Path):
+    # Two runs starting from the SAME commit (concurrent CI on the same main) must not share a
+    # correlation id — that would intermix their lines in an aggregated log/trace sink. They DO share
+    # the state-signature prefix (so logs still group by starting state at a glance).
+    sig = durability.state_signature(git_repo)[:8]
+    a, b = _make_run_id(git_repo), _make_run_id(git_repo)
+    assert a != b                                          # unique per run despite identical base
+    assert a.startswith(f"{sig}-") and b.startswith(f"{sig}-")   # shared, greppable state prefix
 
 
 def test_done_when_acceptance_passes(git_repo: Path):

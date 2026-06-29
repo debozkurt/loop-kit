@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import threading
 import time
+import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -91,6 +92,19 @@ def _finish(run_span, result: RunResult) -> RunResult:
     return result
 
 
+def _make_run_id(repo) -> str:
+    """A per-run correlation id: the starting state signature + a uuid suffix.
+
+    The state-signature prefix groups a run by the base tree it started from (handy when scanning
+    logs). The `uuid4` suffix makes the id UNIQUE per run — two concurrent runs off the *same* base
+    commit would otherwise compute the same signature and share an id, intermixing their lines in any
+    aggregated log/trace sink (cloud/fleet tier, one LangSmith project) and defeating the whole point
+    of a correlation id. `state_signature` itself stays the no-progress oracle elsewhere; this only
+    fixes the id used for correlation.
+    """
+    return f"{durability.state_signature(repo)[:8]}-{uuid.uuid4().hex[:4]}"
+
+
 def run_loop(config, agent: Agent, *, iteration_gate: Gate | None = None,
              acceptance_gate: Gate | None = None, regression_gate: Gate | None = None,
              review_hook: "ReviewHook | None" = None,
@@ -109,7 +123,7 @@ def run_loop(config, agent: Agent, *, iteration_gate: Gate | None = None,
     dispatched. An explicitly-passed gate keeps its own executor (the caller's choice).
     """
     repo = config.repo_path()
-    run_id = durability.state_signature(repo)[:8]
+    run_id = _make_run_id(repo)             # unique per run (see _make_run_id) — not just the state sig
     log = get_logger("loop", run_id)
 
     iteration_gate = iteration_gate or ShellGate(config.gate.iteration, executor=executor)
