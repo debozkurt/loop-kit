@@ -193,56 +193,75 @@ jobs:
 """
 
 _CI_GITLAB_TEMPLATE = """\
-# loopkit CI tier (GitLab) — run the loop on one issue, open a draft MR. No cluster required.
-# GitLab has no native issue->pipeline trigger, so this fires on: a manual "Run pipeline" with an
-# ISSUE_IID variable, a webhook -> trigger token, or a pipeline schedule. Add ANTHROPIC_API_KEY and a
-# GITLAB_TOKEN (PAT, api scope) as masked CI/CD variables, and keep a loopkit.toml in the repo.
+# loopkit CI (GitLab) — one issue -> one draft MR, no cluster.
+# Trigger: "Run pipeline" / webhook trigger / schedule, with an ISSUE_IID variable.
+# Vars (masked, Protected=OFF unless your branch is protected):
+#   ANTHROPIC_API_KEY  — pays the agent (claude-api).
+#   GITLAB_TOKEN       — PAT, scopes `api` + `write_repository`, owner with >= Developer role HERE.
+#                        Scope AND role are both required, or the push 403s "not allowed to upload code".
+#                        Authorizes glab (issue fetch + MR) + the git push; CI_JOB_TOKEN can do neither.
+#                        To not clobber a shared GITLAB_TOKEN, set LOOPKIT_GITLAB_PAT (remapped below).
+# Runner: docker-executor. A low-pids k8s runner breaks curl DNS ("getaddrinfo() thread failed to start").
+# Repo: a loopkit.toml with [remote] pr_base = your default branch.
 loopkit:
-  image: python:3.13                  # non-slim → ships git + curl (slim ships neither)
+  image: python:3.13                  # non-slim: has git + curl
+  variables: { GIT_STRATEGY: clone }  # fresh clone each run
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "web" && $ISSUE_IID'
+    - if: '$CI_PIPELINE_SOURCE == "trigger" && $ISSUE_IID'
+    - if: '$CI_PIPELINE_SOURCE == "schedule" && $ISSUE_IID'
   before_script:
-    # loopkit shells to `glab` (issue fetch + MR) and `git` (commit/push). git is in the image;
-    # add glab (GitLab CLI) — bump GLAB_VERSION as needed.
-    - GLAB_VERSION=1.105.0
+    - GLAB_VERSION=1.105.0                                     # glab: issue fetch + MR
     - curl -fsSL "https://gitlab.com/gitlab-org/cli/-/releases/v${GLAB_VERSION}/downloads/glab_${GLAB_VERSION}_linux_amd64.deb" -o /tmp/glab.deb
     - dpkg -i /tmp/glab.deb
-  rules:
-    - if: '$CI_PIPELINE_SOURCE == "web" && $ISSUE_IID'         # manual run, pass ISSUE_IID
-    - if: '$CI_PIPELINE_SOURCE == "trigger" && $ISSUE_IID'     # webhook -> trigger token
-    - if: '$CI_PIPELINE_SOURCE == "schedule" && $ISSUE_IID'    # scheduled run of one issue
+    - pip install 'loopkit[claude]'                           # claude-api: anthropic SDK
+    - git config --system user.name  'loopkit-bot'            # loopkit commits each tick -> needs identity
+    - git config --system user.email 'loopkit-bot@users.noreply.gitlab.com'
+    - git remote set-url origin "${CI_SERVER_URL}/${CI_PROJECT_PATH}.git"   # drop CI_JOB_TOKEN from origin
+    - for k in $(git config --local --name-only --get-regexp 'extraheader' || true); do git config --local --unset-all "$k" || true; done  # + its auth header -> push uses GITLAB_TOKEN
+    - git fetch --depth 50 origin "$CI_DEFAULT_BRANCH"        # materialize base ref so the pre-push
+    - git branch -f "$CI_DEFAULT_BRANCH" FETCH_HEAD || true   #   secret-scan diffs it (else scans history)
   script:
-    - pip install 'loopkit[claude]'                     # claude-api adapter → the anthropic SDK
+    - '[ -n "${LOOPKIT_GITLAB_PAT:-}" ] && export GITLAB_TOKEN="$LOOPKIT_GITLAB_PAT" || true'
     - loopkit run --from-issue "$ISSUE_IID" --branch "loopkit/issue-$ISSUE_IID" --provider gitlab --adapter claude-api --open-pr
-  # GITLAB_TOKEN authenticates glab (issue fetch + MR) and the git push; ANTHROPIC_API_KEY pays.
-  # (GitLab's CI_JOB_TOKEN can't open MRs — the api-scoped PAT authorizes it: GitLab's parallel to
-  #  GitHub's "allow Actions to create PRs" toggle. No project setting to flip; just supply the PAT.)
 """
 
 _CI_GITLAB_CLAUDE_CODE_TEMPLATE = """\
-# loopkit CI tier (GitLab, Claude Code subscription) — run the loop on one issue → a draft MR.
-# Bills your Claude Code SUBSCRIPTION via an OAuth token, not a metered API key. GitLab has no native
-# issue->pipeline trigger, so this fires on: a manual "Run pipeline" with an ISSUE_IID variable, a
-# webhook -> trigger token, or a pipeline schedule.
-# Masked CI/CD variables: CLAUDE_CODE_OAUTH_TOKEN (from `claude setup-token`; do NOT set
-# ANTHROPIC_API_KEY) and GITLAB_TOKEN (PAT, api scope). Keep a loopkit.toml in the repo.
+# loopkit CI (GitLab, Claude Code subscription) — one issue -> one draft MR, no cluster. Bills your sub.
+# Trigger: "Run pipeline" / webhook trigger / schedule, with an ISSUE_IID variable.
+# Vars (masked, Protected=OFF unless your branch is protected):
+#   CLAUDE_CODE_OAUTH_TOKEN — `claude setup-token`. Do NOT also set ANTHROPIC_API_KEY.
+#   GITLAB_TOKEN            — PAT, scopes `api` + `write_repository`, owner with >= Developer role HERE
+#                             (scope AND role, or push 403s). Or set LOOPKIT_GITLAB_PAT (remapped below).
+# Runner: docker-executor. A low-pids k8s runner breaks curl DNS ("getaddrinfo() thread failed to start").
+# Repo: loopkit.toml with adapter=claude-code, args=["--dangerously-skip-permissions"], [remote] pr_base=default branch.
 loopkit:
-  image: python:3.13                  # ships git + curl; we add node (claude CLI) + glab below
+  image: python:3.13
+  variables: { GIT_STRATEGY: clone }
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "web" && $ISSUE_IID'
+    - if: '$CI_PIPELINE_SOURCE == "trigger" && $ISSUE_IID'
+    - if: '$CI_PIPELINE_SOURCE == "schedule" && $ISSUE_IID'
   before_script:
-    # claude-code shells to the `claude` CLI (node); loopkit to `glab` (issue fetch + MR) + `git`.
-    - curl -fsSL https://deb.nodesource.com/setup_20.x | bash -    # node 20 (claude CLI needs >= 18)
+    - curl -fsSL https://deb.nodesource.com/setup_20.x | bash -   # node 20 (claude CLI needs >= 18)
     - apt-get install -y nodejs
-    - npm install -g @anthropic-ai/claude-code
+    - npm install -g @anthropic-ai/claude-code                    # the agent binary
     - GLAB_VERSION=1.105.0
     - curl -fsSL "https://gitlab.com/gitlab-org/cli/-/releases/v${GLAB_VERSION}/downloads/glab_${GLAB_VERSION}_linux_amd64.deb" -o /tmp/glab.deb
     - dpkg -i /tmp/glab.deb
-  rules:
-    - if: '$CI_PIPELINE_SOURCE == "web" && $ISSUE_IID'         # manual run, pass ISSUE_IID
-    - if: '$CI_PIPELINE_SOURCE == "trigger" && $ISSUE_IID'     # webhook -> trigger token
-    - if: '$CI_PIPELINE_SOURCE == "schedule" && $ISSUE_IID'    # scheduled run of one issue
+    - pip install loopkit                                        # claude-code: no provider SDK
+    - git config --system user.name  'loopkit-bot'
+    - git config --system user.email 'loopkit-bot@users.noreply.gitlab.com'
+    - git remote set-url origin "${CI_SERVER_URL}/${CI_PROJECT_PATH}.git"   # drop CI_JOB_TOKEN from origin
+    - for k in $(git config --local --name-only --get-regexp 'extraheader' || true); do git config --local --unset-all "$k" || true; done  # + its auth header -> push uses GITLAB_TOKEN
+    - git fetch --depth 50 origin "$CI_DEFAULT_BRANCH"          # materialize base ref for the pre-push
+    - git branch -f "$CI_DEFAULT_BRANCH" FETCH_HEAD || true     #   secret-scan (else it scans history)
+    # claude CLI refuses --dangerously-skip-permissions as ROOT -> run the loop as a non-root user
+    - git config --system --add safe.directory "$CI_PROJECT_DIR"
+    - useradd -m -u 1001 lk && chown -R lk:lk "$CI_PROJECT_DIR"
   script:
-    - pip install loopkit                                      # claude-code is a CLI adapter — no provider SDK
-    - loopkit run --from-issue "$ISSUE_IID" --branch "loopkit/issue-$ISSUE_IID" --provider gitlab --adapter claude-code --open-pr
-  # CLAUDE_CODE_OAUTH_TOKEN bills the subscription (no ANTHROPIC_API_KEY); GITLAB_TOKEN (api scope)
-  # authenticates glab (issue fetch + MR) + the git push — GitLab's CI_JOB_TOKEN can't open MRs.
+    - '[ -n "${LOOPKIT_GITLAB_PAT:-}" ] && export GITLAB_TOKEN="$LOOPKIT_GITLAB_PAT" || true'
+    - su lk -c 'cd "$CI_PROJECT_DIR" && loopkit run --from-issue "$ISSUE_IID" --branch "loopkit/issue-$ISSUE_IID" --provider gitlab --adapter claude-code --open-pr'
 """
 
 _CI_TEMPLATES = {"github": (".github/workflows/loopkit.yml", _CI_GITHUB_TEMPLATE),

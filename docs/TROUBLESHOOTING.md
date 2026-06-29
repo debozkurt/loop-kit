@@ -37,6 +37,24 @@ hide a failed PR step. Almost always the PR-permission policy above (look for `p
 **Confirm the deliverable with `gh pr list`, not the job's green check** — the ephemeral runner is gone,
 so the only evidence a run produced anything is what left it: a pushed branch + an opened PR.
 
+## GitLab CI — runner & push gotchas (issue→MR worker)
+
+The shipped GitLab templates (`examples/ci/gitlab-ci*.yml`) handle all of these; this is the *why*,
+for when you hand-roll a `.gitlab-ci.yml` — or hit one anyway. Each was found on a live run.
+
+| Symptom (job log) | Cause | Fix |
+|---|---|---|
+| `getaddrinfo() thread failed to start` (curl/apt/pip) | constrained **k8s-executor** runner — low pids/threads limit kills curl's DNS resolver thread | run on a **docker-executor** runner (`tags:`), or raise the runner's pids limit |
+| `--dangerously-skip-permissions cannot be used with root` | the `claude` CLI (claude-code) refuses root; the job image is root | run the loop as a **non-root user** (`useradd lk` + `su lk -c 'loopkit run …'`). claude-api is unaffected |
+| `tick.commit committed=False` (silent, no push) | no **git identity** → every commit fails | `git config --system user.name/user.email` in `before_script` |
+| `push.refused reason=secret_scan hits=…` on a clean change | base ref didn't resolve → loopkit's pre-push scan fell back to scanning **repo history** (real old secrets) | materialize the base locally: `git fetch origin $CI_DEFAULT_BRANCH && git branch -f $CI_DEFAULT_BRANCH FETCH_HEAD`; set `[remote] pr_base` to it |
+| `fatal: detected dubious ownership` | reused runner build-dir we chowned to the non-root user | `GIT_STRATEGY: clone` + `git config --system --add safe.directory $CI_PROJECT_DIR` |
+| `push.failed … 403 not allowed to upload code` (token present) | GitLab's `CI_JOB_TOKEN` (embedded in origin + an `http.*.extraheader`) overrides your PAT | reset origin to a clean URL **and** unset every `extraheader`, so loopkit's `GITLAB_TOKEN` helper is used |
+| same `403`, PAT confirmed used | PAT has `write_repository` **scope** but its owner lacks **Developer+ role** here | scope = *may push*; role = *may push here* — you need **both** |
+
+> **Don't clobber a shared `GITLAB_TOKEN`.** If the project already uses `GITLAB_TOKEN` for other CI,
+> set a dedicated `LOOPKIT_GITLAB_PAT` and remap it in-job: `export GITLAB_TOKEN="$LOOPKIT_GITLAB_PAT"`.
+
 ## `agent.done ok=False rc=1` (the agent failed a tick)
 
 The agent's CLI (`claude`/`codex`) exited non-zero. The loop continues — a bad tick feeds back and the

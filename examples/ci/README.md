@@ -40,10 +40,17 @@ the `claude` CLI on the runner and authenticates with a `CLAUDE_CODE_OAUTH_TOKEN
 `claude setup-token`). Do **not** set `ANTHROPIC_API_KEY` alongside it — `claude-code` defaults to the
 subscription and withholds an API key (`run --api-key` opts back into billing).
 
-On **GitLab**, the templates self-install their runner deps in `before_script` (the base `python` image
-ships neither): `glab` (issue fetch + MR) for both variants, plus Node + the `claude` CLI for the
-claude-code one. The `GITLAB_TOKEN` PAT (`api` scope) is what authorizes the MR + the git push —
-GitLab's `CI_JOB_TOKEN` can't open MRs, so there's no project setting to flip (the PAT *is* the grant).
+On **GitLab** the templates self-install runner deps in `before_script` (`glab` for both; Node + the
+`claude` CLI for claude-code) and handle the runtime sharp edges a live run found (clone strategy, git
+identity, stripping `CI_JOB_TOKEN`, base-ref materialization, non-root for claude-code). Two things are
+on **you**:
+- **`GITLAB_TOKEN`**: a PAT with **`api` + `write_repository`** scopes whose owner has **≥ Developer
+  role** on the project. Scope *and* role — missing either 403s the push. (`CI_JOB_TOKEN` can do
+  neither.) Already using `GITLAB_TOKEN` for other CI? Set **`LOOPKIT_GITLAB_PAT`** instead — the
+  templates remap it.
+- **Runner**: a **docker-executor** runner (a low-pids k8s runner breaks DNS in `before_script`).
+
+Full gotcha list + fixes: [`docs/TROUBLESHOOTING.md`](../../docs/TROUBLESHOOTING.md#gitlab-ci--runner--push-gotchas-issuemr-worker).
 
 The fastest way to get either is to let loopkit scaffold it (it also writes a starter `loopkit.toml`
 + `PROMPT.md`, which the workflow needs):
@@ -63,8 +70,8 @@ they live here so you can read them without running the CLI.
    cloud tier's machinery; it deliberately stays there):
    - GitHub: a repo/org secret `ANTHROPIC_API_KEY` (or `CLAUDE_CODE_OAUTH_TOKEN` for the subscription
      variant). The push + PR use the job's scoped `github.token`.
-   - GitLab: masked `ANTHROPIC_API_KEY` and a `GITLAB_TOKEN` (a PAT with `api` scope) — `glab`
-     authenticates the issue fetch + MR, and the git push reuses the same token.
+   - GitLab: masked `ANTHROPIC_API_KEY` and a `GITLAB_TOKEN` (PAT, `api` + `write_repository`, owner
+     with ≥ Developer role) — authenticates `glab` (issue + MR) **and** the git push.
 3. **(GitHub, one-time) Let Actions open PRs.** GitHub blocks the `github.token` from *creating* PRs by
    default, independent of the `permissions:` block. Enable it once: *Settings → Actions → General →
    Workflow permissions →* ☑ *Allow GitHub Actions to create and approve pull requests* (or

@@ -100,8 +100,11 @@ PAT is what authorizes the MR + push — GitLab's `CI_JOB_TOKEN` can't open MRs 
 flip; the PAT *is* the grant). There's a subscription variant too — **`gitlab-ci-claude-code.yml`**
 (`claude-code` + `CLAUDE_CODE_OAUTH_TOKEN`). Both GitLab templates **self-install** their runner deps in
 `before_script` — `glab` (issue fetch + MR), plus Node + the `claude` CLI for the claude-code variant —
-which the stock `python` image doesn't bundle (it uses the non-slim tag so at least `git`/`curl` are
-present).
+and handle the GitLab runtime sharp edges a live run surfaced: `GIT_STRATEGY: clone`, a `git` identity,
+stripping the non-pushable `CI_JOB_TOKEN` (origin + auth header) so the `GITLAB_TOKEN` PAT pushes,
+materializing the base ref for the pre-push secret-scan, and (claude-code only, since the CLI refuses
+`--dangerously-skip-permissions` as root) running the loop as a **non-root** user. Full list:
+[`TROUBLESHOOTING.md` → GitLab CI gotchas](TROUBLESHOOTING.md#gitlab-ci--runner--push-gotchas-issuemr-worker).
 
 Both default to `--adapter claude-api` — **the lower-friction CI choice** (`pip install` + a key, no
 binary to install or auth). See [`examples/ci/README.md`](../examples/ci/README.md) for the full setup.
@@ -181,3 +184,13 @@ from this doc's three-tier table + workflow templates.
   **`--branch` per-issue isolation**, and **concurrent** issues producing independent PRs on separate
   branches. Surfaced (and fixed) two real gaps in the process: the Actions *create-PR* permission must
   be enabled (see the setup note above), and the run correlation id had to be made unique per run.
+- ✅ **Live on GitLab (proven):** the same flow ran end-to-end on a self-hosted GitLab docker runner
+  (issue → claude-code agent → gate → DONE → push → **glab-opened draft MR**), plus `--branch`
+  per-issue isolation and **two concurrent issues** producing independent MRs. Surfaced 7 GitLab-runner
+  sharp edges (now baked into the templates + [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md#gitlab-ci--runner--push-gotchas-issuemr-worker)):
+  k8s-runner pids limit · claude-as-root · missing git identity · secret-scan-on-history · reused-dir
+  ownership · detached base ref · `CI_JOB_TOKEN` overriding the PAT (scope **and** role both required).
+- ⧗ **loopkit hardening backlog** (gaps the GitLab run exposed in core, not just templates): run the
+  claude-code CLI **non-root from inside loopkit**; set a **fallback git identity** when none is
+  configured; make the pre-push secret-scan **resolve/fetch its base** (or fail loud) instead of
+  silently scanning full history.
