@@ -19,6 +19,7 @@ from typer.testing import CliRunner
 from loopkit.cli import (
     _CI_GITHUB_CLAUDE_CODE_TEMPLATE,
     _CI_GITHUB_TEMPLATE,
+    _CI_GITLAB_CLAUDE_CODE_TEMPLATE,
     _CI_GITLAB_TEMPLATE,
     app,
 )
@@ -298,3 +299,5 @@ def test_shipped_ci_examples_match_the_scaffold_constants():
     # The Claude Code subscription variant (claude-code + CLAUDE_CODE_OAUTH_TOKEN, no API key).
     assert (_REPO_ROOT / "examples/ci/github-actions-claude-code.yml").read_text() \
         == _CI_GITHUB_CLAUDE_CODE_TEMPLATE
+    assert (_REPO_ROOT / "examples/ci/gitlab-ci-claude-code.yml").read_text() \
+        == _CI_GITLAB_CLAUDE_CODE_TEMPLATE

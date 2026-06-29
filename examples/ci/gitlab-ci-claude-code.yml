@@ -1,0 +1,25 @@
+# loopkit CI tier (GitLab, Claude Code subscription) — run the loop on one issue → a draft MR.
+# Bills your Claude Code SUBSCRIPTION via an OAuth token, not a metered API key. GitLab has no native
+# issue->pipeline trigger, so this fires on: a manual "Run pipeline" with an ISSUE_IID variable, a
+# webhook -> trigger token, or a pipeline schedule.
+# Masked CI/CD variables: CLAUDE_CODE_OAUTH_TOKEN (from `claude setup-token`; do NOT set
+# ANTHROPIC_API_KEY) and GITLAB_TOKEN (PAT, api scope). Keep a loopkit.toml in the repo.
+loopkit:
+  image: python:3.13                  # ships git + curl; we add node (claude CLI) + glab below
+  before_script:
+    # claude-code shells to the `claude` CLI (node); loopkit to `glab` (issue fetch + MR) + `git`.
+    - curl -fsSL https://deb.nodesource.com/setup_20.x | bash -    # node 20 (claude CLI needs >= 18)
+    - apt-get install -y nodejs
+    - npm install -g @anthropic-ai/claude-code
+    - GLAB_VERSION=1.105.0
+    - curl -fsSL "https://gitlab.com/gitlab-org/cli/-/releases/v${GLAB_VERSION}/downloads/glab_${GLAB_VERSION}_linux_amd64.deb" -o /tmp/glab.deb
+    - dpkg -i /tmp/glab.deb
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "web" && $ISSUE_IID'         # manual run, pass ISSUE_IID
+    - if: '$CI_PIPELINE_SOURCE == "trigger" && $ISSUE_IID'     # webhook -> trigger token
+    - if: '$CI_PIPELINE_SOURCE == "schedule" && $ISSUE_IID'    # scheduled run of one issue
+  script:
+    - pip install loopkit                                      # claude-code is a CLI adapter — no provider SDK
+    - loopkit run --from-issue "$ISSUE_IID" --branch "loopkit/issue-$ISSUE_IID" --provider gitlab --adapter claude-code --open-pr
+  # CLAUDE_CODE_OAUTH_TOKEN bills the subscription (no ANTHROPIC_API_KEY); GITLAB_TOKEN (api scope)
+  # authenticates glab (issue fetch + MR) + the git push — GitLab's CI_JOB_TOKEN can't open MRs.

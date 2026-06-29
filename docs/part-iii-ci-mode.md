@@ -95,7 +95,13 @@ the push + PR use the job's scoped, ephemeral `github.token`.
 **GitLab CI** — `.gitlab-ci.yml` has no
 native issue→pipeline trigger, so it fires on a manual *Run pipeline* (pass `ISSUE_IID`), a webhook →
 trigger token, or a schedule, and takes `--from-issue "$ISSUE_IID" --provider gitlab`; supply
-`ANTHROPIC_API_KEY` + a `GITLAB_TOKEN` (PAT, `api` scope) as masked CI/CD variables.
+`ANTHROPIC_API_KEY` + a `GITLAB_TOKEN` (PAT, `api` scope) as masked CI/CD variables. The `GITLAB_TOKEN`
+PAT is what authorizes the MR + push — GitLab's `CI_JOB_TOKEN` can't open MRs (no project setting to
+flip; the PAT *is* the grant). There's a subscription variant too — **`gitlab-ci-claude-code.yml`**
+(`claude-code` + `CLAUDE_CODE_OAUTH_TOKEN`). Both GitLab templates **self-install** their runner deps in
+`before_script` — `glab` (issue fetch + MR), plus Node + the `claude` CLI for the claude-code variant —
+which the stock `python` image doesn't bundle (it uses the non-slim tag so at least `git`/`curl` are
+present).
 
 Both default to `--adapter claude-api` — **the lower-friction CI choice** (`pip install` + a key, no
 binary to install or auth). See [`examples/ci/README.md`](../examples/ci/README.md) for the full setup.

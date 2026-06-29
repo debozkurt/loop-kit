@@ -33,11 +33,17 @@ come from the forge instead of your laptop (local) or Kubernetes (cloud).*
 | [`github-actions.yml`](github-actions.yml) | GitHub Actions | `claude-api` · `ANTHROPIC_API_KEY` | `.github/workflows/loopkit.yml` |
 | [`github-actions-claude-code.yml`](github-actions-claude-code.yml) | GitHub Actions | `claude-code` · **Claude Code subscription** (`CLAUDE_CODE_OAUTH_TOKEN`, no API key) | `.github/workflows/loopkit.yml` |
 | [`gitlab-ci.yml`](gitlab-ci.yml) | GitLab CI | `claude-api` · `ANTHROPIC_API_KEY` | `.gitlab-ci.yml` |
+| [`gitlab-ci-claude-code.yml`](gitlab-ci-claude-code.yml) | GitLab CI | `claude-code` · **subscription** (`CLAUDE_CODE_OAUTH_TOKEN` + `GITLAB_TOKEN`, no API key) | `.gitlab-ci.yml` |
 
 Pick the `claude-code` variant to bill your **subscription** instead of a metered API key: it installs
 the `claude` CLI on the runner and authenticates with a `CLAUDE_CODE_OAUTH_TOKEN` repo secret (from
 `claude setup-token`). Do **not** set `ANTHROPIC_API_KEY` alongside it — `claude-code` defaults to the
 subscription and withholds an API key (`run --api-key` opts back into billing).
+
+On **GitLab**, the templates self-install their runner deps in `before_script` (the base `python` image
+ships neither): `glab` (issue fetch + MR) for both variants, plus Node + the `claude` CLI for the
+claude-code one. The `GITLAB_TOKEN` PAT (`api` scope) is what authorizes the MR + the git push —
+GitLab's `CI_JOB_TOKEN` can't open MRs, so there's no project setting to flip (the PAT *is* the grant).
 
 The fastest way to get either is to let loopkit scaffold it (it also writes a starter `loopkit.toml`
 + `PROMPT.md`, which the workflow needs):

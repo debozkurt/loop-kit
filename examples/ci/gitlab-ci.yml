@@ -3,13 +3,19 @@
 # ISSUE_IID variable, a webhook -> trigger token, or a pipeline schedule. Add ANTHROPIC_API_KEY and a
 # GITLAB_TOKEN (PAT, api scope) as masked CI/CD variables, and keep a loopkit.toml in the repo.
 loopkit:
-  image: python:3.13-slim
+  image: python:3.13                  # non-slim → ships git + curl (slim ships neither)
+  before_script:
+    # loopkit shells to `glab` (issue fetch + MR) and `git` (commit/push). git is in the image;
+    # add glab (GitLab CLI) — bump GLAB_VERSION as needed.
+    - GLAB_VERSION=1.105.0
+    - curl -fsSL "https://gitlab.com/gitlab-org/cli/-/releases/v${GLAB_VERSION}/downloads/glab_${GLAB_VERSION}_linux_amd64.deb" -o /tmp/glab.deb
+    - dpkg -i /tmp/glab.deb
   rules:
     - if: '$CI_PIPELINE_SOURCE == "web" && $ISSUE_IID'         # manual run, pass ISSUE_IID
     - if: '$CI_PIPELINE_SOURCE == "trigger" && $ISSUE_IID'     # webhook -> trigger token
     - if: '$CI_PIPELINE_SOURCE == "schedule" && $ISSUE_IID'    # scheduled run of one issue
   script:
-    - pip install 'loopkit[claude]'                     # claude-api needs no binary in CI
+    - pip install 'loopkit[claude]'                     # claude-api adapter → the anthropic SDK
     - loopkit run --from-issue "$ISSUE_IID" --branch "loopkit/issue-$ISSUE_IID" --provider gitlab --adapter claude-api --open-pr
   # GITLAB_TOKEN authenticates glab (issue fetch + MR) and the git push; ANTHROPIC_API_KEY pays.
   # (GitLab's CI_JOB_TOKEN can't open MRs — the api-scoped PAT authorizes it: GitLab's parallel to
