@@ -352,6 +352,10 @@ def _doctor_budget(table: Table, cfg: Config) -> None:
 @app.command()
 def run(config: Path = typer.Option(DEFAULT_CONFIG, "--config", "-c"),
         repo: str | None = typer.Option(None, "--repo", help="Override the target repo (config `repo`)."),
+        branch: str | None = typer.Option(None, "--branch",
+                                          help="Override the configured branch for this run — per-run isolation, "
+                                               "e.g. loopkit/issue-42 so concurrent issue→PR runs don't collide "
+                                               "on one branch. Still safety-checked against allow/forbid_branches."),
         adapter: str | None = typer.Option(None, "--adapter",
                                             help="Override the configured agent adapter (e.g. claude-api in CI)."),
         from_event: Path | None = typer.Option(None, "--from-event",
@@ -391,6 +395,8 @@ def run(config: Path = typer.Option(DEFAULT_CONFIG, "--config", "-c"),
     cfg = _load(config)
     if repo is not None:
         cfg.repo = repo
+    if branch is not None:
+        cfg.branch = branch                     # per-run branch isolation; validated by preflight below
     if adapter is not None:
         cfg.agent.adapter = adapter
     if api_key:
@@ -416,7 +422,7 @@ def run(config: Path = typer.Option(DEFAULT_CONFIG, "--config", "-c"),
     trace.configure(cfg.trace)            # full-tree LangSmith tracing, auto-on (Ch 14-15)
 
     if sandbox:
-        _run_sandboxed(cfg, config, dry_run=dry_run, max_iter=max_iter, force=force)
+        _run_sandboxed(cfg, config, dry_run=dry_run, max_iter=max_iter, force=force, branch=branch)
         return
 
     pf = safety.preflight(cfg)
@@ -1531,7 +1537,7 @@ def _list_scenarios() -> None:
 
 
 def _run_sandboxed(cfg: Config, config_path: Path, *, dry_run: bool, max_iter: int | None,
-                   force: bool) -> None:
+                   force: bool, branch: str | None = None) -> None:
     """Re-invoke `loopkit run` inside the container, with the repo bind-mounted at /work (Ch 16)."""
     if shutil.which("docker") is None:
         err.print("[red]sandbox[/] docker not found on PATH (build the image: docker build -t loopkit .)")
@@ -1542,6 +1548,8 @@ def _run_sandboxed(cfg: Config, config_path: Path, *, dry_run: bool, max_iter: i
         inner.append("--dry-run")
     if max_iter is not None:
         inner += ["--max-iter", str(max_iter)]
+    if branch is not None:
+        inner += ["--branch", branch]           # honor the per-run branch override inside the container too
     if force:
         inner.append("--force")
     cmd = ["docker", "run", "--rm", "-v", f"{repo}:/work", "-w", "/work", "loopkit", *inner[1:]]

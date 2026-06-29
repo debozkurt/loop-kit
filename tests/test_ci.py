@@ -203,6 +203,66 @@ def test_run_from_issue_errors_when_fetch_fails(git_repo, monkeypatch, clean_cre
 
 
 # --------------------------------------------------------------------------------------------
+# --branch — per-run branch isolation so concurrent issue→PR runs don't collide on one branch.
+# --------------------------------------------------------------------------------------------
+def _stub_issue(monkeypatch):
+    """gh/glab fetch → a fixed issue, so --from-issue reaches the run without touching the network."""
+    monkeypatch.setattr("loopkit.extensions.issues.fetch_issue",
+                        lambda repo, number, *, provider="auto", remote="origin":
+                        {"number": number, "title": "Add X", "body": "do X", "url": "u"})
+
+
+def test_run_branch_override_sets_the_durable_branch(git_repo, monkeypatch, clean_creds):
+    # --branch overrides config `branch`: the run lands on it AND it rides into sync_done (so the PR
+    # opens from the per-issue branch, not the shared default).
+    toml = _write_config(git_repo)
+    _stub_issue(monkeypatch)
+    captured: dict = {}
+    monkeypatch.setattr("loopkit.extensions.remote.sync_done",
+                        lambda config, repo, *, title=None, body="", issue=None:
+                        captured.update(branch=config.branch, issue=issue) or {"pushed": True, "pr_url": None})
+    result = runner.invoke(app, ["run", "-c", str(toml), "--repo", str(git_repo),
+                                 "--from-issue", "42", "--branch", "loopkit/issue-42",
+                                 "--adapter", "mock", "--open-pr"])
+    assert result.exit_code == 0, result.output
+    assert captured["branch"] == "loopkit/issue-42"      # the override reached the outward edge
+    head = subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=git_repo,
+                          capture_output=True, text=True).stdout.strip()
+    assert head == "loopkit/issue-42"                    # the loop actually switched to it (durability)
+
+
+def test_run_without_branch_uses_config_default(git_repo, monkeypatch, clean_creds):
+    # No --branch → config `branch` ("loopkit/run") is untouched. Locks against a regression where the
+    # override default ("" / None) leaks over the configured value.
+    toml = _write_config(git_repo)
+    _stub_issue(monkeypatch)
+    captured: dict = {}
+    monkeypatch.setattr("loopkit.extensions.remote.sync_done",
+                        lambda config, repo, *, title=None, body="", issue=None:
+                        captured.update(branch=config.branch) or {"pushed": True, "pr_url": None})
+    result = runner.invoke(app, ["run", "-c", str(toml), "--repo", str(git_repo),
+                                 "--from-issue", "42", "--adapter", "mock", "--open-pr"])
+    assert result.exit_code == 0, result.output
+    assert captured["branch"] == "loopkit/run"
+
+
+def test_run_branch_override_is_still_safety_checked(git_repo, monkeypatch, clean_creds):
+    # The override is not an escape hatch: preflight validates it like the configured branch, so
+    # --branch main is rejected (forbid_branches) and the outward edge is never reached.
+    toml = _write_config(git_repo)
+    _stub_issue(monkeypatch)
+    called = {"sync": False}
+    monkeypatch.setattr("loopkit.extensions.remote.sync_done",
+                        lambda *a, **k: called.__setitem__("sync", True) or {})
+    result = runner.invoke(app, ["run", "-c", str(toml), "--repo", str(git_repo),
+                                 "--from-issue", "42", "--branch", "main",
+                                 "--adapter", "mock", "--open-pr"])
+    assert result.exit_code == 1
+    assert "forbidden" in _norm(result.output)
+    assert called["sync"] is False                       # never pushed/opened a PR from main
+
+
+# --------------------------------------------------------------------------------------------
 # init --ci — scaffold a CI workflow; the shipped examples stay byte-identical to the constants.
 # --------------------------------------------------------------------------------------------
 def test_init_ci_github_scaffolds_the_workflow(tmp_path):
