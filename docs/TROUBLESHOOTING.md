@@ -14,6 +14,29 @@ loop logs `$0`. The work was real; the dollar figure just isn't meaningful.
   CLI's *array* output and read `$0` even on the API. Update loopkit (the parser now handles the array)
   and confirm the billing path with `loopkit doctor`. See [`BILLING.md`](BILLING.md).
 
+## `pr.failed … GitHub Actions is not permitted to create or approve pull requests`
+
+The loop reached **DONE and pushed the branch**, but the `--open-pr` step couldn't open the PR. This is
+a GitHub **repo/org policy**, *separate from* the workflow's `permissions:` block: the `github.token`
+is fenced off from creating PRs by default (so a compromised workflow can't open + self-approve one).
+
+- **Fix (one-time per repo):** *Settings → Actions → General → Workflow permissions →* ☑ *Allow GitHub
+  Actions to create and approve pull requests*, or
+  `gh api -X PUT repos/<owner>/<repo>/actions/permissions/workflow -F can_approve_pull_request_reviews=true`.
+- **Or** open the PR with a **user PAT / GitHub App token** instead of `github.token` (when org policy
+  won't let you flip the setting).
+- The branch is already pushed, so nothing is lost — re-run, or open the PR by hand from that branch.
+- **GitLab parallel:** there's no setting to flip — GitLab's `CI_JOB_TOKEN` can't open MRs at all, so
+  the template requires a `GITLAB_TOKEN` PAT with **`api`** scope (that PAT *is* the authorization). An
+  MR-create failure on GitLab means a missing/under-scoped `GITLAB_TOKEN`, not a project toggle.
+
+## A CI run is green but no PR appeared
+
+loopkit exits **0 on `DONE` regardless of whether the outward push/PR succeeded**, so the Actions ✓ can
+hide a failed PR step. Almost always the PR-permission policy above (look for `pr.failed` in the log).
+**Confirm the deliverable with `gh pr list`, not the job's green check** — the ephemeral runner is gone,
+so the only evidence a run produced anything is what left it: a pushed branch + an opened PR.
+
 ## `agent.done ok=False rc=1` (the agent failed a tick)
 
 The agent's CLI (`claude`/`codex`) exited non-zero. The loop continues — a bad tick feeds back and the

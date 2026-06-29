@@ -4,7 +4,9 @@
 #   1. Create the token:    claude setup-token
 #   2. Add the repo secret: gh secret set CLAUDE_CODE_OAUTH_TOKEN   (do NOT set ANTHROPIC_API_KEY —
 #      claude-code defaults to the subscription and withholds an API key)
-#   3. Keep a loopkit.toml in the repo (run `loopkit init`). Label an issue `loopkit` to dispatch.
+#   3. Let Actions open PRs (one-time): Settings → Actions → General → Workflow permissions →
+#      "Allow GitHub Actions to create and approve pull requests" (else --open-pr fails after DONE).
+#   4. Keep a loopkit.toml in the repo (run `loopkit init`). Label an issue `loopkit` to dispatch.
 name: loopkit
 on:
   issues:
@@ -31,16 +33,17 @@ jobs:
         with:
           python-version: '3.13'
       - run: npm install -g @anthropic-ai/claude-code      # the agent binary (claude-code adapter)
-      - run: pip install 'loopkit[remote]'                 # the CLI adapter needs no provider SDK
+      - run: pip install loopkit                           # claude-code is a CLI adapter — no provider SDK
       - name: loopkit run (issue event)
         if: github.event_name == 'issues'
-        run: loopkit run --from-event "$GITHUB_EVENT_PATH" --adapter claude-code --open-pr
+        # --branch loopkit/issue-N: each issue gets its own branch + PR (concurrent issues don't collide)
+        run: loopkit run --from-event "$GITHUB_EVENT_PATH" --branch "loopkit/issue-${{ github.event.issue.number }}" --adapter claude-code --open-pr
         env:
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}   # subscription, not a billed key
           GH_TOKEN: ${{ github.token }}                                     # scoped, ephemeral — push + PR
       - name: loopkit run (manual dispatch)
         if: github.event_name == 'workflow_dispatch'
-        run: loopkit run --from-issue "${{ inputs.issue }}" --adapter claude-code --open-pr
+        run: loopkit run --from-issue "${{ inputs.issue }}" --branch "loopkit/issue-${{ inputs.issue }}" --adapter claude-code --open-pr
         env:
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           GH_TOKEN: ${{ github.token }}

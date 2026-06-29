@@ -95,6 +95,8 @@ _CI_GITHUB_TEMPLATE = """\
 # loopkit CI tier — turn a labelled issue into a draft PR, no cluster required.
 # Setup: drop this at .github/workflows/loopkit.yml, add the repo secret ANTHROPIC_API_KEY, and keep
 # a loopkit.toml in the repo (run `loopkit init`). Label an issue `loopkit` to dispatch the loop.
+# One-time: enable Settings → Actions → General → "Allow GitHub Actions to create and approve pull
+# requests", else --open-pr fails after the loop reaches DONE (check `gh pr list`, not just the ✓).
 name: loopkit
 on:
   issues:
@@ -120,16 +122,17 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.13'
-      - run: pip install 'loopkit[claude,remote]'
+      - run: pip install 'loopkit[claude]'                 # claude-api adapter → the anthropic SDK
       - name: loopkit run (issue event)
         if: github.event_name == 'issues'
-        run: loopkit run --from-event "$GITHUB_EVENT_PATH" --adapter claude-api --open-pr
+        # --branch loopkit/issue-N: each issue gets its own branch + PR (concurrent issues don't collide)
+        run: loopkit run --from-event "$GITHUB_EVENT_PATH" --branch "loopkit/issue-${{ github.event.issue.number }}" --adapter claude-api --open-pr
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}   # a repo/org secret (per-repo keying)
           GH_TOKEN: ${{ github.token }}                          # scoped, ephemeral — pushes + opens the PR
       - name: loopkit run (manual dispatch)
         if: github.event_name == 'workflow_dispatch'
-        run: loopkit run --from-issue "${{ inputs.issue }}" --adapter claude-api --open-pr
+        run: loopkit run --from-issue "${{ inputs.issue }}" --branch "loopkit/issue-${{ inputs.issue }}" --adapter claude-api --open-pr
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           GH_TOKEN: ${{ github.token }}
@@ -144,7 +147,9 @@ _CI_GITHUB_CLAUDE_CODE_TEMPLATE = """\
 #   1. Create the token:    claude setup-token
 #   2. Add the repo secret: gh secret set CLAUDE_CODE_OAUTH_TOKEN   (do NOT set ANTHROPIC_API_KEY —
 #      claude-code defaults to the subscription and withholds an API key)
-#   3. Keep a loopkit.toml in the repo (run `loopkit init`). Label an issue `loopkit` to dispatch.
+#   3. Let Actions open PRs (one-time): Settings → Actions → General → Workflow permissions →
+#      "Allow GitHub Actions to create and approve pull requests" (else --open-pr fails after DONE).
+#   4. Keep a loopkit.toml in the repo (run `loopkit init`). Label an issue `loopkit` to dispatch.
 name: loopkit
 on:
   issues:
@@ -171,16 +176,17 @@ jobs:
         with:
           python-version: '3.13'
       - run: npm install -g @anthropic-ai/claude-code      # the agent binary (claude-code adapter)
-      - run: pip install 'loopkit[remote]'                 # the CLI adapter needs no provider SDK
+      - run: pip install loopkit                           # claude-code is a CLI adapter — no provider SDK
       - name: loopkit run (issue event)
         if: github.event_name == 'issues'
-        run: loopkit run --from-event "$GITHUB_EVENT_PATH" --adapter claude-code --open-pr
+        # --branch loopkit/issue-N: each issue gets its own branch + PR (concurrent issues don't collide)
+        run: loopkit run --from-event "$GITHUB_EVENT_PATH" --branch "loopkit/issue-${{ github.event.issue.number }}" --adapter claude-code --open-pr
         env:
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}   # subscription, not a billed key
           GH_TOKEN: ${{ github.token }}                                     # scoped, ephemeral — push + PR
       - name: loopkit run (manual dispatch)
         if: github.event_name == 'workflow_dispatch'
-        run: loopkit run --from-issue "${{ inputs.issue }}" --adapter claude-code --open-pr
+        run: loopkit run --from-issue "${{ inputs.issue }}" --branch "loopkit/issue-${{ inputs.issue }}" --adapter claude-code --open-pr
         env:
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           GH_TOKEN: ${{ github.token }}
@@ -198,9 +204,11 @@ loopkit:
     - if: '$CI_PIPELINE_SOURCE == "trigger" && $ISSUE_IID'     # webhook -> trigger token
     - if: '$CI_PIPELINE_SOURCE == "schedule" && $ISSUE_IID'    # scheduled run of one issue
   script:
-    - pip install 'loopkit[claude,remote]'                     # claude-api needs no binary in CI
-    - loopkit run --from-issue "$ISSUE_IID" --provider gitlab --adapter claude-api --open-pr
+    - pip install 'loopkit[claude]'                     # claude-api needs no binary in CI
+    - loopkit run --from-issue "$ISSUE_IID" --branch "loopkit/issue-$ISSUE_IID" --provider gitlab --adapter claude-api --open-pr
   # GITLAB_TOKEN authenticates glab (issue fetch + MR) and the git push; ANTHROPIC_API_KEY pays.
+  # (GitLab's CI_JOB_TOKEN can't open MRs — the api-scoped PAT authorizes it: GitLab's parallel to
+  #  GitHub's "allow Actions to create PRs" toggle. No project setting to flip; just supply the PAT.)
 """
 
 _CI_TEMPLATES = {"github": (".github/workflows/loopkit.yml", _CI_GITHUB_TEMPLATE),

@@ -9,6 +9,8 @@ loopkit:
     - if: '$CI_PIPELINE_SOURCE == "trigger" && $ISSUE_IID'     # webhook -> trigger token
     - if: '$CI_PIPELINE_SOURCE == "schedule" && $ISSUE_IID'    # scheduled run of one issue
   script:
-    - pip install 'loopkit[claude,remote]'                     # claude-api needs no binary in CI
-    - loopkit run --from-issue "$ISSUE_IID" --provider gitlab --adapter claude-api --open-pr
+    - pip install 'loopkit[claude]'                     # claude-api needs no binary in CI
+    - loopkit run --from-issue "$ISSUE_IID" --branch "loopkit/issue-$ISSUE_IID" --provider gitlab --adapter claude-api --open-pr
   # GITLAB_TOKEN authenticates glab (issue fetch + MR) and the git push; ANTHROPIC_API_KEY pays.
+  # (GitLab's CI_JOB_TOKEN can't open MRs — the api-scoped PAT authorizes it: GitLab's parallel to
+  #  GitHub's "allow Actions to create PRs" toggle. No project setting to flip; just supply the PAT.)

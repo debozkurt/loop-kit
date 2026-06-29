@@ -6,8 +6,9 @@
 > `loopkit run --from-event/--from-issue/--open-pr` + `--adapter` (glue over `parse_event` /
 > `issues.fetch_issue` / `remote.sync_done(issue=N)`), `loopkit init --ci github|gitlab`, the two
 > workflow templates (`examples/ci/`), and a GitLab-token fix so `glab`/git push authenticate through
-> the Phase-5a hygiene. 21 token-free tests (`test_ci.py` + parser/fetch units). The only un-exercised
-> step is the optional live drop-the-template-in-a-real-repo proof.
+> the Phase-5a hygiene. Token-free tests (`test_ci.py` + parser/fetch units). **Since live-proven** by
+> a consumer repo running the full issue→draft-PR flow on GitHub-hosted runners (see *Acceptance*),
+> which also drove the later `--branch` per-issue isolation + concurrency.
 
 ## The three deployment tiers (this doc adds the middle one)
 
@@ -17,8 +18,11 @@
 | **CI (this doc)** | `loopkit run` in a CI job | forge issue / cron / manual | **CI-native** (Actions/GitLab secrets or OIDC) | the **ephemeral runner** | hands-off issue→PR, no cluster |
 | **Cloud fleet** | coordinator + worker Jobs on DOKS | CLI / CronJob / webhook | per-submitter resolver + **sidecar** ([`part-iii-agent-isolation.md`](part-iii-agent-isolation.md)) | namespace + container split | many concurrent runs, `evolve`, multi-tenant |
 
-The CI tier is the **single-loop** tier — one issue → one `loopkit run` → one draft PR. The *fleet*
-(concurrent/`evolve`/shared-queue) stays the cloud tier's job; don't try to run the fleet in a CI job.
+The CI tier is the **single-loop** tier — each fire is one issue → one `loopkit run` → one draft PR.
+Multiple issues *can* run **concurrently** (each on its own `loopkit/issue-N` branch — see
+[Multiple PRs in flight](#multiple-prs-in-flight-per-issue-branches)); they're still N independent
+single-loops, not a coordinated fleet. Shared-queue / `evolve` / cross-run coordination stays the cloud
+tier's job — don't try to run the *fleet* in a CI job.
 
 ## Why it's nearly free
 
@@ -53,6 +57,11 @@ Small additions to the **single-loop `loopkit run`** path (not the fleet):
 5. **GitLab credential fix** (`secrets.GIT_ENV` += `GITLAB_TOKEN`; `remote.CRED_HELPER` GitHub→GitLab
    fallback) so `glab` (issue fetch + MR) and the git push authenticate through the Phase-5a hygiene —
    loopkit's own forge subprocess gets the token, the agent's scrubbed shell still gets none.
+6. **`--branch <name>`** — override the configured `branch` for one run, so each issue lands on its
+   own `loopkit/issue-N` branch instead of a shared one (see
+   [Multiple PRs in flight](#multiple-prs-in-flight-per-issue-branches)). Mirrors `--max-iter` /
+   `--adapter`; applied **before** preflight, so the override is still validated against
+   `allow`/`forbid_branches` (it can't smuggle in `main`).
 
 Everything else (the branch-only push, the held-out gate, the protected-path guard, the cost/budget
 stop) applies unchanged — loopkit's safety envelope holds; the runner supplies the sandbox the cloud
@@ -71,13 +80,50 @@ loopkit init --ci gitlab     # writes .gitlab-ci.yml
 **GitHub Actions** — `.github/workflows/loopkit.yml` fires on `issues: [opened, labeled]` (the job's
 `if:` gates on the `loopkit` label) and takes `--from-event "$GITHUB_EVENT_PATH"`; a `workflow_dispatch`
 with an issue number takes the `--from-issue` path instead. `ANTHROPIC_API_KEY` is a repo/org secret;
-the push + PR use the job's scoped, ephemeral `github.token`. **GitLab CI** — `.gitlab-ci.yml` has no
+the push + PR use the job's scoped, ephemeral `github.token`.
+
+> **One-time GitHub setup — let Actions open PRs.** GitHub blocks the `github.token` from *creating*
+> PRs by default, **independent of** the `permissions:` block. Enable it once per repo/org:
+> *Settings → Actions → General → Workflow permissions →* ☑ *Allow GitHub Actions to create and approve
+> pull requests* (or `gh api -X PUT repos/<owner>/<repo>/actions/permissions/workflow -F can_approve_pull_request_reviews=true`).
+> Skip it and `--open-pr` fails with `pr.failed … not permitted to create or approve pull requests`
+> **even though the loop reached DONE and pushed the branch** — the run still exits 0, so check
+> `gh pr list`, not just the green checkmark. (Why it's fenced separately: stops a compromised workflow
+> from opening + self-approving a PR as a privilege-escalation path. Alternative: open the PR with a
+> user PAT / GitHub App token instead of `github.token`.)
+
+**GitLab CI** — `.gitlab-ci.yml` has no
 native issue→pipeline trigger, so it fires on a manual *Run pipeline* (pass `ISSUE_IID`), a webhook →
 trigger token, or a schedule, and takes `--from-issue "$ISSUE_IID" --provider gitlab`; supply
 `ANTHROPIC_API_KEY` + a `GITLAB_TOKEN` (PAT, `api` scope) as masked CI/CD variables.
 
 Both default to `--adapter claude-api` — **the lower-friction CI choice** (`pip install` + a key, no
 binary to install or auth). See [`examples/ci/README.md`](../examples/ci/README.md) for the full setup.
+
+## Multiple PRs in flight (per-issue branches)
+
+A repo's `loopkit.toml` names **one** fixed `branch`, so by default every run lands on the *same*
+branch — fine for one PR at a time, but two issues firing at once would collide on it and clobber each
+other's PR. Pass **`--branch loopkit/issue-$ISSUE`** (the shipped GitHub templates do) and each issue
+gets its own branch → its own draft PR, so any number of issues can be in flight at once:
+
+```
+issue #5   → loopkit/issue-5  → PR "Closes #5"   ┐ concurrent: separate runners,
+issue #6   → loopkit/issue-6  → PR "Closes #6"   ┘ separate branches, no collision
+re-fire #5 → loopkit/issue-5  → updates the SAME PR (idempotent per issue)
+```
+
+`--branch` overrides `config.branch` for the run, **before** preflight, so the override is validated
+like the configured value (it must match `allow_branches`, e.g. `loopkit/*`, and can't be `main`). The
+**harness owns the capability; the workflow owns the naming** (`issue-$ISSUE` is the template's choice,
+not loopkit's). This is still N *independent* single-loops — they don't share a queue or coordinate
+(that's the cloud fleet). Each concurrent run also gets a **unique log/trace correlation id**
+(`run=<state-sig>-<uuid>`), so two runs off the same base commit never intermix their lines in an
+aggregated log or LangSmith project.
+
+The same applies on **GitLab** — its template passes `--branch loopkit/issue-$ISSUE_IID` so each issue
+gets its own branch → its own draft **MR**. (`--branch` is forge-neutral; only the issue identifier
+differs: GitHub's `issue.number` vs GitLab's `$ISSUE_IID`.)
 
 ## Secrets & identity (the tier's whole appeal)
 
@@ -123,5 +169,9 @@ from this doc's three-tier table + workflow templates.
   builds the right goal, runs the loop, and (with `--open-pr`) calls `remote.sync_done` with the issue
   number — no network. The GitLab `--from-event`/`--from-issue` paths are mocked the same way; the
   `init --ci` scaffold + the examples drift-guard round it out (21 tests, 219 → 240 green).
-- ⏳ **Live (optional, un-exercised):** drop the template into a throwaway repo, label an issue
-  `loopkit`, watch Actions open a draft PR that closes the issue on merge.
+- ✅ **Live (proven):** a consumer repo ran the full flow end-to-end on GitHub-hosted runners —
+  labelled issue → claude-code agent → in-loop gate → DONE → pushed branch → **Actions-opened draft
+  PR** that closes the issue on merge. Also exercised live: the **general (task-agnostic) gate**, the
+  **`--branch` per-issue isolation**, and **concurrent** issues producing independent PRs on separate
+  branches. Surfaced (and fixed) two real gaps in the process: the Actions *create-PR* permission must
+  be enabled (see the setup note above), and the run correlation id had to be made unique per run.

@@ -55,9 +55,17 @@ they live here so you can read them without running the CLI.
    edit the two gates so they actually check the work.
 2. **Secrets**, as CI-native masked variables — **no resolver, no k8s Secrets, no shred** (that's the
    cloud tier's machinery; it deliberately stays there):
-   - GitHub: a repo/org secret `ANTHROPIC_API_KEY`. The push + PR use the job's scoped `github.token`.
+   - GitHub: a repo/org secret `ANTHROPIC_API_KEY` (or `CLAUDE_CODE_OAUTH_TOKEN` for the subscription
+     variant). The push + PR use the job's scoped `github.token`.
    - GitLab: masked `ANTHROPIC_API_KEY` and a `GITLAB_TOKEN` (a PAT with `api` scope) — `glab`
      authenticates the issue fetch + MR, and the git push reuses the same token.
+3. **(GitHub, one-time) Let Actions open PRs.** GitHub blocks the `github.token` from *creating* PRs by
+   default, independent of the `permissions:` block. Enable it once: *Settings → Actions → General →
+   Workflow permissions →* ☑ *Allow GitHub Actions to create and approve pull requests* (or
+   `gh api -X PUT repos/<owner>/<repo>/actions/permissions/workflow -F can_approve_pull_request_reviews=true`).
+   Skip it and `--open-pr` fails with `pr.failed … not permitted to create or approve pull requests`
+   **even though the loop reached DONE and pushed the branch** — so check `gh pr list`, not just the
+   green check. (Or open the PR with a user PAT / GitHub App token instead of `github.token`.)
 
 ## How a run starts
 
@@ -72,6 +80,12 @@ In both, `--adapter claude-api` keeps the key in loopkit's process (no agent bin
 auth), and `--open-pr` flips on push + a **draft** PR/MR for that one invocation — so the template is
 turnkey on a repo whose `loopkit.toml` leaves `[remote]` off (the safe default). loopkit's own
 controls (protected paths, branch-only, held-out gate, budget stop) still apply.
+
+The GitHub templates also pass **`--branch loopkit/issue-$ISSUE`** so each issue lands on its own
+branch → its own draft PR, and several issues can run **concurrently** without colliding on a shared
+branch. Re-firing one issue reuses its branch and updates that issue's single PR (idempotent). It's
+still N independent single-loops — coordinated/`evolve`/shared-queue runs are the cloud fleet. See
+[`docs/part-iii-ci-mode.md`](../../docs/part-iii-ci-mode.md) → *Multiple PRs in flight*.
 
 ## Identity & cost attribution
 
