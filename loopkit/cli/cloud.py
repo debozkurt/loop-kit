@@ -1,11 +1,17 @@
 """Cloud control-plane commands (Part III): the `cloud` sub-app + the nested `creds` sub-app.
 
 Every mutating command runs the context-safety guard first (it refuses any context but the pinned one)
-and confirms before touching a paid cluster. The `kubernetes` client + the cloud extension modules are
-imported function-locally, so importing the CLI never requires the [cloud] extra.
+and confirms before touching a paid cluster. That guard is **structural**: every command is registered
+through `@guarded_command`, which maps any `cloud.ContextError` — from the upfront `guard_context`
+check OR the library's re-check on every mutation — to a uniform `[red]refused[/]` exit, so a command
+physically cannot let a guard refusal escape as a traceback or skip the refusal path.
+
+The `kubernetes` client + the cloud extension modules are imported function-locally, so importing the
+CLI never requires the [cloud] extra.
 """
 from __future__ import annotations
 
+import functools
 import importlib.util
 import os
 from pathlib import Path
@@ -16,7 +22,7 @@ from rich.panel import Panel
 from rich.table import Table
 
 from .. import secrets
-from ._support import cloud_app, console, creds_app, err
+from ._support import cloud_app, confirm_or_abort, console, creds_app, err, fail, kc_str
 
 
 # `kubernetes` is the [cloud] extra. The cloud extension module imports it lazily, but the *read*
@@ -24,12 +30,37 @@ from ._support import cloud_app, console, creds_app, err
 # rather than letting an ImportError surface raw.
 def _require_cloud_extra() -> None:
     if importlib.util.find_spec("kubernetes") is None:
-        err.print("[red]cloud[/] the kubernetes client is not installed "
-                  r"(pip install 'loopkit\[cloud]').")
-        raise typer.Exit(1)
+        fail("cloud", r"the kubernetes client is not installed (pip install 'loopkit\[cloud]').")
 
 
-@cloud_app.command("context")
+def guarded_command(name: str, *, on: typer.Typer = cloud_app):
+    """Register a cloud command and map any context-guard refusal in its body to a uniform
+    `[red]refused[/]` exit. This is what makes the Ch 16 context guard structural: a `ContextError`
+    can never escape as a traceback, and the refusal path can't be forgotten when a command is added.
+    """
+    def decorate(func):
+        @functools.wraps(func)                       # carries the signature + annotations Typer reads
+        def wrapper(*args, **kwargs):
+            from ..extensions import cloud
+            try:
+                return func(*args, **kwargs)
+            except cloud.ContextError as exc:
+                fail("refused", escape(str(exc)))
+        return on.command(name)(wrapper)
+    return decorate
+
+
+def guard_context(kubeconfig: str | Path | None, context: str | None, *, in_cluster: bool = False) -> str:
+    """Run the context-safety guard and return the pinned current context.
+
+    Raises `cloud.ContextError` on refusal, which `@guarded_command` renders as a clean
+    `[red]refused[/]` exit — so a mutating command guards with a single line and no try/except.
+    """
+    from ..extensions import cloud
+    return cloud.check_context(cloud.current_context(kubeconfig, in_cluster=in_cluster), context)
+
+
+@guarded_command("context")
 def cloud_context(
         context: str | None = typer.Option(None, "--context", envvar="LOOPKIT_CLOUD_CONTEXT",
                                             help="Expected cluster context to pin (allowlist; comma-separated)."),
@@ -58,7 +89,7 @@ def cloud_context(
     console.print(table)
 
 
-@cloud_app.command("doctor")
+@guarded_command("doctor")
 def cloud_doctor(
         context: str | None = typer.Option(None, "--context", envvar="LOOPKIT_CLOUD_CONTEXT",
                                             help="Expected cluster context to pin (allowlist; comma-separated)."),
@@ -103,7 +134,7 @@ def cloud_doctor(
         # unregistered run silently runs creds-less. Read-only; tolerate an offline failure.
         try:
             from ..extensions import creds as credmod
-            regs = credmod.list_credentials(kubeconfig=str(kubeconfig) if kubeconfig else None)
+            regs = credmod.list_credentials(kubeconfig=kc_str(kubeconfig))
             fleet = any(r.submitter == "fleet" for r in regs)
             table.add_row("credentials", "[green]ok[/]" if regs else "[yellow]none[/]",
                           f"{len(regs)} registered · fleet default {'present' if fleet else 'MISSING'}")
@@ -113,7 +144,7 @@ def cloud_doctor(
     raise typer.Exit(0 if ok else 1)
 
 
-@cloud_app.command("bootstrap")
+@guarded_command("bootstrap")
 def cloud_bootstrap(
         context: str | None = typer.Option(None, "--context", envvar="LOOPKIT_CLOUD_CONTEXT",
                                             help="Expected cluster context to pin (allowlist; comma-separated)."),
@@ -127,23 +158,13 @@ def cloud_bootstrap(
     _require_cloud_extra()
     from ..extensions import cloud
     # Show the target + guard verdict before doing anything; mutating a cloud cluster needs intent.
-    try:
-        current = cloud.check_context(cloud.current_context(kubeconfig), context)
-    except cloud.ContextError as exc:
-        err.print(f"[red]refused[/] {escape(str(exc))}")
-        raise typer.Exit(1)
+    current = guard_context(kubeconfig, context)
     console.print(Panel.fit(
         f"apply [bold]ns/loopkit-system[/] (Redis · RBAC · NetworkPolicy)\n"
         f"context [bold]{current}[/] · manifests {cloud.DEFAULT_MANIFEST_DIR}",
         title="loopkit cloud bootstrap"))
-    if not yes and not typer.confirm(f"Apply system manifests to '{current}'?"):
-        err.print("[yellow]aborted[/]")
-        raise typer.Exit(1)
-    try:
-        result = cloud.bootstrap(expected=context, kubeconfig=str(kubeconfig) if kubeconfig else None)
-    except cloud.ContextError as exc:
-        err.print(f"[red]refused[/] {escape(str(exc))}")
-        raise typer.Exit(1)
+    confirm_or_abort(f"Apply system manifests to '{current}'?", yes=yes)
+    result = cloud.bootstrap(expected=context, kubeconfig=kc_str(kubeconfig))
     console.print(f"[green]bootstrapped[/] {result.context} · applied {len(result.applied)} manifest(s): "
                   f"{', '.join(result.applied)}")
 
@@ -195,15 +216,13 @@ def _resolve_run_creds(spec, *, from_env: bool, allow_fleet_fallback: bool, in_c
                 "Its budget is shared and a leak isn't attributable to you.")):
             err.print(f"[yellow]using the shared 'fleet' key[/] for '{spec.submitter}' (not attributable)")
             return fleet.data, "fleet-fallback"
-        err.print(f"[red]run[/] no key for '{spec.submitter}' and fleet fallback not permitted "
-                  "(pass --allow-fleet-fallback, or register: loopkit cloud creds set --as <you>).")
-        raise typer.Exit(1)
-    err.print(f"[red]run[/] no credentials for submitter '{spec.submitter}' and no fleet default. "
-              "Register one: loopkit cloud creds set --as <you> --adapter <adapter>.")
-    raise typer.Exit(1)
+        fail("run", f"no key for '{spec.submitter}' and fleet fallback not permitted "
+                    "(pass --allow-fleet-fallback, or register: loopkit cloud creds set --as <you>).")
+    fail("run", f"no credentials for submitter '{spec.submitter}' and no fleet default. "
+                "Register one: loopkit cloud creds set --as <you> --adapter <adapter>.")
 
 
-@cloud_app.command("run")
+@guarded_command("run")
 def cloud_run(
         target: str = typer.Option(..., "--target", help="Repo URL/path the workers clone + operate on."),
         goal: str | None = typer.Option(None, "--goal", help="The per-task goal (one of --goal | --from-issues)."),
@@ -243,14 +262,12 @@ def cloud_run(
     """
     _require_cloud_extra()
     import uuid
-    from ..extensions import cloud, cloudrun
+    from ..extensions import cloudrun
     if not image:
-        err.print("[red]run[/] no worker image — pass --image or set $LOOPKIT_WORKER_IMAGE "
-                  "(ghcr.io/<owner>/loopkit-worker:<tag>).")
-        raise typer.Exit(1)
+        fail("run", "no worker image — pass --image or set $LOOPKIT_WORKER_IMAGE "
+                    "(ghcr.io/<owner>/loopkit-worker:<tag>).")
     if not evolve and not goal and not from_issues:
-        err.print("[red]run[/] need one of --goal, --from-issues, or --evolve.")
-        raise typer.Exit(1)
+        fail("run", "need one of --goal, --from-issues, or --evolve.")
     run_id = name or uuid.uuid4().hex[:8]
     submitter = _resolve_submitter(as_submitter)
     try:
@@ -261,15 +278,10 @@ def cloud_run(
             generations=generations, population=population, keep=keep, env_name=env_name,
             submitter=submitter, skills_repo=skills_repo, skills_branch=skills_branch)
     except ValueError as exc:
-        err.print(f"[red]run[/] {escape(str(exc))}")
-        raise typer.Exit(1)
-    kc = str(kubeconfig) if kubeconfig else None
+        fail("run", escape(str(exc)))
+    kc = kc_str(kubeconfig)
     # Show the plan + guard verdict before mutating a (paid) cloud cluster.
-    try:
-        current = cloud.check_context(cloud.current_context(kc, in_cluster=in_cluster), context)
-    except cloud.ContextError as exc:
-        err.print(f"[red]refused[/] {escape(str(exc))}")
-        raise typer.Exit(1)
+    current = guard_context(kc, context, in_cluster=in_cluster)
     work = f"{population}×{generations} evolve" if evolve else (
         "issues" if from_issues else f"goal ×{spec.parallelism}")
     console.print(Panel.fit(
@@ -279,31 +291,25 @@ def cloud_run(
         title="loopkit cloud run"))
     # In-cluster (cron/webhook) is non-interactive: there's no TTY to confirm at, so --in-cluster
     # implies --yes (the human already consented when they created the schedule, guarded).
-    if not yes and not in_cluster and not typer.confirm(f"Start run '{spec.run_id}' on '{current}'?"):
-        err.print("[yellow]aborted[/]")
-        raise typer.Exit(1)
+    confirm_or_abort(f"Start run '{spec.run_id}' on '{current}'?", yes=yes, in_cluster=in_cluster)
     # Resolve the submitter's key (fail-closed fallback policy) BEFORE creating the run.
     creds, source = _resolve_run_creds(spec, from_env=from_env, allow_fleet_fallback=allow_fleet_fallback,
                                        in_cluster=in_cluster, yes=yes, kubeconfig=kc)
     if source != "mock":
         spec.extra_labels["loopkit.dev/creds"] = source     # attribution: submitter | fleet-fallback | from-env
-    try:
-        namespace = cloudrun.create_run(spec, expected=context, kubeconfig=kc,
-                                        in_cluster=in_cluster, creds=creds)
-    except cloud.ContextError as exc:
-        err.print(f"[red]refused[/] {escape(str(exc))}")
-        raise typer.Exit(1)
+    namespace = cloudrun.create_run(spec, expected=context, kubeconfig=kc,
+                                    in_cluster=in_cluster, creds=creds)
     console.print(f"[green]started[/] run {spec.run_id} in ns/{namespace} "
                   f"(creds: {source}) · `loopkit cloud status {spec.run_id}`")
 
 
-@cloud_app.command("ls")
+@guarded_command("ls")
 def cloud_ls(
         kubeconfig: Path | None = typer.Option(None, "--kubeconfig", envvar="KUBECONFIG")) -> None:
     """List runs across run-* namespaces with their phase + worker counts (read-only)."""
     _require_cloud_extra()
     from ..extensions import cloudrun
-    runs = cloudrun.list_runs(kubeconfig=str(kubeconfig) if kubeconfig else None)
+    runs = cloudrun.list_runs(kubeconfig=kc_str(kubeconfig))
     if not runs:
         console.print("[dim]no runs[/]")
         return
@@ -317,14 +323,14 @@ def cloud_ls(
     console.print(table)
 
 
-@cloud_app.command("status")
+@guarded_command("status")
 def cloud_status(
         run: str = typer.Argument(..., help="Run id."),
         kubeconfig: Path | None = typer.Option(None, "--kubeconfig", envvar="KUBECONFIG")) -> None:
     """Show one run's phase + worker counts (read-only)."""
     _require_cloud_extra()
     from ..extensions import cloudrun
-    summary = cloudrun.run_status(run, kubeconfig=str(kubeconfig) if kubeconfig else None)
+    summary = cloudrun.run_status(run, kubeconfig=kc_str(kubeconfig))
     if summary is None:
         err.print(f"[yellow]no such run[/] {run} (namespace gone — GC'd or never created)")
         raise typer.Exit(1)
@@ -335,7 +341,7 @@ def cloud_status(
         title="loopkit cloud status"))
 
 
-@cloud_app.command("logs")
+@guarded_command("logs")
 def cloud_logs(
         run: str = typer.Argument(..., help="Run id."),
         role: str = typer.Option("worker", "--role", help="worker | coordinator."),
@@ -344,12 +350,11 @@ def cloud_logs(
     """Print a run's pod logs (read-only; kubectl-logs under the hood)."""
     _require_cloud_extra()
     from ..extensions import cloudrun
-    out = cloudrun.run_logs(run, role=role, tail_lines=tail,
-                            kubeconfig=str(kubeconfig) if kubeconfig else None)
+    out = cloudrun.run_logs(run, role=role, tail_lines=tail, kubeconfig=kc_str(kubeconfig))
     console.print(escape(out))
 
 
-@cloud_app.command("kill")
+@guarded_command("kill")
 def cloud_kill(
         run: str = typer.Argument(..., help="Run id."),
         context: str | None = typer.Option(None, "--context", envvar="LOOPKIT_CLOUD_CONTEXT"),
@@ -357,25 +362,14 @@ def cloud_kill(
         yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt.")) -> None:
     """Delete a run's namespace (and everything in it) — guarded by the context pin."""
     _require_cloud_extra()
-    from ..extensions import cloud, cloudrun
-    try:
-        current = cloud.check_context(cloud.current_context(kubeconfig), context)
-    except cloud.ContextError as exc:
-        err.print(f"[red]refused[/] {escape(str(exc))}")
-        raise typer.Exit(1)
-    if not yes and not typer.confirm(f"Delete run '{run}' (ns/run-{run}) on '{current}'?"):
-        err.print("[yellow]aborted[/]")
-        raise typer.Exit(1)
-    try:
-        namespace = cloudrun.delete_run(run, expected=context,
-                                        kubeconfig=str(kubeconfig) if kubeconfig else None)
-    except cloud.ContextError as exc:
-        err.print(f"[red]refused[/] {escape(str(exc))}")
-        raise typer.Exit(1)
+    from ..extensions import cloudrun
+    current = guard_context(kubeconfig, context)
+    confirm_or_abort(f"Delete run '{run}' (ns/run-{run}) on '{current}'?", yes=yes)
+    namespace = cloudrun.delete_run(run, expected=context, kubeconfig=kc_str(kubeconfig))
     console.print(f"[green]killed[/] run {run} (deleted ns/{namespace})")
 
 
-@cloud_app.command("schedule")
+@guarded_command("schedule")
 def cloud_schedule(
         name: str = typer.Argument(..., help="Schedule name (becomes the CronJob name)."),
         target: str = typer.Option(..., "--target", help="Repo the scheduled run operates on."),
@@ -403,10 +397,9 @@ def cloud_schedule(
     created on the wrong cluster.
     """
     _require_cloud_extra()
-    from ..extensions import cloud, triggers
+    from ..extensions import triggers
     if not image:
-        err.print("[red]schedule[/] no worker image — pass --image or set $LOOPKIT_WORKER_IMAGE.")
-        raise typer.Exit(1)
+        fail("schedule", "no worker image — pass --image or set $LOOPKIT_WORKER_IMAGE.")
     try:
         spec = triggers.ScheduleSpec(
             name=name, schedule=cron, target=target, image=image, from_issues=from_issues,
@@ -414,38 +407,26 @@ def cloud_schedule(
             env_name=env_name, submitter=_resolve_submitter(as_submitter),
             allow_fleet_fallback=allow_fleet_fallback)
     except ValueError as exc:
-        err.print(f"[red]schedule[/] {escape(str(exc))}")
-        raise typer.Exit(1)
-    try:
-        current = cloud.check_context(cloud.current_context(kubeconfig), context)
-    except cloud.ContextError as exc:
-        err.print(f"[red]refused[/] {escape(str(exc))}")
-        raise typer.Exit(1)
+        fail("schedule", escape(str(exc)))
+    current = guard_context(kubeconfig, context)
     work = "issues" + (f" (label {label})" if label else "") if from_issues else "fixed goal"
     console.print(Panel.fit(
         f"schedule [bold]{spec.name}[/] · cron \"{cron}\" → loopkit-system\n"
         f"target {target} · {work} · adapter {adapter} · {workers} worker(s)\n"
         f"context [bold]{current}[/] · image {image}",
         title="loopkit cloud schedule"))
-    if not yes and not typer.confirm(f"Create schedule '{spec.name}' on '{current}'?"):
-        err.print("[yellow]aborted[/]")
-        raise typer.Exit(1)
-    try:
-        created = triggers.create_schedule(spec, expected=context,
-                                           kubeconfig=str(kubeconfig) if kubeconfig else None)
-    except cloud.ContextError as exc:
-        err.print(f"[red]refused[/] {escape(str(exc))}")
-        raise typer.Exit(1)
+    confirm_or_abort(f"Create schedule '{spec.name}' on '{current}'?", yes=yes)
+    created = triggers.create_schedule(spec, expected=context, kubeconfig=kc_str(kubeconfig))
     console.print(f"[green]scheduled[/] {created} (\"{cron}\") · `loopkit cloud schedules`")
 
 
-@cloud_app.command("schedules")
+@guarded_command("schedules")
 def cloud_schedules(
         kubeconfig: Path | None = typer.Option(None, "--kubeconfig", envvar="KUBECONFIG")) -> None:
     """List loopkit CronJobs in loopkit-system (read-only)."""
     _require_cloud_extra()
     from ..extensions import triggers
-    schedules = triggers.list_schedules(kubeconfig=str(kubeconfig) if kubeconfig else None)
+    schedules = triggers.list_schedules(kubeconfig=kc_str(kubeconfig))
     if not schedules:
         console.print("[dim]no schedules[/]")
         return
@@ -458,7 +439,7 @@ def cloud_schedules(
     console.print(table)
 
 
-@cloud_app.command("unschedule")
+@guarded_command("unschedule")
 def cloud_unschedule(
         name: str = typer.Argument(..., help="Schedule name to delete."),
         context: str | None = typer.Option(None, "--context", envvar="LOOPKIT_CLOUD_CONTEXT"),
@@ -466,25 +447,14 @@ def cloud_unschedule(
         yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt.")) -> None:
     """Delete a CronJob by name — guarded by the context pin."""
     _require_cloud_extra()
-    from ..extensions import cloud, triggers
-    try:
-        current = cloud.check_context(cloud.current_context(kubeconfig), context)
-    except cloud.ContextError as exc:
-        err.print(f"[red]refused[/] {escape(str(exc))}")
-        raise typer.Exit(1)
-    if not yes and not typer.confirm(f"Delete schedule '{name}' on '{current}'?"):
-        err.print("[yellow]aborted[/]")
-        raise typer.Exit(1)
-    try:
-        removed = triggers.delete_schedule(name, expected=context,
-                                           kubeconfig=str(kubeconfig) if kubeconfig else None)
-    except cloud.ContextError as exc:
-        err.print(f"[red]refused[/] {escape(str(exc))}")
-        raise typer.Exit(1)
+    from ..extensions import triggers
+    current = guard_context(kubeconfig, context)
+    confirm_or_abort(f"Delete schedule '{name}' on '{current}'?", yes=yes)
+    removed = triggers.delete_schedule(name, expected=context, kubeconfig=kc_str(kubeconfig))
     console.print(f"[green]unscheduled[/] {removed}")
 
 
-@cloud_app.command("webhook")
+@guarded_command("webhook")
 def cloud_webhook(
         image: str | None = typer.Option(None, "--image", envvar="LOOPKIT_WORKER_IMAGE",
                                          help="Worker image for the runs this listener starts."),
@@ -515,35 +485,26 @@ def cloud_webhook(
     serves one forge — pick it with --provider.
     """
     _require_cloud_extra()
-    from ..extensions import cloud, cloudrun
+    from ..extensions import cloudrun
     from ..extensions import creds as credmod
     from ..extensions import triggers
     if not secret:
-        err.print("[red]webhook[/] no secret — set --secret or $LOOPKIT_WEBHOOK_SECRET "
-                  "(refusing to serve an unauthenticated endpoint).")
-        raise typer.Exit(1)
+        fail("webhook", "no secret — set --secret or $LOOPKIT_WEBHOOK_SECRET "
+                        "(refusing to serve an unauthenticated endpoint).")
     if not image:
-        err.print("[red]webhook[/] no worker image — pass --image or set $LOOPKIT_WORKER_IMAGE.")
-        raise typer.Exit(1)
+        fail("webhook", "no worker image — pass --image or set $LOOPKIT_WORKER_IMAGE.")
     if adapter in triggers.CLI_ADAPTERS:
-        err.print(f"[red]webhook[/] adapter '{adapter}' is refused on the untrusted webhook path "
-                  "(a CLI adapter holds the key in its own loop). Use --adapter claude-api.")
-        raise typer.Exit(1)
+        fail("webhook", f"adapter '{adapter}' is refused on the untrusted webhook path "
+                        "(a CLI adapter holds the key in its own loop). Use --adapter claude-api.")
     try:
         forge = triggers.provider_for(provider)
     except ValueError as exc:
-        err.print(f"[red]webhook[/] {escape(str(exc))}")
-        raise typer.Exit(1)
+        fail("webhook", escape(str(exc)))
     if forge.name == "gitlab" and not as_submitter:
-        err.print("[red]webhook[/] GitLab requires a pinned identity (--as <submitter>): its token "
-                  "isn't bound to the body, so the payload's author is not trusted.")
-        raise typer.Exit(1)
+        fail("webhook", "GitLab requires a pinned identity (--as <submitter>): its token "
+                        "isn't bound to the body, so the payload's author is not trusted.")
     # The listener submits in-cluster; verify the guard would allow it before binding the socket.
-    try:
-        cloud.check_context(cloud.current_context(in_cluster=True), context)
-    except cloud.ContextError as exc:
-        err.print(f"[red]refused[/] {escape(str(exc))}")
-        raise typer.Exit(1)
+    guard_context(None, context, in_cluster=True)
 
     def resolve(spec: cloudrun.RunSpec):
         return credmod.resolve_for_run(
@@ -574,7 +535,7 @@ def cloud_webhook(
         server.shutdown()
 
 
-@creds_app.command("set")
+@guarded_command("set", on=creds_app)
 def creds_set(
         as_submitter: str = typer.Option(..., "--as", help="The engineer/identity to register."),
         adapter: str = typer.Option("claude-code", "--adapter",
@@ -590,40 +551,28 @@ def creds_set(
     adapter to accumulate (e.g. `--adapter claude-api` then `--adapter openai-api`).
     """
     _require_cloud_extra()
-    from ..extensions import cloud
     from ..extensions import creds as credmod
     data = credmod.project(dict(os.environ), adapter)
     if not data:
         wanted = ", ".join((*secrets.ADAPTER_KEYS.get(adapter, ()), *secrets.GIT_ENV))
-        err.print(f"[red]creds set[/] no credentials in the environment for adapter '{adapter}' "
-                  f"(expected one of: {wanted}). Export them, then re-run.")
-        raise typer.Exit(1)
-    kc = str(kubeconfig) if kubeconfig else None
-    try:
-        current = cloud.check_context(cloud.current_context(kc), context)
-    except cloud.ContextError as exc:
-        err.print(f"[red]refused[/] {escape(str(exc))}")
-        raise typer.Exit(1)
+        fail("creds set", f"no credentials in the environment for adapter '{adapter}' "
+                          f"(expected one of: {wanted}). Export them, then re-run.")
+    kc = kc_str(kubeconfig)
+    current = guard_context(kc, context)
     console.print(Panel.fit(
         f"register [bold]{as_submitter}[/] ({env_name}) · keys {', '.join(sorted(data))}\n"
         f"→ ns/loopkit-system · context [bold]{current}[/]", title="loopkit cloud creds set"))
-    if not yes and not typer.confirm(f"Store {as_submitter}'s credentials on '{current}'?"):
-        err.print("[yellow]aborted[/]")
-        raise typer.Exit(1)
-    try:
-        name = credmod.set_credential(as_submitter, data, env_name=env_name, expected=context, kubeconfig=kc)
-    except cloud.ContextError as exc:
-        err.print(f"[red]refused[/] {escape(str(exc))}")
-        raise typer.Exit(1)
+    confirm_or_abort(f"Store {as_submitter}'s credentials on '{current}'?", yes=yes)
+    name = credmod.set_credential(as_submitter, data, env_name=env_name, expected=context, kubeconfig=kc)
     console.print(f"[green]registered[/] {as_submitter} → {name} (keys: {', '.join(sorted(data))})")
 
 
-@creds_app.command("ls")
+@guarded_command("ls", on=creds_app)
 def creds_ls(kubeconfig: Path | None = typer.Option(None, "--kubeconfig", envvar="KUBECONFIG")) -> None:
     """List registered submitters in loopkit-system (key NAMES only, never values)."""
     _require_cloud_extra()
     from ..extensions import creds as credmod
-    rows = credmod.list_credentials(kubeconfig=str(kubeconfig) if kubeconfig else None)
+    rows = credmod.list_credentials(kubeconfig=kc_str(kubeconfig))
     if not rows:
         console.print("[dim]no registered credentials[/] — `loopkit cloud creds set --as <you>`")
         return
@@ -635,7 +584,7 @@ def creds_ls(kubeconfig: Path | None = typer.Option(None, "--kubeconfig", envvar
     console.print(table)
 
 
-@creds_app.command("rm")
+@guarded_command("rm", on=creds_app)
 def creds_rm(
         as_submitter: str = typer.Option(..., "--as", help="The submitter to remove."),
         env_name: str = typer.Option("prod", "--env", help="Logical env tag."),
@@ -644,21 +593,9 @@ def creds_rm(
         yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt.")) -> None:
     """Delete a submitter's credential Secret — guarded by the context pin."""
     _require_cloud_extra()
-    from ..extensions import cloud
     from ..extensions import creds as credmod
-    kc = str(kubeconfig) if kubeconfig else None
-    try:
-        current = cloud.check_context(cloud.current_context(kc), context)
-    except cloud.ContextError as exc:
-        err.print(f"[red]refused[/] {escape(str(exc))}")
-        raise typer.Exit(1)
-    if not yes and not typer.confirm(f"Delete {as_submitter}'s credentials ({env_name}) on '{current}'?"):
-        err.print("[yellow]aborted[/]")
-        raise typer.Exit(1)
-    try:
-        name = credmod.delete_credential(as_submitter, env_name=env_name, expected=context, kubeconfig=kc)
-    except cloud.ContextError as exc:
-        err.print(f"[red]refused[/] {escape(str(exc))}")
-        raise typer.Exit(1)
+    kc = kc_str(kubeconfig)
+    current = guard_context(kc, context)
+    confirm_or_abort(f"Delete {as_submitter}'s credentials ({env_name}) on '{current}'?", yes=yes)
+    name = credmod.delete_credential(as_submitter, env_name=env_name, expected=context, kubeconfig=kc)
     console.print(f"[green]removed[/] {name}")
-

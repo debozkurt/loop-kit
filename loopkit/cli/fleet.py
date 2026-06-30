@@ -16,7 +16,7 @@ from rich.table import Table
 from .. import secrets, trace
 from ..config import Config, load_config
 from ..log import get_logger
-from ._support import DEFAULT_REDIS_URL, console, err, fleet_app
+from ._support import DEFAULT_REDIS_URL, console, err, fail, fleet_app
 
 
 @fleet_app.command("worker")
@@ -66,9 +66,8 @@ def fleet_worker(
     # key is a misconfiguration — stop with a clear, attributable error rather than 401-ing deep in a tick.
     if (os.environ.get("LOOPKIT_CREDS_EXPECTED") and adapter in ("claude-api", "openai-api")
             and secrets.current().api_key(adapter) is None):
-        err.print(f"[red]worker[/] no credential for adapter '{adapter}' — the per-run Secret had no "
-                  f"{'/'.join(secrets.ADAPTER_KEYS.get(adapter, ()))}. Register: loopkit cloud creds set.")
-        raise typer.Exit(1)
+        fail("worker", f"no credential for adapter '{adapter}' — the per-run Secret had no "
+                       f"{'/'.join(secrets.ADAPTER_KEYS.get(adapter, ()))}. Register: loopkit cloud creds set.")
     from ..extensions.fleet import RedisQueue, Worker, make_demo_runner, make_repo_runner
     trace.configure(None)                 # auto-on from env; each worker traces its own runs (Ch 12)
     queue = RedisQueue.from_url(redis_url, namespace=redis_namespace)

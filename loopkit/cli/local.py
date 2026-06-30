@@ -25,7 +25,7 @@ from ..loop import run_loop
 from ..pricing import DEFAULT_MODELS
 from ..stops import StopReason
 from .._templates import _CI_TEMPLATES, _CONFIG_TEMPLATE, _PROMPT_TEMPLATE
-from ._support import DEFAULT_CONFIG, _load, _render, app, console, err
+from ._support import DEFAULT_CONFIG, _load, _render, app, console, err, fail
 
 
 @app.command()
@@ -41,8 +41,7 @@ def init(path: Path = typer.Argument(Path("."), help="Repository to set up."),
     files = [("loopkit.toml", _CONFIG_TEMPLATE), ("PROMPT.md", _PROMPT_TEMPLATE)]
     if ci is not None:
         if ci not in _CI_TEMPLATES:
-            err.print(f"[red]init[/] unknown --ci value {ci!r} (expected: github | gitlab).")
-            raise typer.Exit(1)
+            fail("init", f"unknown --ci value {ci!r} (expected: github | gitlab).")
         files.append(_CI_TEMPLATES[ci])
     wrote: list[str] = []
     for name, content in files:
@@ -228,8 +227,7 @@ def run(config: Path = typer.Option(DEFAULT_CONFIG, "--config", "-c"),
     # are two routes to the same thing. The issue number is captured so a `Closes #N` lands in the PR.
     issue_number: int | None = None
     if from_event is not None and from_issue is not None:
-        err.print("[red]run[/] pass only one of --from-event or --from-issue.")
-        raise typer.Exit(1)
+        fail("run", "pass only one of --from-event or --from-issue.")
     if from_event is not None:
         cfg.goal, issue_number = _goal_from_event(from_event)
     elif from_issue is not None:
@@ -263,17 +261,15 @@ def run(config: Path = typer.Option(DEFAULT_CONFIG, "--config", "-c"),
         from ..gate import ShellGate
         stab = safety.gate_stability(ShellGate(cfg.gate.iteration), cfg.repo_path(), runs)
         if not stab.deterministic and not force:
-            err.print(f"[red]preflight[/] iteration gate is non-deterministic: {runs} runs on an "
-                      f"unchanged tree gave {stab.passes} pass / {runs - stab.passes} fail. A flaky "
-                      f"gate corrupts every stop decision — fix the gate, or pass [bold]--force[/].")
-            raise typer.Exit(1)
+            fail("preflight", f"iteration gate is non-deterministic: {runs} runs on an "
+                              f"unchanged tree gave {stab.passes} pass / {runs - stab.passes} fail. A flaky "
+                              f"gate corrupts every stop decision — fix the gate, or pass [bold]--force[/].")
         console.print(f"[green]gate[/] deterministic over {runs} runs")
 
     try:
         agent = build_agent(cfg.agent)
     except ValueError as exc:
-        err.print(f"[red]run[/] {escape(str(exc))}")
-        raise typer.Exit(1)
+        fail("run", escape(str(exc)))
     console.print(Panel.fit(
         f"[bold]{cfg.goal}[/]\nrepo {cfg.repo} · branch {cfg.branch} · adapter {cfg.agent.adapter} · "
         f"budget ${cfg.agent.max_cost_usd}"
@@ -311,13 +307,11 @@ def _goal_from_event(path: Path) -> tuple[str, int | None]:
     try:
         payload = json.loads(path.read_text())
     except (OSError, json.JSONDecodeError) as exc:
-        err.print(f"[red]run[/] could not read --from-event {path}: {escape(str(exc))}")
-        raise typer.Exit(1)
+        fail("run", f"could not read --from-event {path}: {escape(str(exc))}")
     event = triggers.parse_event_payload(payload)
     if event is None:
-        err.print(f"[red]run[/] --from-event {path} carries no actionable issue "
-                  "(not an issue event, or a closed/edited action).")
-        raise typer.Exit(1)
+        fail("run", f"--from-event {path} carries no actionable issue "
+                    "(not an issue event, or a closed/edited action).")
     goal = f"{event.title}\n\n{event.body}".strip() if event.body else event.title
     return goal or f"Resolve issue #{event.issue_number}", event.issue_number
 
@@ -327,9 +321,8 @@ def _goal_from_issue(repo: Path, number: int, provider: str) -> tuple[str, int]:
     from ..extensions import issues
     issue = issues.fetch_issue(repo, number, provider=provider)
     if issue is None:
-        err.print(f"[red]run[/] could not fetch issue #{number} (provider {provider}) — "
-                  "is gh/glab installed + authenticated, and is the repo a github/gitlab remote?")
-        raise typer.Exit(1)
+        fail("run", f"could not fetch issue #{number} (provider {provider}) — "
+                    "is gh/glab installed + authenticated, and is the repo a github/gitlab remote?")
     task = issues.issue_to_task(issue)                    # reuse the shared goal builder
     return task["goal"], number
 
@@ -366,9 +359,8 @@ def measure(config: Path = typer.Option(DEFAULT_CONFIG, "--config", "-c"),
     if not cfg.gate.acceptance:
         # pass^k is defined by the held-out oracle: "pass" == the acceptance gate certified DONE.
         # Without it there is nothing to measure reliability against.
-        err.print("[red]measure[/] needs a held-out [bold]gate.acceptance[/] — pass^k is the rate at "
-                  "which that gate certifies the goal. Set it in loopkit.toml.")
-        raise typer.Exit(1)
+        fail("measure", "needs a held-out [bold]gate.acceptance[/] — pass^k is the rate at "
+                        "which that gate certifies the goal. Set it in loopkit.toml.")
     trace.configure(cfg.trace)
 
     from ..extensions.fleet import make_repo_runner
@@ -496,8 +488,7 @@ def _run_sandboxed(cfg: Config, config_path: Path, *, dry_run: bool, max_iter: i
                    force: bool, branch: str | None = None) -> None:
     """Re-invoke `loopkit run` inside the container, with the repo bind-mounted at /work (Ch 16)."""
     if shutil.which("docker") is None:
-        err.print("[red]sandbox[/] docker not found on PATH (build the image: docker build -t loopkit .)")
-        raise typer.Exit(1)
+        fail("sandbox", "docker not found on PATH (build the image: docker build -t loopkit .)")
     repo = cfg.repo_path()
     inner = ["loopkit", "run", "-c", config_path.name]
     if dry_run:

@@ -8,6 +8,7 @@ what avoids an import cycle.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import NoReturn
 
 import typer
 from rich.console import Console
@@ -64,3 +65,28 @@ def _render(result: RunResult) -> None:
     if result.detail:
         lines.append(result.detail)
     console.print(Panel.fit("\n".join(lines), title="result"))
+
+
+# --- Shared command-body helpers (the cross-cutting idioms, in one place) ---------------------
+
+def fail(tag: str, message: str) -> NoReturn:
+    """Print ``[red]tag[/] message`` to stderr and exit 1 — the CLI's uniform error-exit.
+
+    ``message`` may contain rich markup; the caller escapes untrusted text (e.g. exception strings)
+    with ``rich.markup.escape`` exactly as before. Typed ``NoReturn`` so call sites need no ``raise``.
+    """
+    err.print(f"[red]{tag}[/] {message}")
+    raise typer.Exit(1)
+
+
+def kc_str(kubeconfig: Path | None) -> str | None:
+    """A ``--kubeconfig`` Path option as the ``str | None`` the extension functions expect."""
+    return str(kubeconfig) if kubeconfig else None
+
+
+def confirm_or_abort(prompt: str, *, yes: bool, in_cluster: bool = False) -> None:
+    """Confirm a mutating action or exit cleanly. Skipped when ``--yes`` or running ``in_cluster``
+    (a CronJob/webhook pod has no TTY — consent was given when the schedule/listener was created)."""
+    if not yes and not in_cluster and not typer.confirm(prompt):
+        err.print("[yellow]aborted[/]")
+        raise typer.Exit(1)
