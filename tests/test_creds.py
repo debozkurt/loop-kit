@@ -88,6 +88,55 @@ def test_resolve_for_run_threads_the_injected_reader():
 
 
 # --------------------------------------------------------------------------------------------
+# Run-credential decision (the typer-free policy the CLI/cron/webhook render) — no CliRunner.
+# --------------------------------------------------------------------------------------------
+def test_resolve_submitter_precedence():
+    assert creds.resolve_submitter("alice", {"LOOPKIT_SUBMITTER": "envsub"}) == "alice"   # explicit wins
+    assert creds.resolve_submitter(None, {"LOOPKIT_SUBMITTER": "envsub"}) == "envsub"      # then the env
+    assert creds.resolve_submitter(None, {}) == creds.DEFAULT_SUBMITTER                    # else the fleet default
+
+
+def test_creds_from_env_keeps_only_the_cred_vars():
+    env = {"ANTHROPIC_API_KEY": "a", "GH_TOKEN": "g", "PATH": "/bin", "JUNK": "j"}
+    assert creds.creds_from_env(env) == {"ANTHROPIC_API_KEY": "a", "GH_TOKEN": "g"}
+
+
+def test_decide_mock_needs_no_creds():
+    d = creds.decide_run_creds("mock", "alice", "prod", from_env=False, env={})
+    assert d.outcome == "resolved" and d.source == "mock" and d.data == {}
+
+
+def test_decide_from_env_projects_to_the_adapter_key():
+    env = {"ANTHROPIC_API_KEY": "sk-ant", "OPENAI_API_KEY": "sk-oa", "JUNK": "x"}
+    d = creds.decide_run_creds("claude-code", "alice", "prod", from_env=True, env=env)
+    assert d.outcome == "resolved" and d.source == "from-env"
+    assert d.data == {"ANTHROPIC_API_KEY": "sk-ant"}        # the OpenAI key is dropped (blast radius)
+
+
+def test_decide_resolves_the_submitters_own_key():
+    store = {("loopkit-creds-prod-alice", creds.SYSTEM_NAMESPACE):
+             _source("alice", "prod", ANTHROPIC_API_KEY="sk-ant")}
+    d = creds.decide_run_creds("claude-code", "alice", "prod", from_env=False, env={}, reader=_reader(store))
+    assert d.outcome == "resolved" and d.source == "submitter"
+    assert d.data == {"ANTHROPIC_API_KEY": "sk-ant"}
+
+
+def test_decide_surfaces_fleet_as_needing_consent_not_silent_use():
+    # Only the shared fleet key exists → the policy must NOT grant it; it returns it for the caller to consent.
+    store = {("loopkit-creds-prod-fleet", creds.SYSTEM_NAMESPACE):
+             _source("fleet", "prod", ANTHROPIC_API_KEY="sk-fleet")}
+    d = creds.decide_run_creds("claude-code", "newbie", "prod", from_env=False, env={}, reader=_reader(store))
+    assert d.outcome == "needs_fleet_consent" and d.data == {}      # not granted here
+    assert d.submitter == "newbie" and d.fleet_data == {"ANTHROPIC_API_KEY": "sk-fleet"}
+
+
+def test_decide_refuses_with_no_key_and_no_fleet():
+    d = creds.decide_run_creds("claude-code", "nobody", "prod", from_env=False, env={}, reader=_reader({}))
+    assert d.outcome == "refused" and d.submitter == "nobody"
+    assert "no credentials" in d.message and "fleet default" in d.message
+
+
+# --------------------------------------------------------------------------------------------
 # Registration — guard-first set/delete with injected seams; reserved-key recording.
 # --------------------------------------------------------------------------------------------
 @pytest.fixture

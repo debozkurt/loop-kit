@@ -202,7 +202,10 @@ A managed cloud context (DOKS) is **production-sensitive** under the global kube
   `Tiltfile`'s `allow_k8s_contexts(...)` + `fail()` guarantee, extended to the real cloud context.
   `check_context()` runs before every mutation (`bootstrap`, and every Phase-3 command on top) and is
   **fail-closed**: no pin (neither `--context` nor `$LOOPKIT_CLOUD_CONTEXT`) → refuse, rather than
-  trusting the ambient context.
+  trusting the ambient context. In the CLI this is **structural, not by-convention**: every
+  `cloud`/`creds` command registers through the `@guarded_command` decorator (`cli/cloud.py`), which
+  maps any `ContextError` — from the upfront guard or the library's re-check on every mutation — to a
+  uniform refusal, so a newly-added command cannot bypass the guard.
 - Prefer explicit `--context=<expected>` over ambient current-context for mutating operations — the
   pin is *declared*, never inferred from whatever current-context happens to be.
 - Treat the repo-local `KUBECONFIG` isolation pattern from the `Makefile` as the model — the

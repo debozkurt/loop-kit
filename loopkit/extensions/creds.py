@@ -24,7 +24,7 @@ Deferred client: only the `_client_*` seams import `kubernetes` (the `[cloud]` e
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Callable, Protocol
+from typing import Callable, Mapping, Protocol
 
 from .. import secrets
 from ..log import get_logger
@@ -151,6 +151,69 @@ def resolve_for_run(identity: Identity, *, allow_fleet_fallback: bool = False,
     """Convenience seam the CLI/webhook/cron call: build a `SecretResolver` (real or injected) + resolve."""
     resolver = SecretResolver(reader=reader or _client_secret_reader(kubeconfig, in_cluster=in_cluster))
     return resolver.resolve(identity, allow_fleet_fallback=allow_fleet_fallback)
+
+
+# --------------------------------------------------------------------------------------------
+# Run-credential decision — the Phase-5a fallback POLICY, typer-free so the submit path just renders
+# it (no CLI dependency here, so the whole decision tree is unit-testable with an injected reader).
+# --------------------------------------------------------------------------------------------
+def creds_from_env(env: Mapping[str, str]) -> dict[str, str]:
+    """The agent + git credentials present in a process environment (the `--from-env` escape hatch)."""
+    return {var: env[var] for var in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GITHUB_TOKEN", "GH_TOKEN")
+            if env.get(var)}
+
+
+def resolve_submitter(explicit: str | None, env: Mapping[str, str]) -> str:
+    """Who a run is for: explicit `--as` → `$LOOPKIT_SUBMITTER` → the shared `fleet` default."""
+    return explicit or env.get("LOOPKIT_SUBMITTER") or DEFAULT_SUBMITTER
+
+
+@dataclass(frozen=True)
+class RunCredsDecision:
+    """How a run's credentials resolve, for the submit path (CLI/cron/webhook) to render.
+
+    `outcome`:
+      - `resolved`            — `.data`/`.source` are ready to use.
+      - `needs_fleet_consent` — only the shared `fleet` key is available; the caller must obtain
+                                operator consent before using `.fleet_data` (a shared key isn't
+                                attributable, so this layer never grants it silently).
+      - `refused`             — no submitter key and no fleet default; exit with `.message`.
+    """
+
+    outcome: str
+    data: dict[str, str]
+    source: str                              # mock | from-env | submitter | (empty until consented)
+    submitter: str = ""
+    fleet_data: dict[str, str] = field(default_factory=dict)
+    message: str = ""
+
+
+def decide_run_creds(adapter: str, submitter: str, env_name: str, *, from_env: bool,
+                     env: Mapping[str, str], kubeconfig=None, in_cluster: bool = False,
+                     reader: SecretReader | None = None) -> RunCredsDecision:
+    """Classify how a run's credentials resolve — the Phase-5a policy, with no CLI/typer dependency.
+
+    `mock` needs none; `--from-env` takes (projected) keys from `env`; otherwise the submitter's own
+    registered key wins, and only if it's absent does the shared `fleet` key come into play — but as a
+    `needs_fleet_consent` outcome the caller must explicitly grant (the fail-closed posture). Inject
+    `reader` to unit-test the whole tree without a cluster.
+    """
+    if adapter == "mock":
+        return RunCredsDecision("resolved", {}, "mock")
+    if from_env:
+        return RunCredsDecision("resolved", project(creds_from_env(env), adapter), "from-env")
+    ident = Identity(submitter, env_name, adapter)
+    own = resolve_for_run(ident, allow_fleet_fallback=False, kubeconfig=kubeconfig,
+                          in_cluster=in_cluster, reader=reader)
+    if own.source == "submitter":
+        return RunCredsDecision("resolved", own.data, "submitter")
+    fleet = resolve_for_run(ident, allow_fleet_fallback=True, kubeconfig=kubeconfig,
+                            in_cluster=in_cluster, reader=reader)
+    if fleet.source == "fleet":
+        return RunCredsDecision("needs_fleet_consent", {}, "", submitter=submitter, fleet_data=fleet.data)
+    return RunCredsDecision("refused", {}, "", submitter=submitter,
+                            message=f"no credentials for submitter '{submitter}' and no fleet default. "
+                                    "Register one: loopkit cloud creds set --as <you> --adapter <adapter>.")
 
 
 # --------------------------------------------------------------------------------------------
