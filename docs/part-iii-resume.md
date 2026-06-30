@@ -44,6 +44,13 @@ Each phase is built + unit-tested token-free; the live column is what still need
 
 ## Recent work (newest first — priming only; full history in `git log`)
 
+- **2026-06-29 — gate-aware `doctor`** (UX, branch `feat/gate-aware-doctor`): `loopkit doctor` now
+  **runs the iteration gate once** on the current tree and reports what the verdict means for a run —
+  *already passes* (the loop may instantly/ falsely DONE — a too-weak gate), *fails* (the healthy
+  start), or *broken command* (a misconfig, flagged not mistaken for a test failure) — and warns when
+  `gate.acceptance == gate.iteration` (defeats the held-out check, Ch 9). `--no-gate` skips it; the
+  verdict is advisory (doctor's exit still tracks the safety preflight). First slice of the
+  "idiot-proof local + CI" UX push. +5 tests (`test_doctor.py`), 333 → 338.
 - **2026-06-29 — `cli.py` refactor** (branch `refactor/cli-package`, behavior-identical, surface-test
   guarded): split the 1443-line `cli.py` into a `cli/` package by deployment tier (`local`/`fleet`/
   `cloud`/`_support`); DRY'd the cross-cutting idioms (`fail`/`kc_str`/`confirm_or_abort`) and made the

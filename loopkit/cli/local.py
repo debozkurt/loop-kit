@@ -58,8 +58,19 @@ def init(path: Path = typer.Argument(Path("."), help="Repository to set up."),
 
 
 @app.command()
-def doctor(config: Path = typer.Option(DEFAULT_CONFIG, "--config", "-c")) -> None:
-    """Pre-flight checks: is this repo safe to point the loop at? (Ch 16)"""
+def doctor(config: Path = typer.Option(DEFAULT_CONFIG, "--config", "-c"),
+           gate: bool = typer.Option(True, "--gate/--no-gate",
+                                     help="Run the iteration gate once on the current tree and report its "
+                                          "verdict — the highest-signal readiness check (default on; pass "
+                                          "--no-gate to skip, e.g. when the gate is slow).")) -> None:
+    """Pre-flight checks: is this repo safe to point the loop at, and is the gate set up to actually work?
+
+    Beyond the static checks (branch, agent, budget), `doctor` runs the iteration gate once on the
+    unchanged tree — the single highest-signal readiness check. A gate that already *passes* means the
+    loop may declare DONE immediately (or is too weak); a gate that *fails* is the healthy precondition
+    (the loop has something to drive toward); a broken command is flagged. It also warns when the
+    acceptance gate is identical to the iteration gate (which defeats the held-out check, Ch 9).
+    """
     cfg = _load(config)
     table = Table(title="loopkit doctor", show_header=True, header_style="bold")
     table.add_column("check")
@@ -81,8 +92,19 @@ def doctor(config: Path = typer.Option(DEFAULT_CONFIG, "--config", "-c")) -> Non
         guarded = bool(cfg.safety.protected_paths)
         table.add_row("acceptance gate", "[green]set[/]" if guarded else "[yellow]unguarded[/]",
                       cfg.gate.acceptance)
+        # The held-out gate must be a DIFFERENT check than iteration, or the loop optimizes against the
+        # very thing meant to catch its overfitting (Ch 9) — a common, silent setup mistake.
+        if cfg.gate.acceptance.strip() == cfg.gate.iteration.strip():
+            table.add_row("held-out check", "[red]not held-out[/]",
+                          "the acceptance gate is identical to the iteration gate — the loop can overfit "
+                          "it. Make acceptance a broader/different check it never optimizes against.")
     else:
         table.add_row("acceptance gate", "[yellow]none[/]", "no held-out check (Ch 9)")
+
+    # The single highest-signal readiness check: run the iteration gate once on the unchanged tree.
+    # Informational — it never changes doctor's exit code (which tracks the safety preflight).
+    if gate:
+        _doctor_gate_verdict(table, cfg)
 
     # Tracing (Ch 14-15): full-tree LangSmith observability, auto-on when langsmith + a key present.
     trace.configure(cfg.trace)
@@ -169,6 +191,43 @@ def _doctor_budget(table: Table, cfg: Config) -> None:
         else:
             table.add_row("budget", "[yellow]no price[/]",
                           "codex cost needs a priced --model, else 0.0")
+
+
+# Output signatures that mean the gate COMMAND is broken (a typo, a missing tool/path) rather than a
+# legitimate test failure — the most common beginner gate mistake. Heuristic, so the row is hedged.
+_GATE_BROKEN_HINTS = ("command not found", "no such file or directory", "not recognized",
+                      "can't open file", "cannot find", "no tests ran")
+
+
+def _doctor_gate_verdict(table: Table, cfg: Config) -> None:
+    """Run the iteration gate once on the current tree and translate the verdict into a readiness signal.
+
+    The gate runs the project's own test command in `repo_path()`; the result tells a beginner the one
+    thing the static checks can't — whether the loop has real work to do, will instantly (falsely)
+    succeed against a too-weak gate, or is pointed at a gate command that doesn't even run.
+    """
+    from ..gate import ShellGate
+    try:
+        result = ShellGate(cfg.gate.iteration).check(cfg.repo_path())
+    except Exception as exc:                          # noqa: BLE001 — can't even launch it → a misconfig
+        table.add_row("gate verdict", "[red]error[/]", escape(f"couldn't run `{cfg.gate.iteration}`: {exc}"))
+        return
+    if result.passed:
+        table.add_row("gate verdict", "[yellow]already passes[/]",
+                      "green on the unchanged tree → the loop may finish immediately. Make sure the gate "
+                      "captures the goal (a too-weak gate = an instant false DONE).")
+        return
+    feedback = result.feedback or ""
+    last = next((ln for ln in reversed(feedback.splitlines()) if ln.strip()), "")
+    if any(hint in feedback.lower() for hint in _GATE_BROKEN_HINTS):
+        table.add_row("gate verdict", "[red]gate looks broken[/]",
+                      escape(f"the command failed to run cleanly (not a test failure) — check "
+                             f"`gate.iteration`: {last[:120]}"))
+    else:
+        detail = "fails on the unchanged tree → the loop has something to drive toward (the healthy start)."
+        if last:
+            detail += f" Last line: {escape(last[:120])}"
+        table.add_row("gate verdict", "[green]fails → has work[/]", detail)
 
 
 @app.command()
