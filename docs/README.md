@@ -1,13 +1,14 @@
 # loopkit docs — index
 
 Start with the **operator guides**; drop into the **architecture wiki** for how it's built; the
-**project/phase docs** are development history and design records.
+**phase references** are the design records + the current-phase resume doc.
 
 ## 🧭 Operator guides — using loopkit on your repo
 
 | Doc | When |
 |---|---|
 | [`USING-ON-YOUR-REPO.md`](USING-ON-YOUR-REPO.md) | point loopkit at your own repo, end to end |
+| [`../examples/`](../examples/) | the four runnable example dirs, mapped (walkthrough · demo-repo · gates · CI) |
 | [`../examples/walkthrough/`](../examples/walkthrough/) | **copy-this-run-it-see-DONE** on the bundled demo repo |
 | [`CONTROL-FILES.md`](CONTROL-FILES.md) | every `loopkit.toml` / `PROMPT.md` knob, annotated |
 | [`../examples/gates/`](../examples/gates/) | gates are *any shell command* — ready-to-copy two-oracle kits (test + docs + LLM-review) |
@@ -19,18 +20,30 @@ Start with the **operator guides**; drop into the **architecture wiki** for how 
 
 | Doc | Covers |
 |---|---|
-| [`architecture/`](architecture/README.md) | the living architecture wiki (system today, cloud, adapters/auth, security) |
+| [`architecture/`](architecture/README.md) | the living architecture wiki (system today + the module-ownership map, cloud, adapters/auth, security) — start with its README |
 | [`../examples/ci/`](../examples/ci/) | the CI deployment tier templates (claude-api + claude-code/OAuth) |
 
-## 📋 Project / phase records (development history)
+## 📋 Phase references & design records
 
-The current-phase source of truth + design records and resume docs:
+These are **living references**, not archived history — the architecture wiki delegates the deep
+detail to them. Read in this order:
 
-| Doc | Covers |
-|---|---|
-| [`part-iii-resume.md`](part-iii-resume.md) | **current phase** — state, decisions, next step, changelog |
-| [`part-ii-resume.md`](part-ii-resume.md) | the prior phase (library + dev fleet) |
-| [`part-iii-ci-mode.md`](part-iii-ci-mode.md) · [`part-iii-ecosystem.md`](part-iii-ecosystem.md) | the CI tier + the three-tier ecosystem teaching module |
-| [`part-iii-agent-isolation.md`](part-iii-agent-isolation.md) · [`part-iii-skills-repo.md`](part-iii-skills-repo.md) | the keyless-executor split + the cross-run skills repo |
-| [`part-iii-security-review.md`](part-iii-security-review.md) · [`part-iii-prior-art.md`](part-iii-prior-art.md) | the adversarial review + the prior-art survey |
-| [`tilt-fleet-plan.md`](tilt-fleet-plan.md) | the dev kind/Tilt fleet plan |
+- **Start here (current phase):** [`part-iii-resume.md`](part-iii-resume.md) — state, locked
+  decisions, sharp edges, next step.
+- **The three-tier teaching view:** [`part-iii-ecosystem.md`](part-iii-ecosystem.md) — local · CI ·
+  cloud, as a lesson.
+- **Design records (the canonical detail behind the wiki):**
+  [`part-iii-ci-mode.md`](part-iii-ci-mode.md) (the CI tier) ·
+  [`part-iii-agent-isolation.md`](part-iii-agent-isolation.md) (the keyless-executor split) ·
+  [`part-iii-skills-repo.md`](part-iii-skills-repo.md) (the cross-run skills repo).
+- **Cross-cutting:** [`part-iii-security-review.md`](part-iii-security-review.md) (the adversarial
+  full-flow review — canonical) · [`part-iii-prior-art.md`](part-iii-prior-art.md) (canonical
+  harnesses mapped to loopkit's design).
+
+## 🗄️ Closed phases (archived)
+
+Completed-phase records, kept for reference in [`archive/`](archive/):
+
+- [`archive/part-ii-resume.md`](archive/part-ii-resume.md) — Part II (library + dev fleet), done.
+- [`archive/part-ii-tilt-fleet-plan.md`](archive/part-ii-tilt-fleet-plan.md) — the dev kind/Tilt
+  fleet build plan, built + run live.

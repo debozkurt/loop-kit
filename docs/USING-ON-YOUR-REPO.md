@@ -78,6 +78,10 @@ pr_base  = "main"        # the base branch the PR targets
 draft    = true          # open as a draft — a human reviews + merges
 ```
 
+**One-off, no block:** `loopkit run --open-pr` flips `enabled` + `open_pr` for a single run — the
+same switch a static `[remote]` sets. It's how the CI tier (§4) opens its draft PR without keeping a
+`[remote]` block in the repo's config.
+
 **Prerequisites** (loopkit shells out to these — no Python SDK dependency):
 
 ```bash
@@ -172,4 +176,4 @@ module **[`part-iii-ecosystem.md`](part-iii-ecosystem.md)**; the templates live 
 - **Private repos in pods** need the clone credential mounted, not just the push one.
 
 See also: [`CONTROL-FILES.md`](CONTROL-FILES.md) for the `.md` files that steer each run, and
-[`tilt-fleet-plan.md`](tilt-fleet-plan.md) for the cluster bring-up.
+[`archive/part-ii-tilt-fleet-plan.md`](archive/part-ii-tilt-fleet-plan.md) for the cluster bring-up.

@@ -13,7 +13,7 @@ how the system is built and where it is going, for humans and for AI agents work
 These docs are load-bearing. **Update them in the same change that alters the system** — a new
 module/subsystem, a changed contract, a locked (or reversed) decision, a new failure mode, a new
 control/data-flow path. Keep the page that *owns* the area current and keep the master diagram below
-in sync with the topology. History goes in git and the resume-doc changelog, not here. See
+in sync with the topology. History goes in `git log`, not here (nor in the resume doc). See
 [`CLAUDE.md`](../../CLAUDE.md) → *Documentation contract* for the full rule.
 
 ## Page map

@@ -37,3 +37,16 @@ protected_paths = ["tests/", "gate/"]      # the loop may NOT touch these — gu
 require_clean_tree = true                  # refuse to start on uncommitted changes (durability needs it)
 allow_branches = ["loopkit/*"]
 forbid_branches = ["main", "master"]
+
+# [remote] — the OUTWARD edge (Ch 16), opt-in. After a run reaches DONE, push the loop's branch and
+# (optionally) open a draft PR/MR. OFF unless you uncomment AND set enabled = true — nothing leaves your
+# machine otherwise. The loop is always durable LOCALLY (a commit every tick) regardless of this block.
+# [remote]
+# enabled  = true                          # master switch — no push/PR happens unless this is true
+# name     = "origin"                      # the git remote to push to
+# push     = true                          # push the loop branch when the run reaches DONE
+# open_pr  = true                          # open a PR/MR after pushing (needs gh / glab installed + authed)
+# provider = "auto"                        # auto (detect from the remote URL) | github | gitlab
+# pr_base  = "main"                        # the base branch the PR/MR targets
+# draft    = true                          # open it as a draft — a human reviews + merges
+# One-run alternative (no block needed): `loopkit run --open-pr` flips enabled+open_pr for a single run (the CI tier).
