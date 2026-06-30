@@ -1,0 +1,514 @@
+"""Local single-loop + course commands: init, doctor, run, measure, demo, learn, executor.
+
+The CI deployment tier rides `run` (--from-event/--from-issue/--open-pr); `executor` is the keyless
+agent-isolation sidecar. Extension imports stay function-local so importing the CLI pulls no optional dep.
+"""
+from __future__ import annotations
+
+import importlib.util
+import json
+import os
+import shutil
+import subprocess
+from datetime import datetime, timezone
+from pathlib import Path
+
+import typer
+from rich.markup import escape
+from rich.panel import Panel
+from rich.table import Table
+
+from .. import pricing, safety, scenarios, secrets, trace
+from ..agent import build_agent
+from ..config import Config
+from ..loop import run_loop
+from ..pricing import DEFAULT_MODELS
+from ..stops import StopReason
+from .._templates import _CI_TEMPLATES, _CONFIG_TEMPLATE, _PROMPT_TEMPLATE
+from ._support import DEFAULT_CONFIG, _load, _render, app, console, err
+
+
+@app.command()
+def init(path: Path = typer.Argument(Path("."), help="Repository to set up."),
+         ci: str | None = typer.Option(None, "--ci",
+                                        help="Also scaffold a CI workflow: github | gitlab (Phase 5c).")) -> None:
+    """Scaffold a starter loopkit.toml and PROMPT.md in PATH (never overwrites).
+
+    With `--ci github|gitlab`, also scaffold a CI workflow that runs the loop on a labelled issue with
+    no cluster (the CI deployment tier) — see docs/part-iii-ci-mode.md.
+    """
+    path = path.expanduser().resolve()
+    files = [("loopkit.toml", _CONFIG_TEMPLATE), ("PROMPT.md", _PROMPT_TEMPLATE)]
+    if ci is not None:
+        if ci not in _CI_TEMPLATES:
+            err.print(f"[red]init[/] unknown --ci value {ci!r} (expected: github | gitlab).")
+            raise typer.Exit(1)
+        files.append(_CI_TEMPLATES[ci])
+    wrote: list[str] = []
+    for name, content in files:
+        target = path / name
+        if target.exists():
+            err.print(f"[yellow]exists, skipped[/] {name}")
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)     # e.g. .github/workflows/
+        target.write_text(content)
+        wrote.append(name)
+    body = "\n".join(f"[green]wrote[/] {w}" for w in wrote) or "nothing new to write"
+    console.print(Panel.fit(body, title="loopkit init"))
+    console.print("Next: edit the goal + gates, then [bold]loopkit doctor[/] to validate.")
+
+
+@app.command()
+def doctor(config: Path = typer.Option(DEFAULT_CONFIG, "--config", "-c")) -> None:
+    """Pre-flight checks: is this repo safe to point the loop at? (Ch 16)"""
+    cfg = _load(config)
+    table = Table(title="loopkit doctor", show_header=True, header_style="bold")
+    table.add_column("check")
+    table.add_column("status")
+    table.add_column("detail", overflow="fold")
+
+    pf = safety.preflight(cfg)
+    if pf.ok:
+        table.add_row("safety preflight", "[green]ok[/]", f"branch {cfg.branch}")
+    else:
+        for problem in pf.problems:
+            table.add_row("safety preflight", "[red]fail[/]", problem)
+
+    _doctor_agent(table, cfg)
+    _doctor_budget(table, cfg)
+
+    table.add_row("iteration gate", "[green]set[/]", cfg.gate.iteration)
+    if cfg.gate.acceptance:
+        guarded = bool(cfg.safety.protected_paths)
+        table.add_row("acceptance gate", "[green]set[/]" if guarded else "[yellow]unguarded[/]",
+                      cfg.gate.acceptance)
+    else:
+        table.add_row("acceptance gate", "[yellow]none[/]", "no held-out check (Ch 9)")
+
+    # Tracing (Ch 14-15): full-tree LangSmith observability, auto-on when langsmith + a key present.
+    trace.configure(cfg.trace)
+    if trace.active():
+        table.add_row("tracing", "[green]on[/]", f"LangSmith → project {trace.project()}")
+    elif cfg.trace.enabled:
+        table.add_row("tracing", "[yellow]unavailable[/]",
+                      escape("enabled but langsmith not importable (pip install 'loopkit[trace]')"))
+    else:
+        table.add_row("tracing", "[dim]off[/]",
+                      escape("auto: install loopkit[trace] + set LANGSMITH_API_KEY"))
+
+    console.print(table)
+    if not pf.ok:
+        raise typer.Exit(1)
+
+
+# Adapter binary / SDK / key for each adapter name, used by `doctor`.
+_CLI_BINARIES = {"claude-code": "claude", "codex": "codex"}
+
+
+_API_REQUIREMENTS = {"claude-api": ("anthropic", "ANTHROPIC_API_KEY", "claude"),
+                     "openai-api": ("openai", "OPENAI_API_KEY", "openai")}
+
+
+def _claude_code_auth_note(cfg: Config) -> str:
+    """How `claude-code` will authenticate — surfaced so a run's BILLING is visible before it starts.
+    doctor doesn't install/scrub creds, so os.environ still reflects the shell as the agent would see it."""
+    have_key = bool(os.environ.get("ANTHROPIC_API_KEY"))
+    if cfg.agent.use_api_key:
+        return ("auth [yellow]ANTHROPIC_API_KEY → billed API[/]" if have_key
+                else "[yellow]--api-key set but ANTHROPIC_API_KEY not in env[/]")
+    note = "auth subscription (claude login / CLAUDE_CODE_OAUTH_TOKEN)"
+    if have_key:
+        note += " [dim]· ANTHROPIC_API_KEY present but withheld (--api-key to bill it)[/]"
+    return note
+
+
+def _doctor_agent(table: Table, cfg: Config) -> None:
+    """Is the configured adapter actually runnable here — binary on PATH, or SDK + key present?"""
+    adapter = cfg.agent.adapter
+    if adapter == "mock":
+        table.add_row("agent", "[green]ok[/]", "mock (no binary needed)")
+    elif adapter in _CLI_BINARIES:
+        binary = _CLI_BINARIES[adapter]
+        found = shutil.which(binary)
+        detail = found or f"{binary} not on PATH"
+        if found and adapter == "claude-code":             # surface which credential will be billed
+            detail = f"{found} · {_claude_code_auth_note(cfg)}"
+        table.add_row("agent", "[green]ok[/]" if found else "[red]missing[/]", detail)
+    elif adapter in _API_REQUIREMENTS:
+        pkg, env, extra = _API_REQUIREMENTS[adapter]
+        have_sdk = importlib.util.find_spec(pkg) is not None
+        have_key = bool(os.environ.get(env))
+        if have_sdk and have_key:
+            table.add_row("agent", "[green]ok[/]", f"{adapter} (SDK + {env})")
+        elif not have_sdk:
+            table.add_row("agent", "[red]missing[/]",
+                          escape(f"{pkg} SDK not installed (pip install 'loopkit[{extra}]')"))
+        else:
+            table.add_row("agent", "[yellow]no key[/]", f"{env} not set")
+    else:
+        table.add_row("agent", "[red]unknown[/]", f"unknown adapter {adapter!r}")
+
+
+def _doctor_budget(table: Table, cfg: Config) -> None:
+    """Will the budget ceiling actually bite? It only fires if the adapter reports a real cost."""
+    adapter = cfg.agent.adapter
+    ceiling = f"ceiling ${cfg.agent.max_cost_usd}"
+    model = cfg.agent.model or DEFAULT_MODELS.get(adapter)
+    if adapter == "mock":
+        table.add_row("budget", "[green]ok[/]", f"mock charges per tick · {ceiling}")
+    elif adapter == "claude-code":
+        table.add_row("budget", "[green]ok[/]", f"cost parsed from claude JSON · {ceiling}")
+    elif adapter in _API_REQUIREMENTS:
+        if pricing.known_model(model):
+            table.add_row("budget", "[green]ok[/]", f"priced model {model} · {ceiling}")
+        else:
+            table.add_row("budget", "[yellow]no price[/]",
+                          f"unknown model {model!r} → cost 0.0; budget stop can't fire")
+    elif adapter == "codex":
+        if pricing.known_model(model):
+            table.add_row("budget", "[green]ok[/]", f"token cost for {model} · {ceiling}")
+        else:
+            table.add_row("budget", "[yellow]no price[/]",
+                          "codex cost needs a priced --model, else 0.0")
+
+
+@app.command()
+def run(config: Path = typer.Option(DEFAULT_CONFIG, "--config", "-c"),
+        repo: str | None = typer.Option(None, "--repo", help="Override the target repo (config `repo`)."),
+        branch: str | None = typer.Option(None, "--branch",
+                                          help="Override the configured branch for this run — per-run isolation, "
+                                               "e.g. loopkit/issue-42 so concurrent issue→PR runs don't collide "
+                                               "on one branch. Still safety-checked against allow/forbid_branches."),
+        adapter: str | None = typer.Option(None, "--adapter",
+                                            help="Override the configured agent adapter (e.g. claude-api in CI)."),
+        from_event: Path | None = typer.Option(None, "--from-event",
+                                                help="Set the goal from a forge issue-event JSON "
+                                                     "(Actions $GITHUB_EVENT_PATH / GitLab CI). CI tier."),
+        from_issue: int | None = typer.Option(None, "--from-issue",
+                                              help="Set the goal by fetching one issue by number via gh/glab. CI tier."),
+        provider: str = typer.Option("auto", "--provider",
+                                     help="Forge for --from-issue: auto | github | gitlab."),
+        open_pr: bool = typer.Option(False, "--open-pr",
+                                     help="Enable push + draft PR for this run (overrides [remote]). CI tier."),
+        dry_run: bool = typer.Option(False, "--dry-run", help="Run the control flow, skip the agent."),
+        max_iter: int | None = typer.Option(None, "--max-iter", help="Override stops.max_iter."),
+        check_gate: int | None = typer.Option(None, "--check-gate",
+                                              help="Run the iteration gate N times on the initial tree "
+                                                   "and refuse to start unless every run agrees — a flaky "
+                                                   "gate corrupts the stop oracle (Ch 9). Overrides "
+                                                   "safety.gate_stability_runs."),
+        force: bool = typer.Option(False, "--force", help="Run even if preflight fails."),
+        api_key: bool = typer.Option(False, "--api-key",
+                                     help="claude-code: bill ANTHROPIC_API_KEY instead of the subscription "
+                                          "(default). Sets [agent] use_api_key for this run."),
+        sandbox: bool = typer.Option(False, "--sandbox",
+                                     help="Run the loop inside the loopkit Docker container (Ch 16).")) -> None:
+    """Run the loop until it reaches a terminal. Point it at any repo via `repo` (or `--repo`).
+
+    The CI deployment tier (Phase 5c) rides this same single-loop path: `--from-event`/`--from-issue`
+    source the goal from a forge issue (so an Actions/GitLab job is an issue→PR worker with no
+    cluster), and `--open-pr` flips on push + a draft PR for that one invocation without editing the
+    repo's `loopkit.toml`. Everything else — the gates, the protected-path guard, the budget stop —
+    applies unchanged; in CI the ephemeral runner supplies the sandbox the cloud tier hand-builds.
+    """
+    # FIRST: load creds into memory + scrub them out of os.environ, before any subprocess (git, the
+    # agent, the gates) can inherit them (Phase 5a credential hygiene). On a laptop with no creds dir
+    # this reads from env; with none set it is a no-op.
+    secrets.install(secrets.CredentialStore.load(os.environ.get("LOOPKIT_CREDS_DIR")))
+    cfg = _load(config)
+    if repo is not None:
+        cfg.repo = repo
+    if branch is not None:
+        cfg.branch = branch                     # per-run branch isolation; validated by preflight below
+    if adapter is not None:
+        cfg.agent.adapter = adapter
+    if api_key:
+        cfg.agent.use_api_key = True            # opt into the billed API key for claude-code this run
+    # CI tier: source the goal from a forge issue (event JSON or a number). Mutually exclusive — they
+    # are two routes to the same thing. The issue number is captured so a `Closes #N` lands in the PR.
+    issue_number: int | None = None
+    if from_event is not None and from_issue is not None:
+        err.print("[red]run[/] pass only one of --from-event or --from-issue.")
+        raise typer.Exit(1)
+    if from_event is not None:
+        cfg.goal, issue_number = _goal_from_event(from_event)
+    elif from_issue is not None:
+        cfg.goal, issue_number = _goal_from_issue(cfg.repo_path(), from_issue, provider)
+    # `--open-pr` is a per-invocation override so the CI template is turnkey on a repo whose
+    # loopkit.toml leaves [remote] off (the safe default). draft stays on (a human merges).
+    if open_pr:
+        cfg.remote.enabled = True
+        cfg.remote.push = True
+        cfg.remote.open_pr = True
+    if max_iter is not None:
+        cfg.stops.max_iter = max_iter
+    trace.configure(cfg.trace)            # full-tree LangSmith tracing, auto-on (Ch 14-15)
+
+    if sandbox:
+        _run_sandboxed(cfg, config, dry_run=dry_run, max_iter=max_iter, force=force, branch=branch)
+        return
+
+    pf = safety.preflight(cfg)
+    if not pf.ok and not force:
+        for problem in pf.problems:
+            err.print(f"[red]preflight[/] {problem}")
+        err.print("Fix these or pass [bold]--force[/]  (see [bold]loopkit doctor[/]).")
+        raise typer.Exit(1)
+
+    # Gate-determinism preflight (opt-in): a gate that flips verdict on an unchanged tree corrupts
+    # every stop decision the loop makes (Ch 9). Run it N times on the initial tree before charging
+    # the agent; refuse on disagreement. 0/1 = skip = exact prior behavior.
+    runs = check_gate if check_gate is not None else cfg.safety.gate_stability_runs
+    if runs and runs >= 2:
+        from ..gate import ShellGate
+        stab = safety.gate_stability(ShellGate(cfg.gate.iteration), cfg.repo_path(), runs)
+        if not stab.deterministic and not force:
+            err.print(f"[red]preflight[/] iteration gate is non-deterministic: {runs} runs on an "
+                      f"unchanged tree gave {stab.passes} pass / {runs - stab.passes} fail. A flaky "
+                      f"gate corrupts every stop decision — fix the gate, or pass [bold]--force[/].")
+            raise typer.Exit(1)
+        console.print(f"[green]gate[/] deterministic over {runs} runs")
+
+    try:
+        agent = build_agent(cfg.agent)
+    except ValueError as exc:
+        err.print(f"[red]run[/] {escape(str(exc))}")
+        raise typer.Exit(1)
+    console.print(Panel.fit(
+        f"[bold]{cfg.goal}[/]\nrepo {cfg.repo} · branch {cfg.branch} · adapter {cfg.agent.adapter} · "
+        f"budget ${cfg.agent.max_cost_usd}"
+        + (f" · issue #{issue_number}" if issue_number is not None else ""),
+        title="loopkit run"))
+    result = run_loop(cfg, agent, dry_run=dry_run)
+    _render(result)
+    # Outward edge (Ch 16): push the solved branch + open a PR, only if [remote] is enabled (which
+    # --open-pr turns on). When the run was issue-sourced, the issue number rides into the PR body so
+    # the forge auto-closes it on merge.
+    if not dry_run and result.reason is StopReason.DONE and cfg.remote.enabled:
+        from ..extensions.remote import sync_done
+        sync = sync_done(cfg, cfg.repo_path(), title=_pr_title(cfg.goal), issue=issue_number)
+        if sync["pushed"]:
+            console.print(f"[green]pushed[/] {cfg.branch} → {cfg.remote.name}")
+        if sync["pr_url"]:
+            console.print(f"[green]opened PR[/] {sync['pr_url']}")
+    raise typer.Exit(0 if result.reason is StopReason.DONE else 2)
+
+
+def _pr_title(goal: str) -> str:
+    """A single-line PR title from a goal (which may be a multi-line issue title+body)."""
+    first = next((line for line in goal.splitlines() if line.strip()), "")
+    return f"loopkit: {first.strip()[:72]}" if first else "loopkit: automated change"
+
+
+def _goal_from_event(path: Path) -> tuple[str, int | None]:
+    """Read a forge issue-event JSON (Actions $GITHUB_EVENT_PATH / GitLab CI) → (goal, issue number).
+
+    Reuses the webhook path's parsers via `triggers.parse_event_payload` (forge auto-detected from the
+    body), so the CI goal-building is identical to a webhook-triggered run. Exits cleanly when the file
+    is unreadable or holds no actionable issue (a `workflow_dispatch`, a closed issue).
+    """
+    from ..extensions import triggers
+    try:
+        payload = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        err.print(f"[red]run[/] could not read --from-event {path}: {escape(str(exc))}")
+        raise typer.Exit(1)
+    event = triggers.parse_event_payload(payload)
+    if event is None:
+        err.print(f"[red]run[/] --from-event {path} carries no actionable issue "
+                  "(not an issue event, or a closed/edited action).")
+        raise typer.Exit(1)
+    goal = f"{event.title}\n\n{event.body}".strip() if event.body else event.title
+    return goal or f"Resolve issue #{event.issue_number}", event.issue_number
+
+
+def _goal_from_issue(repo: Path, number: int, provider: str) -> tuple[str, int]:
+    """Fetch one issue by number via gh/glab and build (goal, issue number). CI tier / local convenience."""
+    from ..extensions import issues
+    issue = issues.fetch_issue(repo, number, provider=provider)
+    if issue is None:
+        err.print(f"[red]run[/] could not fetch issue #{number} (provider {provider}) — "
+                  "is gh/glab installed + authenticated, and is the repo a github/gitlab remote?")
+        raise typer.Exit(1)
+    task = issues.issue_to_task(issue)                    # reuse the shared goal builder
+    return task["goal"], number
+
+
+@app.command()
+def measure(config: Path = typer.Option(DEFAULT_CONFIG, "--config", "-c"),
+            repo: str | None = typer.Option(None, "--repo", help="Override the target repo (config `repo`)."),
+            adapter: str | None = typer.Option(None, "--adapter", help="Override the configured agent adapter."),
+            trials: int = typer.Option(5, "--trials", "-n", min=1,
+                                       help="How many independent trials of the goal to run."),
+            k: int | None = typer.Option(None, "--k", help="Largest k to report (default: trials)."),
+            mode: str = typer.Option("clone", "--mode",
+                                     help="How each trial materialises the repo: clone | copy."),
+            max_iter: int | None = typer.Option(None, "--max-iter", help="Override stops.max_iter per trial."),
+            out: Path | None = typer.Option(None, "--out",
+                                            help="Write the full JSON ReliabilityReport here.")) -> None:
+    """Measure how *reliably* the loop solves a goal: run it N times, report pass^k and pass@k.
+
+    `pass@k` (discovery, rises with k) is what `evolve` optimizes — *can* the loop do it. `pass^k`
+    (reliability, falls with k) is the production question — does it succeed on *every* one of k
+    independent attempts. Each trial is a full isolated `run_loop` graded by the held-out acceptance
+    gate, so a trial counts as a pass only when that gate certifies DONE. The report carries the
+    loopkit version + a harness signature + a timestamp — a number without its harness isn't a
+    measurement.
+    """
+    secrets.install(secrets.CredentialStore.load(os.environ.get("LOOPKIT_CREDS_DIR")))
+    cfg = _load(config)
+    if repo is not None:
+        cfg.repo = repo
+    if adapter is not None:
+        cfg.agent.adapter = adapter
+    if max_iter is not None:
+        cfg.stops.max_iter = max_iter
+    if not cfg.gate.acceptance:
+        # pass^k is defined by the held-out oracle: "pass" == the acceptance gate certified DONE.
+        # Without it there is nothing to measure reliability against.
+        err.print("[red]measure[/] needs a held-out [bold]gate.acceptance[/] — pass^k is the rate at "
+                  "which that gate certifies the goal. Set it in loopkit.toml.")
+        raise typer.Exit(1)
+    trace.configure(cfg.trace)
+
+    from ..extensions.fleet import make_repo_runner
+    from ..extensions.measure import measure_reliability
+    # Resolve the target to an absolute path before handing it to the runner: each trial clones into
+    # its own temp scratch (a different cwd), so a relative `repo` (the default `repo = "."`) would
+    # `git clone .` from the empty scratch dir and fail every trial. `run`/`doctor` use repo_path()
+    # for the same reason — measure must match, or it silently reports pass^k=0 for a solvable goal.
+    repo_src = str(cfg.repo_path())
+    runner = make_repo_runner(
+        repo_src, mode=mode, adapter=cfg.agent.adapter, max_iter=cfg.stops.max_iter,
+        gate_iteration=cfg.gate.iteration, gate_acceptance=cfg.gate.acceptance,
+        protected_paths=tuple(cfg.safety.protected_paths))   # remote stays off: trials never push
+    harness_params = {"adapter": cfg.agent.adapter, "model": cfg.agent.model,
+                      "gate_iteration": cfg.gate.iteration, "gate_acceptance": cfg.gate.acceptance,
+                      "gate_regression": cfg.gate.regression, "max_iter": cfg.stops.max_iter,
+                      "protected_paths": sorted(cfg.safety.protected_paths)}
+    console.print(Panel.fit(
+        f"[bold]{_pr_title(cfg.goal).removeprefix('loopkit: ')}[/]\nrepo {cfg.repo} · adapter "
+        f"{cfg.agent.adapter} · model {cfg.agent.model} · [bold]{trials}[/] trials",
+        title="loopkit measure"))
+
+    with trace.span("loopkit measure", run_type="chain", tags=["loopkit", "measure"],
+                    inputs={"goal": cfg.goal, "repo": cfg.repo},
+                    metadata={"trials": trials, "adapter": cfg.agent.adapter}) as span:
+        report = measure_reliability(
+            runner, {"id": "measure", "goal": cfg.goal}, trials=trials, k_max=k,
+            timestamp=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            adapter=cfg.agent.adapter, model=cfg.agent.model, target=cfg.repo,
+            harness_params=harness_params)
+        span.outputs(successes=report.successes, pass_hat_1=report.success_rate,
+                     pass_hat_k=report.pass_hat_k.get(trials), signature=report.harness.signature)
+
+    console.print(_reliability_table(report))
+    cpa = report.cost_per_accepted
+    cpa_str = f"${cpa:.2f}/accepted" if cpa is not None else "—/accepted (none accepted)"
+    console.print(f"[dim]harness loopkit {report.harness.loopkit_version} · sig "
+                  f"{report.harness.signature} · {report.timestamp} · cost ${report.total_cost_usd:.2f} · "
+                  f"{cpa_str}[/]")
+    if out is not None:
+        out.write_text(report.to_json())
+        console.print(f"[green]wrote[/] {out}")
+    raise typer.Exit(0)
+
+
+def _reliability_table(report) -> Table:
+    """The pass^k / pass@k curve — reliability falling, discovery rising, side by side."""
+    table = Table(title=f"reliability — {report.trials} trials, {report.successes} passed "
+                        f"(pass^1 = {report.success_rate:.0%})")
+    table.add_column("k", justify="right")
+    table.add_column("pass^k  (reliability ↓)", justify="right")
+    table.add_column("pass@k  (discovery ↑)", justify="right")
+    for kk in sorted(report.pass_hat_k):
+        table.add_row(str(kk), f"{report.pass_hat_k[kk]:.3f}", f"{report.pass_at_k[kk]:.3f}")
+    return table
+
+
+@app.command()
+def demo(chapter: int | None = typer.Argument(None, help="Course chapter number, e.g. 9. Omit to list."),
+         live: bool = typer.Option(False, "--live", help="Use the real claude-code agent where supported.")) -> None:
+    """Run a chapter's scenario straight through (the loop's logs are the play-by-play)."""
+    if chapter is None:
+        _list_scenarios()
+        return
+    scenarios.play(chapter, console, live=live, pause=False)
+
+
+@app.command()
+def learn(chapter: int | None = typer.Argument(None, help="Course chapter number. Omit to list."),
+          live: bool = typer.Option(False, "--live", help="Use the real claude-code agent where supported.")) -> None:
+    """Walk a chapter's scenario with narration and a pause between beats."""
+    if chapter is None:
+        _list_scenarios()
+        return
+    scenarios.play(chapter, console, live=live, pause=True)
+
+
+@app.command()
+def executor(
+        socket_path: str = typer.Option(..., "--socket", envvar="LOOPKIT_EXECUTOR_SOCKET",
+                                         help="Unix socket to listen on (shared emptyDir with loopkit-core)."),
+) -> None:
+    """Run the keyless tool-execution sidecar (Part III, Phase 6 — agent isolation).
+
+    This is the untrusted half of the cloud worker pod: it serves the agent's `run_bash`/`read`/`write`
+    tool calls and the held-out gate over the socket, against the **shared workspace** — but in a
+    container running as a **different uid / PID namespace with no credential mount**. loopkit-core (the
+    `fleet worker` process) holds the key for the LLM call + git and dispatches every model-chosen
+    command here, so there is no key in this process to read or exfiltrate.
+
+    Deliberately does **not** call `secrets.install` — the executor must never load a credential.
+    """
+    import signal
+
+    from ..executor import serve
+    console.print(Panel.fit(f"keyless executor · socket {socket_path}\n"
+                            "serving run_bash / read / write / gate for loopkit-core (no credentials)",
+                            title="loopkit executor"))
+    # The kubelet terminates a native sidecar with SIGTERM when loopkit-core exits — translate it to
+    # the clean-shutdown path so the socket is unlinked and a stop is logged (graceful termination).
+    def _terminate(*_args) -> None:
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGTERM, _terminate)
+    try:
+        serve(socket_path)
+    except KeyboardInterrupt:
+        console.print("[yellow]executor stopped[/]")
+
+
+def _list_scenarios() -> None:
+    table = Table(title="loopkit scenarios", header_style="bold")
+    table.add_column("chapter")
+    table.add_column("topic")
+    table.add_column("teaches", overflow="fold")
+    table.add_column("mode")
+    for scenario in scenarios.available():
+        table.add_row(str(scenario.chapter), scenario.title, scenario.teaches,
+                      "live or scripted" if scenario.live_supported else "scripted")
+    console.print(table)
+    console.print("Run one with [bold]loopkit demo <chapter>[/] or [bold]loopkit learn <chapter>[/].")
+
+
+def _run_sandboxed(cfg: Config, config_path: Path, *, dry_run: bool, max_iter: int | None,
+                   force: bool, branch: str | None = None) -> None:
+    """Re-invoke `loopkit run` inside the container, with the repo bind-mounted at /work (Ch 16)."""
+    if shutil.which("docker") is None:
+        err.print("[red]sandbox[/] docker not found on PATH (build the image: docker build -t loopkit .)")
+        raise typer.Exit(1)
+    repo = cfg.repo_path()
+    inner = ["loopkit", "run", "-c", config_path.name]
+    if dry_run:
+        inner.append("--dry-run")
+    if max_iter is not None:
+        inner += ["--max-iter", str(max_iter)]
+    if branch is not None:
+        inner += ["--branch", branch]           # honor the per-run branch override inside the container too
+    if force:
+        inner.append("--force")
+    cmd = ["docker", "run", "--rm", "-v", f"{repo}:/work", "-w", "/work", "loopkit", *inner[1:]]
+    console.print(Panel.fit(" ".join(cmd), title="loopkit run --sandbox"))
+    raise typer.Exit(subprocess.call(cmd))
+
