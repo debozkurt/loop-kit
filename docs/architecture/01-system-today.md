@@ -1,17 +1,54 @@
 # 01 — The system today (Built 🟢)
 
 What exists, tested, in `main`: the single-loop **core**, its **contracts**, the `None`-safe
-**extension seams** (orchestration, review, skills), and the **queue-driven fleet** — both
-in-process and on a dev kind/Tilt cluster. This page is the structural reference; for the working
-log of how it got here, see [`../part-ii-resume.md`](../part-ii-resume.md).
+**extension seams**, and the **queue-driven fleet** — both in-process and on a dev kind/Tilt
+cluster. This page is the structural reference; for the working log of how it got here, see
+[`../archive/part-ii-resume.md`](../archive/part-ii-resume.md).
 
-Architecture mirrors the agentic-loops curriculum, one module per concern:
+Architecture mirrors the agentic-loops curriculum — **one module per concern**. The canonical
+"which file owns what" map (the terse in-code mirror lives in `loopkit/__init__.py` +
+`loopkit/extensions/__init__.py`):
 
-```
-config.py(18)  agent.py(1-3)  pricing.py(14)  prompt.py(4-5)  gate.py(6-7,9)  stops.py(13)
-durability.py(15)  safety.py(16)  loop.py(controller)  cli.py  log.py  trace.py(observability)
-extensions/{orchestrate,review,skills,fleet,remote,issues}.py   scenarios/   examples/demo-repo/
-```
+**Core — the loop spine** (`loopkit/`):
+
+| Module | Owns | Ch |
+|---|---|---|
+| `config.py` | the one `Config` object — the whole loop as one file | 18 |
+| `agent.py` | the model as a subroutine the loop invokes (the 2×2 adapter matrix) | 1-3 |
+| `prompt.py` | fixed prompt rebuilt into a fresh context every tick | 4-5 |
+| `gate.py` | the iteration gate + the held-out acceptance gate | 6-7, 9 |
+| `stops.py` | the three hard stops + precedence | 13-14 |
+| `durability.py` | commit every tick; resume from git | 15 |
+| `safety.py` | blast-radius preflight + protected-path guard | 16 |
+| `loop.py` | the controller that wires them — the tick lifecycle | spine |
+
+**Core — cross-cutting seams:**
+
+| Module | Owns | Ref |
+|---|---|---|
+| `pricing.py` | per-adapter cost — what makes the budget stop bite | Ch 14 |
+| `log.py` | structured, greppable, payload-free logging | Ch 15 |
+| `trace.py` | optional full-tree LangSmith observability (auto-on) | Ch 14-15 |
+| `secrets.py` | keep a real key out of the injected agent's reach | Phase 5a |
+| `executor.py` | tool execution behind a seam — relocatable off the key | Phase 6 |
+| `cli.py` · `_templates.py` | the typer entrypoint + the file bodies `init` scaffolds | — |
+| `scenarios/` | runnable `loopkit demo`/`learn` teaching labs (chNN) | — |
+
+**Extensions — opt-in, no core runtime dependency** (`loopkit/extensions/`):
+
+| Module | Owns | Tier |
+|---|---|---|
+| `review.py` | continuous review of every commit → `run_loop(review_hook=)` | II · Ch 8 |
+| `orchestrate.py` | a supervisor over many worker loops | II · Ch 10-12 |
+| `skills.py` | the skill registry + write-back flywheel | II · Ch 17 |
+| `fleet.py` | the loop behind a Redis queue, run by many workers → `loopkit fleet` | II · Ch 12 |
+| `remote.py` | push the loop's branch + open a PR/MR | II |
+| `issues.py` | GitHub/GitLab issues as the fleet's work queue | II |
+| `cloud.py` | `loopkit cloud` — the CLI talking to a DOKS cluster, context-pinned | III · P2 |
+| `cloudrun.py` | `create_run()` — the ephemeral per-run Job topology it builds | III · P3 |
+| `triggers.py` | external events → runs (webhook + CronJob) via `create_run()` | III · P4 |
+| `creds.py` | per-submitter creds: identity → Secret, projected into a run | III · P5a |
+| `measure.py` | reliability — `pass^k` over N trials → `loopkit measure` | III |
 
 ## The tick spine
 
@@ -246,7 +283,8 @@ worker `Deployment`) with a `custom_build` that side-loads the image (Docker 29'
 breaks `kind load docker-image`); the coordinator runs on the host against a port-forwarded Redis on
 **:16379**. The `Tiltfile` pins `allow_k8s_contexts('kind-loopkit')` + `fail()` — the context guard
 Part III extends to a real cloud context. Full runbook + sharp edges:
-[`../tilt-fleet-plan.md`](../tilt-fleet-plan.md) and [`../part-ii-resume.md`](../part-ii-resume.md).
+[`../archive/part-ii-tilt-fleet-plan.md`](../archive/part-ii-tilt-fleet-plan.md) and
+[`../archive/part-ii-resume.md`](../archive/part-ii-resume.md).
 
 **Where this stops, and why Part III exists:** the coordinator runs on the host (not in-cluster),
 workers are a fixed long-lived `Deployment`, the image arrives via `kind load` (no registry), Redis
