@@ -295,10 +295,15 @@ Everything `loopkit` exposes. Run any command with `--help` for the live version
 **`loopkit init [PATH]`** — scaffold a starter `loopkit.toml` + `PROMPT.md` in `PATH` (default `.`;
 never overwrites).
 
-**`loopkit doctor`** — preflight: is this repo safe to point the loop at? Reports branch safety, the
-agent (CLI binary on PATH, or API SDK + key), whether the **budget** can bite (model is priced), the
-**gates**, and **tracing** status. Exits non-zero if preflight fails.
+**`loopkit doctor`** — preflight: is this repo safe to point the loop at, *and is the gate set up to
+actually work?* Reports branch safety, the agent (CLI binary on PATH, or API SDK + key), whether the
+**budget** can bite (model is priced), the **gates**, and **tracing** status. It also **runs the
+iteration gate once** on the current tree and reports the verdict — a gate that *already passes* means
+the loop may instantly (falsely) declare DONE, a gate that *fails* is the healthy start, a *broken*
+command is flagged — and warns when the acceptance gate is identical to the iteration gate (which
+defeats the held-out check, Ch 9). Exits non-zero if preflight fails (the gate verdict is advisory).
 - `-c, --config PATH` — config file (default `loopkit.toml`).
+- `--no-gate` — skip running the gate (e.g. when it's slow); all the static checks still run.
 
 **`loopkit run`** — run the loop until it reaches a terminal (DONE / a hard stop).
 - `-c, --config PATH` — config file (default `loopkit.toml`).
