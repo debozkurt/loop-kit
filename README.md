@@ -21,6 +21,16 @@ evolutionary select-and-reseed), **continuous review** that gates done on a clea
 **skill write-back flywheel** so solved runs teach future ones. Each is `None`-safe: leave it
 out and the core behaves exactly as above. See *Beyond one loop* below.
 
+## Where to go
+
+| You want to… | Go to |
+|---|---|
+| **Run it now** — watch a loop reach `DONE` | [`examples/walkthrough/`](examples/walkthrough/) |
+| **Use it on your repo** | [`docs/USING-ON-YOUR-REPO.md`](docs/USING-ON-YOUR-REPO.md) |
+| **Learn the concepts** — the runnable course | `loopkit demo` · [`loopkit/scenarios/`](loopkit/scenarios/) |
+| **Understand how it's built** | [`docs/architecture/`](docs/architecture/README.md) |
+| **All docs · all examples** | [`docs/README.md`](docs/README.md) · [`examples/`](examples/) |
+
 ## Install
 
 ```bash
@@ -173,81 +183,52 @@ live fleet. Redis is the one optional dependency (`pip install 'loopkit[fleet]'`
 
 ## Configuration (`loopkit.toml`)
 
+The whole run is one object. A minimal config:
+
 ```toml
-goal = "Describe exactly what 'done' means."
-branch = "loopkit/run"           # never main/master
+goal   = "Describe exactly what 'done' means."
+branch = "loopkit/run"                            # never main/master
 
 [agent]
-adapter = "claude-code"          # mock | claude-code | codex | claude-api | openai-api
-max_cost_usd = 5.0               # budget ceiling — bites on real cost (see `loopkit doctor`)
+adapter = "claude-code"                           # mock | claude-code | codex | claude-api | openai-api
+max_cost_usd = 5.0                                # budget ceiling — bites on real cost (see `doctor`)
 
 [gate]
 iteration  = "python -m pytest tests/seen -q"
-acceptance = "python -m pytest tests/holdout -q"       # held-out — the fix works
-# regression = "python -m pytest tests/regression -q"  # optional 2nd oracle — old behavior preserved
-
-[stops]
-max_iter = 20
-no_progress_after = 3
+acceptance = "python -m pytest tests/holdout -q"  # held-out — run once before DONE
 
 [safety]
-protected_paths = ["tests/"]     # the loop may not touch these
-require_clean_tree = true
-allow_branches = ["loopkit/*"]
-# gate_stability_runs = 5        # opt-in: run the iteration gate N× on the initial tree and refuse to
-                                 # start unless every run agrees (a flaky gate corrupts the stop oracle)
-
-# [trace]                          # optional LangSmith tracing (auto-on when langsmith + a key set)
-# enabled = true                   # omit for auto; true/false forces it
-# project = "loopkit"
+protected_paths = ["tests/"]                      # the loop may not touch these
 ```
+
+Every other knob — `[stops]`, the optional second `regression` oracle, `[remote]` sync, `[trace]`,
+gate-stability preflight — is annotated in [`docs/CONTROL-FILES.md`](docs/CONTROL-FILES.md); the
+fully-commented reference is [`examples/gates/loopkit.example.toml`](examples/gates/loopkit.example.toml).
 
 ## Use it on your own repo
 
-loopkit isn't tied to the demo — point it at any project, sync the result to a forge, and let
-issues feed the fleet. Full walkthrough: [`docs/USING-ON-YOUR-REPO.md`](docs/USING-ON-YOUR-REPO.md).
+loopkit isn't tied to the demo — point it at any project. The four fields that define a run:
+`goal`, `gate.iteration`, `gate.acceptance`, `safety.protected_paths`.
 
-**1 · Target any repo on your machine.** The loop runs against whatever `repo` points at:
 ```bash
 cd ~/code/my-project
 loopkit init .                 # writes loopkit.toml + PROMPT.md (never overwrites)
-$EDITOR loopkit.toml           # set the 4 things that matter (below)
 loopkit doctor                 # preflight: branch safe? agent on PATH? gates set?
 loopkit run --dry-run          # rehearse the control flow — no agent, no tokens
-loopkit run                    # real run (adapter="claude-code" → solves it)
-# or, without cd-ing in:  loopkit run -c ~/code/my-project/loopkit.toml --repo ~/code/my-project
+loopkit run                    # real run: commits every tick to its branch, drives to DONE
 loopkit measure -n 10          # how *reliably* does it solve this goal? pass^k over 10 trials
 ```
-The four fields that define a run: `goal`, `gate.iteration`, `gate.acceptance`, `safety.protected_paths`.
-(`loopkit measure` reuses them — each trial is a full isolated run graded by `gate.acceptance`, so it
-needs a held-out acceptance gate set; the report is harness-stamped, carries `cost_per_accepted` — spend
-over gate-accepted trials, the honest unit cost — and is `--out report.json`-able.) Trusting a gate as a
-stop oracle? `loopkit run --check-gate 5` proves it's deterministic first — a flaky gate is worse than none.
 
-**2 · Sync the result to GitHub / GitLab.** Add a `[remote]` block — the loop pushes *its own
-branch* (never `main`) and opens a **draft** PR/MR when it's done:
-```toml
-[remote]
-enabled  = true        # nothing leaves your machine unless this is true
-name     = "origin"
-open_pr  = true        # open a PR/MR after pushing
-provider = "auto"      # auto-detects github / gitlab from the remote URL
-pr_base  = "main"
-draft    = true        # a human reviews + merges
-```
-Requires `gh` (GitHub) or `glab` (GitLab) installed and authenticated. A finished `loopkit run`
-then prints `pushed loopkit/run → origin` and the PR URL. The forbidden-branch guard (Ch 16) holds
-at this outward edge: a misconfigured run *cannot* push to `main`, and it never force-pushes.
+From there, three outward edges — all opt-in, all off by default, each walked through end-to-end in
+[`docs/USING-ON-YOUR-REPO.md`](docs/USING-ON-YOUR-REPO.md):
 
-**3 · Drive the fleet from issues.** Label a backlog (e.g. `loopkit`), point workers at the repo,
-and the queue turns each open issue into a task on its own branch:
-```bash
-# workers operate on YOUR repo (host processes shown; pods are the same with a secret mount):
-loopkit fleet worker --target ~/code/my-project --adapter claude-code   # run a few
-# coordinator: open issues -> tasks  (issue #N -> branch loopkit/issue-N -> a PR that closes it)
-loopkit fleet run --from-issues --target ~/code/my-project --label loopkit
-```
-The queue is the *trigger* seam (Ch 12) — a cron or webhook pushing a task drives the same loop.
+- **Sync to a forge** — a `[remote]` block (or one-off `loopkit run --open-pr`) pushes the loop's
+  branch and opens a **draft** PR/MR. The Ch 16 guard holds at this edge: it *cannot* push to `main`
+  and never force-pushes. Needs `gh`/`glab` authenticated.
+- **Drive the fleet from issues** — label a backlog and `loopkit fleet run --from-issues` turns each
+  open issue into a task on its own branch (`loopkit/issue-N` → a PR that closes it).
+- **Hands-off in CI, no cluster** — `loopkit init --ci github|gitlab`; a labelled issue starts a CI
+  job that runs one loop and opens a draft PR. The forge is the trigger, secrets, identity, sandbox.
 
 ## Steering files: the `.md` control surface
 
@@ -334,8 +315,10 @@ agent (CLI binary on PATH, or API SDK + key), whether the **budget** can bite (m
 **`loopkit learn [CHAPTER]`** — the same scenarios, narrated, with a pause between beats.
 - `--live` — as above.
 
-Scenarios available: `5, 7, 8, 9, 10, 11, 12, 13, 14, 16, 17` (try `loopkit demo 9`, `loopkit demo 12`,
-and `loopkit demo 14` — the 2×2 adapter matrix + real cost making the budget stop bite).
+Run `loopkit demo` (no chapter) for the current list — scenarios track the course chapters and grow
+with it; `loopkit/scenarios/README.md` maps each one. A good first three: `loopkit demo 9` (the
+held-out gate), `loopkit demo 12` (the fleet), `loopkit demo 14` (the 2×2 adapter matrix + real cost
+making the budget stop bite).
 
 ### Fleet — many loops (Chapter 12)
 
@@ -379,13 +362,15 @@ The fleet runs on a **dedicated, isolated** local kind cluster; the Makefile exp
 | `make demo` | the fleet teaching scenario (`loopkit demo 12`) |
 | `make help` | list targets |
 
-Full cluster walkthrough: [`docs/tilt-fleet-plan.md`](docs/tilt-fleet-plan.md). Using it on your own
-repo: [`docs/USING-ON-YOUR-REPO.md`](docs/USING-ON-YOUR-REPO.md).
+Full cluster walkthrough: [`docs/archive/part-ii-tilt-fleet-plan.md`](docs/archive/part-ii-tilt-fleet-plan.md).
+Using it on your own repo: [`docs/USING-ON-YOUR-REPO.md`](docs/USING-ON-YOUR-REPO.md).
 
 ## Documentation
 
 Index: [`docs/README.md`](docs/README.md). Operator quickstarts:
 
+- **[All examples](examples/)** — four runnable dirs, each answering a different question
+  (walkthrough · demo-repo · gates · CI), mapped in [`examples/README.md`](examples/README.md).
 - **[Walkthrough](examples/walkthrough/)** — copy-this-run-it-see-`DONE` on the bundled demo repo.
 - **[Billing & credentials](docs/BILLING.md)** — `claude-code` runs on your **subscription** by default;
   `--api-key` opts into billing; `doctor` shows which pays; bound subscription runs with `--max-iter`.
