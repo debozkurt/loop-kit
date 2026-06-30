@@ -12,9 +12,9 @@ Kubernetes.
 |---|---|
 | Picking up the **current phase** (Part III — cloud productionization) | [`docs/part-iii-resume.md`](docs/part-iii-resume.md) — the single next-session source of truth |
 | Understanding **how the system is built / designed** | [`docs/architecture/`](docs/architecture/README.md) — the living architecture wiki |
-| The **previous phase** (Part II library + dev fleet, done) | [`docs/part-ii-resume.md`](docs/part-ii-resume.md) |
+| The **previous phase** (Part II library + dev fleet, done) | [`docs/archive/part-ii-resume.md`](docs/archive/part-ii-resume.md) |
 | Using loopkit on a real repo / the steering files | [`docs/USING-ON-YOUR-REPO.md`](docs/USING-ON-YOUR-REPO.md), [`docs/CONTROL-FILES.md`](docs/CONTROL-FILES.md) |
-| **Teaching** Part III — GitHub/GitLab ecosystem, the three tiers, the runnable labs (`loopkit demo 18/19`) | [`docs/part-iii-ecosystem.md`](docs/part-iii-ecosystem.md) |
+| **Teaching** Part III — GitHub/GitLab ecosystem, the three tiers, the runnable labs (`loopkit demo 20/21`) | [`docs/part-iii-ecosystem.md`](docs/part-iii-ecosystem.md) |
 
 ## ⛓️ Documentation contract (binding)
 
@@ -30,8 +30,9 @@ They are the canonical reference for both humans and AI working on this project.
   load-bearing context + sharp edges + next step** — not chronological history. Update it whenever
   state moves: a phase starts/completes, a decision is locked, a gotcha is paid for, the "next step"
   changes.
-- **History belongs in git + the resume-doc changelog, not in the architecture wiki.** The wiki
-  describes how things *are/will be*; the resume doc describes *where we are and what's next*.
+- **History belongs in `git log`, not in the docs.** The wiki describes how things *are/will be*;
+  the resume doc describes *where we are and what's next* (current state + a short newest-first
+  "recent work" priming list, not a running changelog — the diary lives in git).
 - A change is not "done" until the docs that describe it are updated in the same change.
 
 This contract exists because loopkit is itself a tool for autonomous, long-horizon work: the docs
