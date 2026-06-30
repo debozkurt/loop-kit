@@ -44,6 +44,12 @@ Each phase is built + unit-tested token-free; the live column is what still need
 
 ## Recent work (newest first — priming only; full history in `git log`)
 
+- **2026-06-29 — `cli.py` refactor** (branch `refactor/cli-package`, behavior-identical, surface-test
+  guarded): split the 1443-line `cli.py` into a `cli/` package by deployment tier (`local`/`fleet`/
+  `cloud`/`_support`); DRY'd the cross-cutting idioms (`fail`/`kc_str`/`confirm_or_abort`) and made the
+  Ch 16 context guard **structural** via the `@guarded_command` decorator (a cloud command can't be
+  registered without the refusal path); moved the typer-free run-creds decision policy into
+  `extensions/creds.py` (`decide_run_creds`, now unit-testable). 326 → 333 tests.
 - **2026-06-29 — docs + code structure reorg** (this session): extracted `cli.py`'s scaffolding
   templates to `loopkit/_templates.py`; refreshed the stale module maps + added the canonical
   file-ownership table in [`01-system-today.md`](architecture/01-system-today.md); added

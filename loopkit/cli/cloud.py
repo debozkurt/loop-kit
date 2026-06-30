@@ -169,57 +169,31 @@ def cloud_bootstrap(
                   f"{', '.join(result.applied)}")
 
 
-def _run_creds_from_env() -> dict[str, str]:
-    """Collect the agent + git credentials present in the environment (the `--from-env` escape hatch).
-
-    Transitional: a one-off run from a machine that already has keys exported, or before any engineer
-    has registered. The default `cloud run` path resolves per-submitter Secrets instead (`--as`). Not
-    available on the webhook/cron paths — those are multi-tenant.
-    """
-    creds: dict[str, str] = {}
-    for var in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GITHUB_TOKEN", "GH_TOKEN"):
-        if os.environ.get(var):
-            creds[var] = os.environ[var]
-    return creds
-
-
-def _resolve_submitter(explicit: str | None) -> str:
-    """Who a run is for: explicit `--as` → `$LOOPKIT_SUBMITTER` → the `fleet` default."""
-    return explicit or os.environ.get("LOOPKIT_SUBMITTER") or "fleet"
-
-
 def _resolve_run_creds(spec, *, from_env: bool, allow_fleet_fallback: bool, in_cluster: bool,
                        yes: bool, kubeconfig: str | None) -> tuple[dict[str, str], str]:
-    """Resolve a run's creds per the Phase-5a policy. Returns (projected creds, source). Exits on refusal.
+    """Render the Phase-5a credential decision (the policy lives in `creds.decide_run_creds`): use the
+    resolved key, get operator consent for a shared-`fleet` fallback, or refuse. Exits on refusal.
 
-    mock → none; `--from-env` → the env grab (projected); else the per-submitter resolver with the
-    fail-closed fallback policy: the submitter's own key wins; absent it, the shared `fleet` key is
-    used only if `--allow-fleet-fallback` (non-interactive) or the operator confirms (interactive);
-    otherwise the run is refused (no key is silently borrowed).
+    The shared `fleet` key is never granted silently here — `decide_run_creds` returns it as a
+    `needs_fleet_consent` outcome, and this layer requires `--allow-fleet-fallback` (non-interactive)
+    or an interactive confirm before spending an unattributable key.
     """
     from ..extensions import creds as credmod
-    if spec.adapter == "mock":
-        return {}, "mock"
-    if from_env:
-        return credmod.project(_run_creds_from_env(), spec.adapter), "from-env"
-    ident = credmod.Identity(spec.submitter, spec.env_name, spec.adapter)
-    rc = credmod.resolve_for_run(ident, allow_fleet_fallback=False, kubeconfig=kubeconfig,
-                                 in_cluster=in_cluster)
-    if rc.source == "submitter":
-        return rc.data, rc.source
-    fleet = credmod.resolve_for_run(ident, allow_fleet_fallback=True, kubeconfig=kubeconfig,
-                                    in_cluster=in_cluster)
-    interactive = not in_cluster and not yes
-    if fleet.source == "fleet":
+    decision = credmod.decide_run_creds(
+        spec.adapter, spec.submitter, spec.env_name, from_env=from_env,
+        env=os.environ, kubeconfig=kubeconfig, in_cluster=in_cluster)
+    if decision.outcome == "resolved":
+        return decision.data, decision.source
+    if decision.outcome == "needs_fleet_consent":
+        interactive = not in_cluster and not yes
         if allow_fleet_fallback or (interactive and typer.confirm(
-                f"No key registered for '{spec.submitter}'. Use the shared 'fleet' key? "
+                f"No key registered for '{decision.submitter}'. Use the shared 'fleet' key? "
                 "Its budget is shared and a leak isn't attributable to you.")):
-            err.print(f"[yellow]using the shared 'fleet' key[/] for '{spec.submitter}' (not attributable)")
-            return fleet.data, "fleet-fallback"
-        fail("run", f"no key for '{spec.submitter}' and fleet fallback not permitted "
+            err.print(f"[yellow]using the shared 'fleet' key[/] for '{decision.submitter}' (not attributable)")
+            return decision.fleet_data, "fleet-fallback"
+        fail("run", f"no key for '{decision.submitter}' and fleet fallback not permitted "
                     "(pass --allow-fleet-fallback, or register: loopkit cloud creds set --as <you>).")
-    fail("run", f"no credentials for submitter '{spec.submitter}' and no fleet default. "
-                "Register one: loopkit cloud creds set --as <you> --adapter <adapter>.")
+    fail("run", decision.message)
 
 
 @guarded_command("run")
@@ -263,13 +237,14 @@ def cloud_run(
     _require_cloud_extra()
     import uuid
     from ..extensions import cloudrun
+    from ..extensions import creds as credmod
     if not image:
         fail("run", "no worker image — pass --image or set $LOOPKIT_WORKER_IMAGE "
                     "(ghcr.io/<owner>/loopkit-worker:<tag>).")
     if not evolve and not goal and not from_issues:
         fail("run", "need one of --goal, --from-issues, or --evolve.")
     run_id = name or uuid.uuid4().hex[:8]
-    submitter = _resolve_submitter(as_submitter)
+    submitter = credmod.resolve_submitter(as_submitter, os.environ)
     try:
         spec = cloudrun.RunSpec(
             run_id=run_id, image=image, target=target, workers=workers, adapter=adapter,
@@ -397,6 +372,7 @@ def cloud_schedule(
     created on the wrong cluster.
     """
     _require_cloud_extra()
+    from ..extensions import creds as credmod
     from ..extensions import triggers
     if not image:
         fail("schedule", "no worker image — pass --image or set $LOOPKIT_WORKER_IMAGE.")
@@ -404,7 +380,7 @@ def cloud_schedule(
         spec = triggers.ScheduleSpec(
             name=name, schedule=cron, target=target, image=image, from_issues=from_issues,
             goal=goal, label=label, provider=provider, adapter=adapter, workers=workers,
-            env_name=env_name, submitter=_resolve_submitter(as_submitter),
+            env_name=env_name, submitter=credmod.resolve_submitter(as_submitter, os.environ),
             allow_fleet_fallback=allow_fleet_fallback)
     except ValueError as exc:
         fail("schedule", escape(str(exc)))

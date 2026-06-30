@@ -31,7 +31,7 @@ Architecture mirrors the agentic-loops curriculum — **one module per concern**
 | `trace.py` | optional full-tree LangSmith observability (auto-on) | Ch 14-15 |
 | `secrets.py` | keep a real key out of the injected agent's reach | Phase 5a |
 | `executor.py` | tool execution behind a seam — relocatable off the key | Phase 6 |
-| `cli.py` · `_templates.py` | the typer entrypoint + the file bodies `init` scaffolds | — |
+| `cli/` (package) · `_templates.py` | the typer entrypoint, split by deployment tier — `local` · `fleet` · `cloud` (+ `_support` helpers); the file bodies `init` scaffolds | — |
 | `scenarios/` | runnable `loopkit demo`/`learn` teaching labs (chNN) | — |
 
 **Extensions — opt-in, no core runtime dependency** (`loopkit/extensions/`):
@@ -47,7 +47,7 @@ Architecture mirrors the agentic-loops curriculum — **one module per concern**
 | `cloud.py` | `loopkit cloud` — the CLI talking to a DOKS cluster, context-pinned | III · P2 |
 | `cloudrun.py` | `create_run()` — the ephemeral per-run Job topology it builds | III · P3 |
 | `triggers.py` | external events → runs (webhook + CronJob) via `create_run()` | III · P4 |
-| `creds.py` | per-submitter creds: identity → Secret, projected into a run | III · P5a |
+| `creds.py` | per-submitter creds: identity → Secret + the typer-free run-creds decision policy | III · P5a |
 | `measure.py` | reliability — `pass^k` over N trials → `loopkit measure` | III |
 
 ## The tick spine
