@@ -11,7 +11,7 @@ adapter = "claude-code"                    # mock | claude-code | codex | claude
 # claude-code bills your SUBSCRIPTION by default (an ambient ANTHROPIC_API_KEY is withheld). Opt into
 # the billed API key with `run --api-key` or `use_api_key = true`. `loopkit doctor` shows which.
 # use_api_key = false
-max_cost_usd = 5.0                         # budget ceiling (Ch 14); for subscription runs, also cap with --max-iter
+max_cost_usd = 5.0                         # budget ceiling (Ch 14) — size for a few ticks (author + acceptance + a fix-tick), not one
 max_tool_calls = 25
 # args = ["--dangerously-skip-permissions"]  # headless claude-code: the gates are the safety, not prompts
 

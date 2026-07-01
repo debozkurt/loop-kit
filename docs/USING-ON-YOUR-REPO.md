@@ -165,6 +165,27 @@ module **[`part-iii-ecosystem.md`](part-iii-ecosystem.md)**; the templates live 
 
 ---
 
+## Parallel on one machine (git worktrees)
+
+The fleet (§3) is the issue-driven, Redis-backed path. For a quick "run N goals at once on this box" —
+no Redis, no issues — give each run its own **git worktree**: a checkout has exactly one branch, so
+parallel runs can't share one. One worktree = one branch = one loop.
+
+```bash
+for slug in featA featB featC; do
+  git worktree add -b "loopkit/$slug" "../wt-$slug" HEAD
+  ( cd "../wt-$slug" && loopkit run --repo "../wt-$slug" \
+       --branch "loopkit/$slug" -c "../$slug.toml" ) &     # one config per goal (or --from-issue N)
+done
+wait
+# review each on its branch, merge the winners, then:  git worktree remove ../wt-<slug>
+```
+
+Each worktree commits to its own branch; you review and merge the good ones. Mind the worktree/parallel
+sharp edges in **Gotchas** below (gitignored files, clean-tree, gate `cwd`, shared-file conflicts).
+
+---
+
 ## Gotchas
 
 - **The gate runs the target's toolchain.** A real run needs that toolchain present (locally, or in
@@ -174,6 +195,24 @@ module **[`part-iii-ecosystem.md`](part-iii-ecosystem.md)**; the templates live 
 - **Workers and coordinator must agree on the repo.** `fleet run --target X` enqueues issues from
   `X`; the workers must have been started with `--target X` too, or they'll run the wrong project.
 - **Private repos in pods** need the clone credential mounted, not just the push one.
+- **`loopkit run` checks out the config's `branch` in the target tree — even with `--dry-run`.** Point
+  it at your working checkout and it switches that checkout to `loopkit/…`. Use a worktree (above) to
+  keep your main checkout put, or `git checkout -` afterward.
+- **A fresh worktree/clone doesn't have your *gitignored* files.** If a gate script, config, or rubric
+  lives under a gitignored path it won't exist in a new worktree — symlink it in, or keep it tracked.
+  (Tracked is also what CI clones need and what `protected_paths` needs: that guard is *git-diff based*,
+  so it can't protect a gitignored file and won't see one on a clone.) When you symlink a **directory**,
+  note a gitignore directory pattern (`foo/`) does *not* match a *symlink* named `foo`, so the untracked
+  symlink trips `require_clean_tree` — add it to `.git/info/exclude`.
+- **Write gates to grade the *workspace*, not their own location.** loopkit runs a gate with `cwd` set
+  to the workspace, so derive the repo root from `$PWD` (`git rev-parse --show-toplevel`) — then one
+  gate, symlinked into every worktree, grades each worktree instead of the original repo.
+- **Parallel runs that all edit one shared file conflict on merge.** If every run touches a common
+  status/changelog/index file you get N-way conflicts. Have the agent confine changes to its own
+  artifact and do the shared-file update in a single pass after merging.
+- **Size `max_cost_usd` for more than one tick.** A budget that barely covers a single author-tick
+  can't iterate against gate feedback — leave room for the acceptance check plus at least one fix-tick.
+  (The budget stop halts *starting a new tick*; it won't abort a candidate that reaches DONE mid-tick.)
 
 See also: [`CONTROL-FILES.md`](CONTROL-FILES.md) for the `.md` files that steer each run, and
 [`archive/part-ii-tilt-fleet-plan.md`](archive/part-ii-tilt-fleet-plan.md) for the cluster bring-up.
