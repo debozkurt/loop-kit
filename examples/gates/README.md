@@ -47,6 +47,14 @@ acceptance = "python -m pytest tests/holdout -q"
 > every stop decision. Keep LLM-judged / nondeterministic checks as the **acceptance** oracle (run
 > once), and probe stability before trusting a gate: `loopkit run --check-gate 5`.
 
+> **Calibrate a gate before you trust it.** Determinism isn't enough — a gate also has to *discriminate*.
+> Run it on a known-**good** tree (it must pass) and a deliberately-**broken** one (it must fail) before
+> wiring it in; a check that only ever passes is decoration. Two traps a calibration pass catches: a
+> matcher that silently finds *nothing* reports a **false green** — assert it actually checked something
+> (count what it matched, fail on zero) — and a check that encodes a *convention with legitimate
+> exceptions* will false-fail good work. Keep only universally-true checks as hard failures; demote the
+> judgment calls to warnings, or to the held-out reviewer's rubric.
+
 ## A ready-to-copy two-oracle kit
 
 Runnable starters in this folder — copy them into a `gate/` dir, edit, and point your config at them:
@@ -100,3 +108,9 @@ minimal one with `loopkit init`, then tighten gate-by-gate.
 **Protect your verifier.** Put the gate's files (`tests/`, `gate/`, an `evals.py`) under
 `safety.protected_paths` so a run can't "pass" by weakening its own grader (Ch 9 — verifier hacking).
 That single line is what makes an autonomous gate trustworthy.
+
+**A gate only sees what it can observe.** An offline/static gate can't judge *rendered* or *runtime*
+correctness — an artifact can pass every check and still be visually broken or wrong when it runs.
+Either add a check that actually exercises it (render it to an image and diff, boot it and hit it,
+snapshot the output) or lean on the held-out reviewer plus a human. "Passes the gate" is only ever as
+strong as what the gate is able to look at.
