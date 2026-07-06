@@ -4,6 +4,8 @@ version = "0.1.0"
 description = "A self-governed coding loop you can point at any repo — the agentic-loops course, made runnable."
 readme = "README.md"
 requires-python = ">=3.11"
+license = { text = "MIT" }
+classifiers = ["License :: OSI Approved :: MIT License"]
 dependencies = [
     "typer>=0.12",
     "rich>=13.7",

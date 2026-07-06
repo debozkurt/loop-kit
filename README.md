@@ -414,3 +414,8 @@ wiki [`docs/architecture/`](docs/architecture/README.md).
 Smaller enhancements: an optional **dashboard** over `FleetResult`/`EvolutionResult`; **tree-level
 reseed** for `fleet evolve` (today's is prompt-level — tree-level needs the winner's tree on a
 shared volume); finer fleet scoring (`_grade` → held-out pass fraction).
+
+## License
+
+[MIT](LICENSE) © Derrick Bozkurt. Fork it freely — bring your own agent/git/cloud credentials
+(nothing sensitive is baked in; see [`.env.example`](.env.example) for the keys a run looks for).
