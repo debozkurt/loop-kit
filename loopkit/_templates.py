@@ -57,13 +57,16 @@ Make the behaviour correct. Do not weaken, delete, or skip any test.
 _CI_GITHUB_TEMPLATE = """\
 # loopkit CI tier — turn a labelled issue into a draft PR, no cluster required.
 # Setup: drop this at .github/workflows/loopkit.yml, add the repo secret ANTHROPIC_API_KEY, and keep
-# a loopkit.toml in the repo (run `loopkit init`). Label an issue `loopkit` to dispatch the loop.
+# a loopkit.toml in the repo (run `loopkit init`). Label an issue `loopkit` to dispatch the loop;
+# request changes on a loopkit PR to dispatch a revise run (the loop resumes the PR's branch).
 # One-time: enable Settings → Actions → General → "Allow GitHub Actions to create and approve pull
 # requests", else --open-pr fails after the loop reaches DONE (check `gh pr list`, not just the ✓).
 name: loopkit
 on:
   issues:
     types: [opened, labeled]
+  pull_request_review:
+    types: [submitted]
   workflow_dispatch:
     inputs:
       issue:
@@ -75,8 +78,14 @@ permissions:
   issues: read             # read the issue (manual-dispatch path)
 jobs:
   loopkit:
-    # Act on issues carrying the `loopkit` label (the opt-in switch); always act on a manual run.
-    if: github.event_name == 'workflow_dispatch' || contains(github.event.issue.labels.*.name, 'loopkit')
+    # Act on labelled issues (the opt-in switch), manual runs, and changes-requested reviews on the
+    # loop's OWN PRs — the branch prefix is the containment: the loop only revises PRs it authored.
+    if: >-
+      github.event_name == 'workflow_dispatch'
+      || contains(github.event.issue.labels.*.name, 'loopkit')
+      || (github.event_name == 'pull_request_review'
+          && github.event.review.state == 'changes_requested'
+          && startsWith(github.event.pull_request.head.ref, 'loopkit/'))
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -94,6 +103,13 @@ jobs:
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}   # a repo/org secret (per-repo keying)
           GH_TOKEN: ${{ github.token }}                          # scoped, ephemeral — pushes + opens the PR
+      - name: loopkit run (revise — a review requested changes)
+        if: github.event_name == 'pull_request_review'
+        # No --branch: the run resumes the PR's own head branch from the event; the push updates the PR.
+        run: loopkit run --from-event "$GITHUB_EVENT_PATH" --adapter claude-api --open-pr
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GH_TOKEN: ${{ github.token }}
       - name: loopkit run (manual dispatch)
         if: github.event_name == 'workflow_dispatch'
         run: loopkit run --from-issue "${{ inputs.issue }}" --branch "loopkit/issue-${{ inputs.issue }}" --adapter claude-api --open-pr
@@ -113,11 +129,14 @@ _CI_GITHUB_CLAUDE_CODE_TEMPLATE = """\
 #      claude-code defaults to the subscription and withholds an API key)
 #   3. Let Actions open PRs (one-time): Settings → Actions → General → Workflow permissions →
 #      "Allow GitHub Actions to create and approve pull requests" (else --open-pr fails after DONE).
-#   4. Keep a loopkit.toml in the repo (run `loopkit init`). Label an issue `loopkit` to dispatch.
+#   4. Keep a loopkit.toml in the repo (run `loopkit init`). Label an issue `loopkit` to dispatch;
+#      request changes on a loopkit PR to dispatch a revise run (the loop resumes the PR's branch).
 name: loopkit
 on:
   issues:
     types: [opened, labeled]
+  pull_request_review:
+    types: [submitted]
   workflow_dispatch:
     inputs:
       issue:
@@ -129,8 +148,14 @@ permissions:
   issues: read             # read the issue (manual-dispatch path)
 jobs:
   loopkit:
-    # Act on issues carrying the `loopkit` label (the opt-in switch); always act on a manual run.
-    if: github.event_name == 'workflow_dispatch' || contains(github.event.issue.labels.*.name, 'loopkit')
+    # Act on labelled issues (the opt-in switch), manual runs, and changes-requested reviews on the
+    # loop's OWN PRs — the branch prefix is the containment: the loop only revises PRs it authored.
+    if: >-
+      github.event_name == 'workflow_dispatch'
+      || contains(github.event.issue.labels.*.name, 'loopkit')
+      || (github.event_name == 'pull_request_review'
+          && github.event.review.state == 'changes_requested'
+          && startsWith(github.event.pull_request.head.ref, 'loopkit/'))
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -149,6 +174,13 @@ jobs:
         env:
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}   # subscription, not a billed key
           GH_TOKEN: ${{ github.token }}                                     # scoped, ephemeral — push + PR
+      - name: loopkit run (revise — a review requested changes)
+        if: github.event_name == 'pull_request_review'
+        # No --branch: the run resumes the PR's own head branch from the event; the push updates the PR.
+        run: loopkit run --from-event "$GITHUB_EVENT_PATH" --adapter claude-code --open-pr
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
       - name: loopkit run (manual dispatch)
         if: github.event_name == 'workflow_dispatch'
         run: loopkit run --from-issue "${{ inputs.issue }}" --branch "loopkit/issue-${{ inputs.issue }}" --adapter claude-code --open-pr

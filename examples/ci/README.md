@@ -117,6 +117,13 @@ branch. Re-firing one issue reuses its branch and updates that issue's single PR
 still N independent single-loops — coordinated/`evolve`/shared-queue runs are the cloud fleet. See
 [`docs/part-iii-ci-mode.md`](../../docs/part-iii-ci-mode.md) → *Multiple PRs in flight*.
 
+**Revise runs (GitHub only):** the templates also fire on `pull_request_review`. **Request changes**
+on a loopkit PR and the loop runs again with your review as the goal — it resumes the PR's own
+branch and pushes, so the *same* PR updates. Each review round runs once; approvals and plain
+comments do nothing; only `loopkit/*` branches are ever revised (the loop follows through on its own
+PRs, it never adopts yours). GitLab has no changes-requested MR primitive, so its templates have no
+revise lane. See [`docs/part-iii-ci-mode.md`](../../docs/part-iii-ci-mode.md) → *Revise runs*.
+
 ## Identity & cost attribution
 
 CI secrets are **repo/env-scoped**, so a run spends the *repo's* key, attributed to the run — not to

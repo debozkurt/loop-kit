@@ -44,6 +44,18 @@ Each phase is built + unit-tested token-free; the live column is what still need
 
 ## Recent work (newest first — priming only; full history in `git log`)
 
+- **2026-07-07 — revise runs (the post-PR follow-through, CI tier):** a GitHub `pull_request_review`
+  event with **changes requested** on a `loopkit/*` branch now dispatches a **revise run** — the
+  review is the goal (`triggers.revise_goal`), the run **resumes the PR's head branch**
+  (`--from-event` sets it; `durability.ensure_branch` now resumes remote-only branches from
+  `origin/<branch>` so a fresh CI clone doesn't fork from main), and the push updates the same PR
+  (no new PR, no `Closes #N`). Idempotency **inverts** for this lane: dedupe key `repo#prN@rID` =
+  one run *per review round*, vs one-ever-per-issue. Containment = the `loopkit/` branch prefix (the
+  loop only revises its own PRs); identity on the webhook path = the **reviewer's** key (C3). The
+  cloud webhook parses revise but **defers 204** (RunSpec has no branch — tracked follow-up);
+  CI-failure auto-revise is **deliberately excluded** (unbounded self-trigger). GitHub templates
+  gained the `pull_request_review` lane (drift-guard kept); demo 20 gained the revise beat. Closes
+  the "loop stops at PR-opened" gap surfaced by the loop-taxonomy gap analysis.
 - **2026-06-29 — gate-aware `doctor`** (UX, branch `feat/gate-aware-doctor`): `loopkit doctor` now
   **runs the iteration gate once** on the current tree and reports what the verdict means for a run —
   *already passes* (the loop may instantly/ falsely DONE — a too-weak gate), *fails* (the healthy
@@ -156,6 +168,9 @@ Hardening (the 🟡 backlog, all post-v1):
 3. **Phase 6 (rest) — observability + the v2 layer** (logs/metrics, the read-only dashboard;
    KEDA/ESO/Vault/GitHub App; a separate-pod executor split = the real fix for same-pod 443
    content-exfil, Finding F).
+4. **Cloud-tier revise** — plumb `branch` through `RunSpec → worker_command` so the webhook listener
+   can dispatch revise runs instead of deferring them 204 (the parse/dedupe/policy layers are done);
+   GitLab revise stays out until GitLab grows a changes-requested-equivalent MR primitive.
 
 **Then live enablement (needs external resources):**
 

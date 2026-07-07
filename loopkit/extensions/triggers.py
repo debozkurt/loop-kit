@@ -76,6 +76,12 @@ GITLAB_HEADER_DELIVERY = "X-Gitlab-Event-UUID"
 # trigger (e.g. add `loopkit` to dispatch the agent at an issue).
 TRIGGER_ACTIONS = ("opened", "reopened", "labeled")
 
+# Revise runs (a reviewer requested changes on a loop-authored PR) only ever resume branches the loop
+# itself created. The prefix is the containment: a crafted review event pointing at `main` or a
+# human's feature branch is refused by policy (`should_trigger`) and by the CI glue — the loop
+# follows through on ITS OWN work, it doesn't adopt someone else's branch on a reviewer's say-so.
+REVISE_BRANCH_PREFIX = "loopkit/"
+
 # GitLab issue-hook `object_attributes.action` → the GitHub vocabulary the rest of the module speaks,
 # plus the candidate set worth parsing. "update" carries label changes (so the label-gate can fire on
 # it) but is *not* opened/reopened, so it never triggers a run on its own without a configured label.
@@ -125,36 +131,54 @@ def verify_token(secret: str, token: str | None) -> bool:
 # --------------------------------------------------------------------------------------------
 @dataclass
 class WebhookEvent:
-    """The normalized slice of a GitHub `issues` delivery that becomes a run. Plain data, no I/O."""
+    """The normalized slice of a forge delivery that becomes a run. Plain data, no I/O.
+
+    Two kinds share the shape: an **issue** event (the original Phase-4 trigger — the issue is the
+    goal, a fresh branch is the workspace) and a **revise** event (a reviewer requested changes on a
+    loop-authored PR — the review is the goal, the PR's *existing* head branch is the workspace).
+    For a revise event `issue_number` holds the PR number and `body` the review's summary comment.
+    """
 
     delivery_id: str
     event_type: str
     action: str
     repo: str                                    # owner/name (repository.full_name)
     clone_url: str                               # repository.clone_url — what the workers clone
-    issue_number: int
+    issue_number: int                            # the issue — or, for kind="revise", the PR number
     title: str
     body: str
     labels: list[str] = field(default_factory=list)
-    submitter: str = ""                          # the ISSUE AUTHOR (GitHub); selects whose key to spend
+    submitter: str = ""                          # whose key a run spends: the issue AUTHOR / the REVIEWER
+    kind: str = "issue"                          # "issue" | "revise"
+    branch: str = ""                             # revise only: the PR's head ref the run must resume
+    review_id: int = 0                           # revise only: the review round (the dedupe unit)
 
     @property
     def dedupe_key(self) -> str:
-        """The idempotency key: the issue identity, so one issue maps to at most one run.
+        """The idempotency key. Note the semantics INVERT between kinds:
 
-        Keyed on `repo#issue` (not the delivery id) so that re-delivery *and* a second matching event
-        for the same issue (opened then labeled) both dedupe to one run — the Phase-4 acceptance.
+        - **issue** → `repo#N`: one issue maps to *at most one run ever* — a re-delivery and a second
+          matching event (opened then labeled) both dedupe (the Phase-4 acceptance).
+        - **revise** → `repo#prN@rID`: one run *per review round*. A re-delivery of the same review
+          dedupes, but a NEW round (new review id) is new work and must start a new run — an
+          issue-style key would make the loop deaf to every review after the first.
         """
+        if self.kind == "revise":
+            return f"{self.repo}#pr{self.issue_number}@r{self.review_id}"
         return f"{self.repo}#{self.issue_number}"
 
 
 def parse_event(event_type: str, payload: dict, delivery_id: str = "-") -> WebhookEvent | None:
     """Map a GitHub webhook payload into a `WebhookEvent`, or None for events we don't act on.
 
-    Only `issues` events with a trigger-worthy action become a run; everything else (push, PR, a
-    `closed`/`deleted` issue, a malformed payload) returns None so the listener replies "ignored".
-    The goal-building (title + body) lives in `event_to_run_spec`; this only extracts fields.
+    Two event families become runs: `issues` with a trigger-worthy action (a new task), and
+    `pull_request_review` with changes requested (a revise of the loop's own PR — see
+    `parse_review_event`). Everything else (push, a plain PR event, a `closed`/`deleted` issue, a
+    malformed payload) returns None so the listener replies "ignored". The goal-building lives in
+    `event_to_run_spec`/`revise_goal`; this only extracts fields.
     """
+    if event_type == "pull_request_review":
+        return parse_review_event(payload, delivery_id)
     if event_type != "issues":
         return None
     action = payload.get("action", "")
@@ -175,6 +199,56 @@ def parse_event(event_type: str, payload: dict, delivery_id: str = "-") -> Webho
         repo=repo.get("full_name", ""), clone_url=repo.get("clone_url", ""),
         issue_number=int(number), title=(issue.get("title") or "").strip(),
         body=(issue.get("body") or "").strip(), labels=labels, submitter=author)
+
+
+def parse_review_event(payload: dict, delivery_id: str = "-") -> WebhookEvent | None:
+    """Map a GitHub `pull_request_review` payload into a revise `WebhookEvent`, or None.
+
+    Only a **submitted, changes-requested** review becomes a run: it is the one review outcome that
+    is an explicit human instruction to keep working ("this isn't done — fix these things"). An
+    approval or a plain comment is not a work order, and acting on every comment would let the loop
+    react to its own PR chatter. The event captures what a revise run needs beyond the issue shape:
+    the PR's **head branch** (the workspace to resume) and the **review id** (the dedupe round).
+
+    Identity (C3): the run is bound to the **reviewer** — the review body is the instruction being
+    executed, so it spends the reviewer's key, never the PR author's. GitLab has no equivalent
+    changes-requested primitive on MR hooks, so revise parsing is GitHub-only for now.
+    """
+    if payload.get("action") != "submitted":
+        return None
+    review = payload.get("review") or {}
+    if (review.get("state") or "").lower() != "changes_requested":
+        return None
+    pr = payload.get("pull_request") or {}
+    number = pr.get("number")
+    branch = ((pr.get("head") or {}).get("ref") or "").strip()
+    if number is None or not branch:
+        return None
+    repo = payload.get("repository") or {}
+    labels = [lbl.get("name", "") for lbl in (pr.get("labels") or []) if lbl.get("name")]
+    return WebhookEvent(
+        delivery_id=delivery_id, event_type="pull_request_review", action="submitted",
+        repo=repo.get("full_name", ""), clone_url=repo.get("clone_url", ""),
+        issue_number=int(number), title=(pr.get("title") or "").strip(),
+        body=(review.get("body") or "").strip(), labels=labels,
+        submitter=(review.get("user") or {}).get("login", ""),
+        kind="revise", branch=branch, review_id=int(review.get("id") or 0))
+
+
+def revise_goal(event: WebhookEvent) -> str:
+    """Build the goal for a revise run: address the review, on the PR's existing branch.
+
+    The review body is untrusted input exactly like an issue body — the goal is untrusted by design
+    (gates certify the result, not the request). A changes-requested review may carry no summary
+    comment (inline-only reviews), so the fallback points the agent at the PR's inline comments
+    rather than handing it an empty instruction.
+    """
+    feedback = event.body or (f"(The review has no summary comment — the feedback is in the inline "
+                              f"review comments on PR #{event.issue_number}.)")
+    return (f"A reviewer requested changes on PR #{event.issue_number} ({event.title!r}).\n\n"
+            f"Address this review feedback:\n\n{feedback}\n\n"
+            f"The branch already holds the PR's commits — continue from them; do not start over "
+            f"and do not open a new PR (pushing the branch updates the existing one).")
 
 
 def parse_gitlab_event(payload: dict, delivery_id: str = "-") -> WebhookEvent | None:
@@ -215,12 +289,15 @@ def parse_event_payload(payload: dict, delivery_id: str = "-") -> WebhookEvent |
     read the event type from and **no signature** to verify (the forge already authenticated the
     trigger; the CI runner is the trust boundary, not loopkit). So unlike the webhook path, the forge
     has to be inferred from the body: a GitLab issue payload carries a top-level `object_kind`, a
-    GitHub `issues` payload does not (it has `action` + `issue` + `repository`). Everything downstream
-    is the same `WebhookEvent` the webhook path produces. Returns None for any non-issue / non-actionable
-    payload (a `workflow_dispatch`, a `closed` issue), so the caller can report it cleanly.
+    GitHub `pull_request_review` payload carries `review` + `pull_request`, and a GitHub `issues`
+    payload has neither (it has `action` + `issue` + `repository`). Everything downstream is the
+    same `WebhookEvent` the webhook path produces. Returns None for any non-actionable payload
+    (a `workflow_dispatch`, a `closed` issue, an approving review), so the caller can report it cleanly.
     """
     if payload.get("object_kind"):                       # GitLab system-hook discriminator
         return parse_gitlab_event(payload, delivery_id)
+    if "review" in payload and "pull_request" in payload:  # GitHub `pull_request_review` → revise
+        return parse_review_event(payload, delivery_id)
     return parse_event("issues", payload, delivery_id)   # GitHub `issues` event
 
 
@@ -231,7 +308,13 @@ def should_trigger(event: WebhookEvent, trigger_label: str | None) -> bool:
     the opt-in switch — works for `opened` already-labeled and for `labeled` adding it). Without one,
     only brand-new/revived issues (`opened`/`reopened`) trigger — a bare `labeled` won't, so editing
     labels doesn't spam runs.
+
+    A **revise** event uses the branch prefix instead of the label gate: a loop-authored PR doesn't
+    inherit the issue's labels, and the containment question is different — not "did a human opt this
+    task in?" (the reviewer's changes-requested *is* the opt-in) but "is this PR the loop's own work?".
     """
+    if event.kind == "revise":
+        return event.branch.startswith(REVISE_BRANCH_PREFIX)
     if trigger_label:
         return trigger_label in event.labels
     return event.action in ("opened", "reopened")
@@ -248,6 +331,12 @@ def event_to_run_spec(event: WebhookEvent, *, image: str, adapter: str = DEFAULT
     path (C4). A single-worker fan-out (the issue is one task) — wider fan-out is for blind
     multi-attempt runs, not a targeted issue fix.
     """
+    if event.kind != "issue":
+        # A revise run must resume the PR's existing branch, and RunSpec has no branch to carry —
+        # the cloud tier can't express it yet. The CI tier handles revise (`loopkit run --from-event`
+        # checks the branch out itself); this guard keeps a half-right cloud run from ever starting.
+        raise ValueError(f"a {event.kind!r} event can't become a cloud run yet (RunSpec has no "
+                         f"branch to resume) — revise runs are CI-tier only, via `loopkit run --from-event`.")
     assert_trusted_adapter(adapter)                          # no CLI adapter on an untrusted run
     goal = f"{event.title}\n\n{event.body}".strip() if event.body else event.title
     run_id = sanitize_run_id(f"{event.repo}-issue-{event.issue_number}")
@@ -477,6 +566,12 @@ class WebhookApp:
             dlog.info("hook.ignored")
             return WebhookResponse(204, "event ignored")
         ilog = dlog.bind(repo=event.repo, issue=event.issue_number)
+        # A revise event is parsed (and would dedupe per review round) but the cloud tier can't
+        # resume a PR branch yet — defer it explicitly rather than starting a wrong-workspace run.
+        # The CI tier (`loopkit run --from-event`) is where revise runs execute today.
+        if event.kind != "issue":
+            ilog.info("hook.revise_deferred", branch=event.branch, review=event.review_id)
+            return WebhookResponse(204, "revise events run on the CI tier for now; ignored here")
         # 4. Resolve the submitter's identity → key BEFORE reserving (G6). The issue author (GitHub) or
         #    the pinned listener identity (GitLab); a build/adapter error or an unregistered submitter
         #    refuses here, leaving the dedupe key untouched so a later registration + re-delivery works.

@@ -13,8 +13,12 @@
 > schedule/schedules/unschedule`, and the **webhook listener**
 > ([`loopkit/extensions/triggers.py`](../../loopkit/extensions/triggers.py): HMAC verify +
 > idempotency → `create_run`) with `loopkit cloud webhook` and the opt-in
-> [`k8s/cloud/webhook/`](../../k8s/cloud/webhook/) manifests. What remains 🟡 is **live execution on a
-> real DOKS cluster** (no cluster yet).
+> [`k8s/cloud/webhook/`](../../k8s/cloud/webhook/) manifests. The parsers also produce **revise**
+> events (a changes-requested review on a loop-authored PR, per-review-round dedupe key), but the
+> cloud dispatch **defers them with a 204**: `RunSpec` carries no branch to resume, so revise runs
+> execute on the **CI tier** ([`part-iii-ci-mode.md` → Revise runs](../part-iii-ci-mode.md#revise-runs--the-post-pr-follow-through-));
+> plumbing `branch` through `RunSpec → worker_command` is the tracked follow-up. What remains 🟡 is
+> **live execution on a real DOKS cluster** (no cluster yet).
 
 The target system: loopkit **deployed to a managed cloud cluster (DigitalOcean DOKS), running many
 jobs in production** — concurrent, scheduled, and event-triggered — with the Ch 16 safety envelope

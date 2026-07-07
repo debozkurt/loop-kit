@@ -84,11 +84,19 @@ def revert_uncommitted(repo: Path) -> None:
     _git(repo, "clean", "-fdq")
 
 
-def ensure_branch(repo: Path, branch: str) -> None:
-    """Switch to `branch`, creating it from HEAD if it doesn't exist."""
+def ensure_branch(repo: Path, branch: str, remote: str = "origin") -> None:
+    """Switch to `branch` — resume it if it exists locally or on `remote`, else create it from HEAD.
+
+    The remote-tracking case is the revise path: a fresh CI clone holds a PR's branch only as
+    `origin/<branch>`, so a plain create-from-HEAD would silently fork the run off the default
+    branch — losing the PR's commits and making the eventual push non-fast-forward (loopkit never
+    force-pushes). Starting from the remote-tracking ref makes "resume the PR" work in any clone.
+    """
     if current_branch(repo) == branch:
         return
     if _git(repo, "rev-parse", "--verify", branch).returncode == 0:
         _git(repo, "checkout", branch, check=True)
+    elif _git(repo, "rev-parse", "--verify", f"{remote}/{branch}").returncode == 0:
+        _git(repo, "checkout", "-b", branch, f"{remote}/{branch}", check=True)
     else:
         _git(repo, "checkout", "-b", branch, check=True)

@@ -86,6 +86,13 @@ Draft, always: **the loop proposes, a human merges.** Everything else — branch
 protected-path guard, the held-out gate, the budget stop — is the unchanged Parts I–II envelope. In CI
 the runner *is* the Ch 16 sandbox, so loopkit doesn't build one.
 
+**And the loop follows through.** The PR isn't the end of the lifecycle: **request changes** on a
+loopkit PR and the same workflow dispatches a **revise run** — the review becomes the goal, the run
+resumes the PR's *existing* head branch, and the push updates the *same* PR. Idempotency inverts for
+this lane (one run **per review round**, not one-ever-per-issue), and containment is the branch
+prefix: the loop only revises `loopkit/*` branches — its own PRs, never a human's. See
+[`part-iii-ci-mode.md` → Revise runs](part-iii-ci-mode.md#revise-runs--the-post-pr-follow-through-).
+
 ### GitHub vs GitLab — the honest differences
 
 | | GitHub Actions | GitLab CI |
@@ -115,8 +122,9 @@ endpoint, two new problems appear that an in-cluster queue never had:
   events (`opened`, then `labeled`). The listener dedupes on the **issue identity** (`repo#number`), so
   one issue maps to **at most one run** — no matter how many deliveries arrive.
 
-`loopkit demo 20` drives the pure `WebhookApp.dispatch` through six deliveries — forged → 401/no-run,
-signed → one run, retry + second event → dedup, unlabelled → ignored — and shows the run count never
+`loopkit demo 20` drives the pure `WebhookApp.dispatch` through seven deliveries — forged → 401/no-run,
+signed → one run, retry + second event → dedup, unlabelled → ignored, a changes-requested review →
+a **revise** event (per-round dedupe key; deferred to the CI tier) — and shows the run count never
 exceeds one. Crucially, the listener, the CronJob, and the CLI all converge on the **same
 `create_run()` seam**: a human, a cron, and a webhook are one code path with identical isolation. That
 is Chapter 12's "the worker is indifferent to what woke it," made into infrastructure.

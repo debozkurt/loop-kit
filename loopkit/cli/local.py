@@ -240,8 +240,10 @@ def run(config: Path = typer.Option(DEFAULT_CONFIG, "--config", "-c"),
         adapter: str | None = typer.Option(None, "--adapter",
                                             help="Override the configured agent adapter (e.g. claude-api in CI)."),
         from_event: Path | None = typer.Option(None, "--from-event",
-                                                help="Set the goal from a forge issue-event JSON "
-                                                     "(Actions $GITHUB_EVENT_PATH / GitLab CI). CI tier."),
+                                                help="Set the goal from a forge event JSON (Actions "
+                                                     "$GITHUB_EVENT_PATH / GitLab CI): an issue, or a "
+                                                     "changes-requested review on a loopkit PR (a revise "
+                                                     "run that resumes the PR's branch). CI tier."),
         from_issue: int | None = typer.Option(None, "--from-issue",
                                               help="Set the goal by fetching one issue by number via gh/glab. CI tier."),
         provider: str = typer.Option("auto", "--provider",
@@ -287,8 +289,11 @@ def run(config: Path = typer.Option(DEFAULT_CONFIG, "--config", "-c"),
     The CI deployment tier (Phase 5c) rides this same single-loop path: `--from-event`/`--from-issue`
     source the goal from a forge issue (so an Actions/GitLab job is an issue→PR worker with no
     cluster), and `--open-pr` flips on push + a draft PR for that one invocation without editing the
-    repo's `loopkit.toml`. Everything else — the gates, the protected-path guard, the budget stop —
-    applies unchanged; in CI the ephemeral runner supplies the sandbox the cloud tier hand-builds.
+    repo's `loopkit.toml`. A `pull_request_review` event with changes requested makes it a **revise
+    run**: the goal is the review feedback and the run resumes the PR's own head branch, so pushing
+    updates the existing PR — the loop follows through on its PRs instead of stopping at "opened".
+    Everything else — the gates, the protected-path guard, the budget stop — applies unchanged; in
+    CI the ephemeral runner supplies the sandbox the cloud tier hand-builds.
     """
     # FIRST: load creds into memory + scrub them out of os.environ, before any subprocess (git, the
     # agent, the gates) can inherit them (Phase 5a credential hygiene). On a laptop with no creds dir
@@ -303,13 +308,16 @@ def run(config: Path = typer.Option(DEFAULT_CONFIG, "--config", "-c"),
         cfg.agent.adapter = adapter
     if api_key:
         cfg.agent.use_api_key = True            # opt into the billed API key for claude-code this run
-    # CI tier: source the goal from a forge issue (event JSON or a number). Mutually exclusive — they
-    # are two routes to the same thing. The issue number is captured so a `Closes #N` lands in the PR.
+    # CI tier: source the goal from a forge event (issue or changes-requested review) or an issue
+    # number. Mutually exclusive — two routes to the same thing. The issue number is captured so a
+    # `Closes #N` lands in the PR; a revise event instead carries the PR branch the run must resume.
     issue_number: int | None = None
     if from_event is not None and from_issue is not None:
         fail("run", "pass only one of --from-event or --from-issue.")
     if from_event is not None:
-        cfg.goal, issue_number = _goal_from_event(from_event)
+        cfg.goal, issue_number, event_branch = _goal_from_event(from_event)
+        if event_branch and branch is None:
+            cfg.branch = event_branch           # revise: resume the PR's head branch (explicit --branch wins)
     elif from_issue is not None:
         cfg.goal, issue_number = _goal_from_issue(cfg.repo_path(), from_issue, provider)
     # `--open-pr` is a per-invocation override so the CI template is turnkey on a repo whose
@@ -401,12 +409,20 @@ def _pr_title(goal: str) -> str:
     return f"loopkit: {first.strip()[:72]}" if first else "loopkit: automated change"
 
 
-def _goal_from_event(path: Path) -> tuple[str, int | None]:
-    """Read a forge issue-event JSON (Actions $GITHUB_EVENT_PATH / GitLab CI) → (goal, issue number).
+def _goal_from_event(path: Path) -> tuple[str, int | None, str | None]:
+    """Read a forge event JSON (Actions $GITHUB_EVENT_PATH / GitLab CI) → (goal, issue number, branch).
 
     Reuses the webhook path's parsers via `triggers.parse_event_payload` (forge auto-detected from the
-    body), so the CI goal-building is identical to a webhook-triggered run. Exits cleanly when the file
-    is unreadable or holds no actionable issue (a `workflow_dispatch`, a closed issue).
+    body), so the CI goal-building is identical to a webhook-triggered run. Two event kinds:
+
+    - an **issue** → (issue goal, its number for `Closes #N`, no branch — the run makes its own);
+    - a **changes-requested review** → (revise goal, no issue number — the PR already links its
+      issue, and closing it from a revise would be wrong — and the PR's head branch to resume).
+      The `loopkit/` branch-prefix guard applies here exactly as in `should_trigger`: the loop
+      revises only PRs it authored, regardless of which tier delivered the event.
+
+    Exits cleanly when the file is unreadable or holds no actionable event (a `workflow_dispatch`,
+    a closed issue, an approving review).
     """
     from ..extensions import triggers
     try:
@@ -415,10 +431,16 @@ def _goal_from_event(path: Path) -> tuple[str, int | None]:
         fail("run", f"could not read --from-event {path}: {escape(str(exc))}")
     event = triggers.parse_event_payload(payload)
     if event is None:
-        fail("run", f"--from-event {path} carries no actionable issue "
-                    "(not an issue event, or a closed/edited action).")
+        fail("run", f"--from-event {path} carries no actionable issue or changes-requested review "
+                    "(not an issue/review event, or a closed/approved/edited action).")
+    if event.kind == "revise":
+        if not event.branch.startswith(triggers.REVISE_BRANCH_PREFIX):
+            fail("run", f"revise refused: PR branch '{escape(event.branch)}' is not a loopkit branch "
+                        f"(expected prefix '{triggers.REVISE_BRANCH_PREFIX}') — the loop only revises "
+                        "PRs it authored.")
+        return triggers.revise_goal(event), None, event.branch
     goal = f"{event.title}\n\n{event.body}".strip() if event.body else event.title
-    return goal or f"Resolve issue #{event.issue_number}", event.issue_number
+    return goal or f"Resolve issue #{event.issue_number}", event.issue_number, None
 
 
 def _goal_from_issue(repo: Path, number: int, provider: str) -> tuple[str, int]:

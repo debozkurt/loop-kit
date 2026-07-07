@@ -124,6 +124,89 @@ def test_parse_event_payload_returns_none_for_non_issue_payloads():
 
 
 # --------------------------------------------------------------------------------------------
+# Revise events — a changes-requested review on the loop's own PR is a follow-through work order.
+# --------------------------------------------------------------------------------------------
+def _review_payload(*, state="changes_requested", action="submitted", pr=5, review_id=901,
+                    body="Rename the helper and add a test for the empty case.",
+                    branch="loopkit/issue-42", reviewer="bob", repo="acme/widget"):
+    return {
+        "action": action,
+        "review": {"id": review_id, "state": state, "body": body, "user": {"login": reviewer}},
+        "pull_request": {"number": pr, "title": "loopkit: Fix the bug",
+                         "head": {"ref": branch}, "user": {"login": "loopkit-bot"}, "labels": []},
+        "repository": {"full_name": repo, "clone_url": f"https://github.com/{repo}.git"},
+    }
+
+
+def test_parse_review_event_extracts_the_revise_fields():
+    ev = triggers.parse_event("pull_request_review", _review_payload(), "d")
+    assert ev is not None and ev.kind == "revise"
+    assert ev.issue_number == 5                        # the PR number
+    assert ev.branch == "loopkit/issue-42"             # the workspace the run must resume
+    assert ev.review_id == 901
+    assert "Rename the helper" in ev.body
+    assert ev.submitter == "bob"                       # the REVIEWER — their instruction, their key (C3)
+
+
+def test_parse_review_event_only_acts_on_a_submitted_changes_request():
+    assert triggers.parse_event("pull_request_review", _review_payload(state="approved"), "d") is None
+    assert triggers.parse_event("pull_request_review", _review_payload(state="commented"), "d") is None
+    assert triggers.parse_event("pull_request_review", _review_payload(action="dismissed"), "d") is None
+    headless = _review_payload()
+    headless["pull_request"]["head"] = {}              # no head ref → nothing to resume → not a run
+    assert triggers.parse_event("pull_request_review", headless, "d") is None
+
+
+def test_revise_dedupe_key_is_per_review_round():
+    # The idempotency semantics INVERT vs issues: a re-delivery of one review dedupes, but a NEW
+    # review round must start a new run — an issue-style key would go deaf after the first review.
+    first = triggers.parse_event("pull_request_review", _review_payload(review_id=901), "d1")
+    retry = triggers.parse_event("pull_request_review", _review_payload(review_id=901), "d2")
+    second_round = triggers.parse_event("pull_request_review", _review_payload(review_id=902), "d3")
+    assert first.dedupe_key == retry.dedupe_key
+    assert first.dedupe_key != second_round.dedupe_key
+    assert first.dedupe_key != f"{first.repo}#{first.issue_number}"   # never collides with the issue key
+
+
+def test_should_trigger_gates_revise_on_the_loopkit_branch_prefix():
+    ours = triggers.parse_event("pull_request_review", _review_payload(), "d")
+    theirs = triggers.parse_event("pull_request_review",
+                                  _review_payload(branch="feature/human-work"), "d")
+    assert triggers.should_trigger(ours, None) is True
+    assert triggers.should_trigger(theirs, None) is False     # the loop never adopts a human's branch
+    # The label gate doesn't apply to revise (a loop-authored PR carries no issue label) — the
+    # changes-requested review is itself the human opt-in.
+    assert triggers.should_trigger(ours, "loopkit") is True
+
+
+def test_parse_event_payload_detects_a_review_by_shape():
+    ev = triggers.parse_event_payload(_review_payload())      # header-less CI-tier entry
+    assert ev is not None and ev.kind == "revise" and ev.branch == "loopkit/issue-42"
+
+
+def test_revise_goal_carries_the_feedback_and_the_resume_contract():
+    ev = triggers.parse_event("pull_request_review", _review_payload(), "d")
+    goal = triggers.revise_goal(ev)
+    assert "PR #5" in goal and "Rename the helper" in goal
+    assert "do not open a new PR" in goal                     # resume, don't restart
+    inline_only = triggers.parse_event("pull_request_review", _review_payload(body=""), "d")
+    assert "inline" in triggers.revise_goal(inline_only)      # empty summary → point at inline comments
+
+
+def test_event_to_run_spec_refuses_a_revise_event():
+    # RunSpec has no branch to resume — a cloud revise run would work in the wrong workspace.
+    ev = triggers.parse_event("pull_request_review", _review_payload(), "d")
+    with pytest.raises(ValueError, match="CI-tier only"):
+        triggers.event_to_run_spec(ev, image="i")
+
+
+def test_dispatch_defers_a_revise_event_without_creating():
+    created = []
+    resp = _post(_app(created), _review_payload(), event="pull_request_review")
+    assert resp.status == 204 and "CI tier" in resp.message and created == []
+
+
+# --------------------------------------------------------------------------------------------
 # Idempotency — first writer wins; a re-delivery is a no-op.
 # --------------------------------------------------------------------------------------------
 def test_in_memory_idempotency_reserves_once():

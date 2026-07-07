@@ -134,6 +134,50 @@ The same applies on **GitLab** — its template passes `--branch loopkit/issue-$
 gets its own branch → its own draft **MR**. (`--branch` is forge-neutral; only the issue identifier
 differs: GitHub's `issue.number` vs GitLab's `$ISSUE_IID`.)
 
+## Revise runs — the post-PR follow-through 🟢
+
+Without this, the loop's lifecycle ends at "PR opened": a reviewer requests changes and nothing
+happens — the loop owns the *artifact*, not the *outcome*. A **revise run** closes that gap: a
+GitHub **`pull_request_review`** event with **changes requested** re-dispatches the loop at its own
+PR, with the review as the goal and the PR's **existing head branch** as the workspace.
+
+```
+issue #7                       → loopkit/issue-7 → draft PR #12   (the issue lane, unchanged)
+changes requested on PR #12    → revise run: goal = the review, resumes loopkit/issue-7,
+                                 push updates the SAME PR (round r901 runs exactly once)
+changes requested again (r902) → a NEW revise run (per-round idempotency)
+```
+
+What makes it a *revise* and not just another run:
+
+- **Only a submitted changes-requested review triggers** (`triggers.parse_review_event`). An approval
+  or plain comment is not a work order, and reacting to every comment would let the loop chase its
+  own PR chatter. GitLab has no changes-requested primitive on MR hooks, so revise is GitHub-only.
+- **The branch comes from the event** — `--from-event` sets the run's branch to the PR's head ref
+  (an explicit `--branch` still wins), and `durability.ensure_branch` now resumes a **remote-only**
+  branch from `origin/<branch>` — a fresh CI clone holds the PR branch only as a remote-tracking
+  ref, and forking from HEAD would silently lose the PR's commits and make the push
+  non-fast-forward (loopkit never force-pushes).
+- **Idempotency inverts.** An issue maps to *at most one run ever* (`repo#N`); a revise maps to one
+  run **per review round** (`repo#prN@rID`) — a re-delivery of the same review dedupes, but a new
+  round is new work. An issue-style key would make the loop deaf to every review after the first.
+- **Containment is the branch prefix, not the label.** The loop only revises PRs it authored:
+  `should_trigger` (and the CI glue, and the workflow's `if:`) require the head branch to start with
+  `loopkit/`. A crafted review event pointing at `main` or a human's feature branch is refused —
+  and `main` is double-covered by `forbid_branches` in preflight. No `Closes #N` is added (the PR
+  already links its issue; a revise must not re-close it).
+- **Identity (webhook path):** a revise event binds to the **reviewer** (their review is the
+  instruction being executed), the same C3 confused-deputy rule that binds an issue run to the
+  issue author. On the CI tier this is moot (the repo's key runs everything).
+
+**Cloud tier: deferred, deliberately.** `parse_event` produces revise events on the webhook path
+too, but `WebhookApp.dispatch` answers them `204` and `event_to_run_spec` refuses them: `RunSpec`
+has no branch to resume yet, and a wrong-workspace run is worse than no run. Plumbing
+`branch` through `RunSpec → worker_command` is the tracked follow-up. **CI-failure auto-revise is
+deliberately excluded** on every tier: the loop's own push retriggers CI, so a failure-triggered
+revise is an unbounded self-trigger loop — a human's changes-requested review is the paced,
+bounded signal.
+
 ## Secrets & identity (the tier's whole appeal)
 
 - **Secrets are CI-native** — Actions/GitLab masked secrets or OIDC. **No resolver, no k8s Secrets, no

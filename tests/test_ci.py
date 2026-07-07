@@ -162,6 +162,80 @@ def test_run_from_event_rejects_non_issue_payload(git_repo, tmp_path, clean_cred
     assert "no actionable issue" in _norm(result.output)
 
 
+_REVIEW_EVENT = {
+    "action": "submitted",
+    "review": {"id": 901, "state": "changes_requested",
+               "body": "Tighten the error handling and add a test for the empty case.",
+               "user": {"login": "bob"}},
+    "pull_request": {"number": 12, "title": "loopkit: Add a /health endpoint",
+                     "head": {"ref": "loopkit/issue-7"}, "user": {"login": "loopkit-bot"},
+                     "labels": []},
+    "repository": {"full_name": "acme/widgets", "clone_url": "https://github.com/acme/widgets.git"},
+}
+
+
+def test_run_from_review_event_revises_on_the_pr_branch(git_repo, tmp_path, monkeypatch, clean_creds):
+    # The post-PR follow-through: a changes-requested review becomes a revise run that resumes the
+    # PR's own head branch (no Closes #N — the PR already links its issue) and pushes it, so the
+    # existing PR updates instead of a second one opening.
+    toml = _write_config(git_repo)
+    event = tmp_path / "review.json"
+    event.write_text(json.dumps(_REVIEW_EVENT))
+
+    captured: dict = {}
+
+    def fake_sync_done(config, repo, *, title=None, body="", issue=None):
+        captured.update(goal=config.goal, issue=issue, branch=config.branch)
+        return {"pushed": True, "pr_url": None}
+
+    monkeypatch.setattr("loopkit.extensions.remote.sync_done", fake_sync_done)
+    result = runner.invoke(app, ["run", "-c", str(toml), "--repo", str(git_repo),
+                                 "--from-event", str(event), "--adapter", "mock", "--open-pr"])
+    assert result.exit_code == 0, result.output
+    assert captured["branch"] == "loopkit/issue-7"       # the PR's head branch, not the config default
+    assert "requested changes on PR #12" in captured["goal"]
+    assert "Tighten the error handling" in captured["goal"]
+    assert captured["issue"] is None                     # a revise never closes the source issue
+    head = subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=git_repo,
+                          capture_output=True, text=True).stdout.strip()
+    assert head == "loopkit/issue-7"                     # the loop actually switched to the PR branch
+
+
+def test_run_from_review_event_refuses_a_non_loopkit_branch(git_repo, tmp_path, clean_creds):
+    # Containment: the loop revises only PRs it authored. A review event pointing at a human's
+    # branch (or a crafted one pointing at main) is refused before the loop starts.
+    toml = _write_config(git_repo)
+    crafted = json.loads(json.dumps(_REVIEW_EVENT))
+    crafted["pull_request"]["head"]["ref"] = "feature/human-work"
+    event = tmp_path / "crafted.json"
+    event.write_text(json.dumps(crafted))
+    result = runner.invoke(app, ["run", "-c", str(toml), "--repo", str(git_repo),
+                                 "--from-event", str(event), "--adapter", "mock", "--open-pr"])
+    assert result.exit_code == 1
+    assert "revise refused" in _norm(result.output)
+
+
+def test_ensure_branch_resumes_a_remote_only_pr_branch(git_repo, tmp_path):
+    # A fresh CI clone holds the PR branch only as origin/<branch>. ensure_branch must start the
+    # local branch from the remote-tracking ref — forking from HEAD would lose the PR's commits and
+    # make the eventual push non-fast-forward (loopkit never force-pushes).
+    from loopkit import durability
+
+    subprocess.run(["git", "checkout", "-q", "-b", "loopkit/issue-7"], cwd=git_repo,
+                   check=True, capture_output=True)
+    (git_repo / "fix.txt").write_text("the PR's work\n")
+    subprocess.run(["git", "add", "-A"], cwd=git_repo, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-qm", "pr work"], cwd=git_repo, check=True, capture_output=True)
+    subprocess.run(["git", "checkout", "-q", "main"], cwd=git_repo, check=True, capture_output=True)
+
+    clone = tmp_path / "ci-clone"
+    subprocess.run(["git", "clone", "-q", str(git_repo), str(clone)], check=True, capture_output=True)
+    # The clone is on main; the PR branch exists only as origin/loopkit/issue-7.
+    durability.ensure_branch(clone, "loopkit/issue-7")
+    assert durability.current_branch(clone) == "loopkit/issue-7"
+    assert (clone / "fix.txt").exists()                  # resumed the PR's commits, didn't fork main
+
+
 def test_run_from_event_and_from_issue_are_mutually_exclusive(git_repo, clean_creds):
     toml = _write_config(git_repo)
     result = runner.invoke(app, ["run", "-c", str(toml), "--repo", str(git_repo),

@@ -12,7 +12,8 @@ body* — no socket, no cluster, no tokens. This lab drives it through six deliv
 `create` recorder standing in for `cloudrun.create_run`, so you watch the run count change (or not):
 
     forged signature → 401, 0 runs   ·   signed issue → 202, 1 run   ·   re-deliver → 200 dup, still 1
-    second event (labeled) → 200 dup, still 1   ·   unlabeled issue → 204 ignored   ·   tally
+    second event (labeled) → 200 dup, still 1   ·   unlabeled issue → 204 ignored
+    changes-requested review → a REVISE event (per-round dedupe key; runs on the CI tier)   ·   tally
 
 Same `create_run` seam the CLI and the CronJob call — a cron, a webhook, and a human are one code path.
 """
@@ -114,8 +115,33 @@ def run(stage: Stage) -> None:
                "The label is the opt-in switch: a backlog stays quiet until someone deliberately "
                "hands it to the loop.")
 
+    # 6. The loop's PR gets a changes-requested review — the trigger for the POST-PR follow-through.
+    review = {"action": "submitted",
+              "review": {"id": 901, "state": "changes_requested",
+                         "body": "Retry only idempotent requests; add a test.",
+                         "user": {"login": "grace"}},
+              "pull_request": {"number": 88, "title": "loopkit: Add retry to the uploader",
+                               "head": {"ref": "loopkit/issue-42"}, "labels": []},
+              "repository": {"full_name": "acme/widgets",
+                             "clone_url": "https://github.com/acme/widgets.git"}}
+    body4 = json.dumps(review).encode()
+    headers4 = dict(_headers(body4, secret=SECRET, delivery="d-4"))
+    headers4["X-GitHub-Event"] = "pull_request_review"
+    resp = app.dispatch(headers=headers4, body=body4)
+    rows.append(("changes-requested review", f"{resp.status} {resp.message[:24]}", len(created)))
+    event = triggers.parse_event("pull_request_review", review, "d-4")
+    stage.beat(f"A reviewer [bold]requests changes[/] on the loop's own PR #88 → parsed as a "
+               f"[bold]revise[/] event bound to the PR's branch ([bold]{event.branch}[/]) and the "
+               f"[bold]reviewer's[/] key (grace). Note the dedupe key [bold]{event.dedupe_key}[/]: "
+               "the idempotency semantics [italic]invert[/] — an issue runs [bold]at most once "
+               "ever[/], but each new review [bold]round[/] is new work and gets its own key (only a "
+               "re-delivery of the same review dedupes). The cloud listener defers it "
+               f"([dim]{resp.status}[/]) — resuming a PR branch is the [bold]CI tier's[/] job "
+               "(`loopkit run --from-event`, demo 21), where the loop follows through on its PR "
+               "instead of stopping at 'opened'.")
+
     stage.console.print(_ledger(rows))
-    stage.beat("Six deliveries, [bold]one run[/]. And `dispatch` is the [bold]same create_run seam[/] "
+    stage.beat("Seven deliveries, [bold]one run[/]. And `dispatch` is the [bold]same create_run seam[/] "
                "the CLI (`loopkit cloud run`) and the CronJob (`loopkit cloud schedule`) call — a "
                "human, a cron, and a webhook are one code path, identical isolation. GitHub "
                "HMAC-signs the [italic]body[/]; GitLab sends a static [italic]token[/] (weaker — not "
