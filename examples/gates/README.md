@@ -44,8 +44,10 @@ acceptance = "python -m pytest tests/holdout -q"
 ```
 
 > **Determinism matters for the *iteration* gate.** It runs every tick, so a flaky verdict corrupts
-> every stop decision. Keep LLM-judged / nondeterministic checks as the **acceptance** oracle (run
-> once), and probe stability before trusting a gate: `loopkit run --check-gate 5`.
+> every stop decision — an LLM-judged check therefore never belongs in the iteration gate. Put it
+> where its nondeterminism is harmless: the **acceptance** oracle for a one-shot certifier (run once),
+> or the **review hook** for per-tick feedback (`--review` — see "Gate vs. review hook" below). Probe
+> stability before trusting a gate: `loopkit run --check-gate 5`.
 
 > **Calibrate a gate before you trust it.** Determinism isn't enough — a gate also has to *discriminate*.
 > Run it on a known-**good** tree (it must pass) and a deliberately-**broken** one (it must fail) before
