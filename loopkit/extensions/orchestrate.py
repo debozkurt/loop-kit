@@ -16,6 +16,7 @@ overfitting to noise. Fan-out is the foundation both share, so it lands first.
 """
 from __future__ import annotations
 
+import contextvars
 import shutil
 import subprocess
 import tempfile
@@ -25,7 +26,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from .. import durability
+from .. import durability, trace
 from ..agent import Agent
 from ..config import Config
 from ..gate import Gate
@@ -238,8 +239,16 @@ class Supervisor:
         root = Path(tempfile.mkdtemp(prefix="loopkit-fleet-"))
         self._log.info("fleet.start", tasks=len(tasks), maxWorkers=self.max_workers,
                        base=self.base, root=str(root))
-        workers = self._dispatch(tasks, root, self.base)
-        result = FleetResult(workers=workers)
+        # The umbrella span: every worker's "loopkit run" nests under it (via the context copy in
+        # `_dispatch`), so one fleet is ONE trace in LangSmith instead of N unrelated roots.
+        with trace.span("loopkit fleet", run_type="chain", tags=["loopkit", "fleet"],
+                        inputs={"goals": [t.get("goal", "") for t in tasks]},
+                        metadata={"run_id": self._run_id, "tasks": len(tasks),
+                                  "max_workers": self.max_workers, "base": self.base}) as fleet_span:
+            workers = self._dispatch(tasks, root, self.base)
+            result = FleetResult(workers=workers)
+            fleet_span.outputs(done=len(result.done), failed=len(result.failed),
+                               branches=[w.branch for w in workers])
 
         if not self.keep_worktrees:
             self._teardown(workers, root)
@@ -255,7 +264,13 @@ class Supervisor:
         """
         slots: list[WorkerResult | None] = [None] * len(tasks)
         with ThreadPoolExecutor(max_workers=self.max_workers) as pool:
-            futures = {pool.submit(self._run_worker, task, i, root, base): i
+            # Pool threads start with an EMPTY contextvars context, so the fleet/evolve umbrella
+            # span opened in this thread would not be the workers' parent and every worker's trace
+            # would surface as its own root in LangSmith. Run each worker in a snapshot of the
+            # current context instead — its "loopkit run" span then nests under the umbrella. One
+            # copy per worker: a single Context cannot be entered by two threads at once.
+            futures = {pool.submit(contextvars.copy_context().run,
+                                   self._run_worker, task, i, root, base): i
                        for i, task in enumerate(tasks)}
             for fut in as_completed(futures):
                 slots[futures[fut]] = fut.result()
@@ -276,8 +291,13 @@ class Supervisor:
                 "goal": task["goal"], "repo": str(worktree), "branch": branch})
             iteration_gate, acceptance_gate = (
                 self.make_gates(task, worktree) if self.make_gates else (None, None))
+            # Stamp the worker's run span with which task/candidate it is, so the runs inside one
+            # fleet/evolve trace are tellable apart at a glance in LangSmith.
+            attribution = {"branch": branch, "task_index": index}
+            attribution.update({k: task[k] for k in ("slug", "generation", "candidate")
+                                if k in task})
             result = run_loop(cfg, self.make_agent(task), iteration_gate=iteration_gate,
-                              acceptance_gate=acceptance_gate)
+                              acceptance_gate=acceptance_gate, trace_metadata=attribution)
             wlog.info("worker.done", reason=result.reason.value, iterations=result.iterations,
                       costUsd=round(result.cost_usd, 4), overfit=result.overfit)
             return WorkerResult(task=task, branch=branch, worktree=worktree, result=result)
@@ -311,39 +331,48 @@ class Supervisor:
         log.info("evolve.start", generations=generations, population=population, keep=keep)
         result = EvolutionResult()
         seed_branch: str | None = None
-        try:
-            for g in range(generations):
-                base = seed_branch or self.base
-                tasks = [builder(base_task, g, i, seed_branch) for i in range(population)]
-                glog = log.bind(gen=g, base=base)
-                glog.info("generation.start", population=population)
+        # The umbrella span: every candidate's "loopkit run" plus each score/revalidate check nests
+        # under it, so one evolve round is ONE trace in LangSmith instead of N unrelated roots.
+        with trace.span("loopkit evolve", run_type="chain", tags=["loopkit", "evolve"],
+                        inputs={"goal": base_task.get("goal", "")},
+                        metadata={"run_id": self._run_id, "generations": generations,
+                                  "population": population, "keep": keep}) as evolve_span:
+            try:
+                for g in range(generations):
+                    base = seed_branch or self.base
+                    tasks = [builder(base_task, g, i, seed_branch) for i in range(population)]
+                    glog = log.bind(gen=g, base=base)
+                    glog.info("generation.start", population=population)
 
-                workers = self._dispatch(tasks, root, base)
-                candidates = self._score_candidates(workers, score)
-                candidates.sort(key=lambda c: c.score, reverse=True)
-                survivors = candidates[:max(1, keep)]
-                confirmed = self._first_revalidated(survivors, revalidate, glog)
+                    workers = self._dispatch(tasks, root, base)
+                    candidates = self._score_candidates(workers, score)
+                    candidates.sort(key=lambda c: c.score, reverse=True)
+                    survivors = candidates[:max(1, keep)]
+                    confirmed = self._first_revalidated(survivors, revalidate, glog)
 
-                generation = Generation(index=g, candidates=candidates, survivors=survivors,
-                                        confirmed=confirmed)
-                result.generations.append(generation)
-                glog.info("generation.done",
-                          best=survivors[0].branch if survivors else "-",
-                          bestScore=round(survivors[0].score, 4) if survivors else None,
-                          confirmed=confirmed.branch if confirmed else "-",
-                          inflated=generation.inflated)
+                    generation = Generation(index=g, candidates=candidates, survivors=survivors,
+                                            confirmed=confirmed)
+                    result.generations.append(generation)
+                    glog.info("generation.done",
+                              best=survivors[0].branch if survivors else "-",
+                              bestScore=round(survivors[0].score, 4) if survivors else None,
+                              confirmed=confirmed.branch if confirmed else "-",
+                              inflated=generation.inflated)
 
-                if confirmed is not None:
-                    seed_branch = confirmed.branch      # only a validated winner reseeds
-                if not self.keep_worktrees:             # branches persist; checkouts go
-                    for candidate in candidates:
-                        if candidate.worktree.exists():
-                            remove_worktree(self._repo, candidate.worktree)
-        finally:
-            if not self.keep_worktrees:
-                shutil.rmtree(root, ignore_errors=True)
+                    if confirmed is not None:
+                        seed_branch = confirmed.branch      # only a validated winner reseeds
+                    if not self.keep_worktrees:             # branches persist; checkouts go
+                        for candidate in candidates:
+                            if candidate.worktree.exists():
+                                remove_worktree(self._repo, candidate.worktree)
+            finally:
+                if not self.keep_worktrees:
+                    shutil.rmtree(root, ignore_errors=True)
 
-        winner = result.winner
+            winner = result.winner
+            evolve_span.outputs(winner=winner.branch if winner else None,
+                                winner_score=winner.score if winner else None,
+                                inflation_caught=result.inflation_caught)
         log.info("evolve.done", winner=winner.branch if winner else "-",
                  winnerScore=round(winner.score, 4) if winner else None,
                  inflationCaught=result.inflation_caught)
@@ -355,10 +384,15 @@ class Supervisor:
         for worker in workers:
             value = float("-inf")
             if worker.result is not None and worker.worktree.exists():
-                try:
-                    value = float(score(worker.task, worker.worktree))
-                except Exception as exc:   # noqa: BLE001 — a bad scorer must not sink the run
-                    self._log.warn("score.error", branch=worker.branch, error=type(exc).__name__)
+                with trace.span("score", run_type="tool",
+                                inputs={"branch": worker.branch}) as score_span:
+                    try:
+                        value = float(score(worker.task, worker.worktree))
+                    except Exception as exc:   # noqa: BLE001 — a bad scorer must not sink the run
+                        self._log.warn("score.error", branch=worker.branch,
+                                       error=type(exc).__name__)
+                    # -inf marks "unfit"; keep the traced value JSON-representable.
+                    score_span.outputs(score="unfit (-inf)" if value == float("-inf") else value)
             candidates.append(Candidate(task=worker.task, branch=worker.branch,
                                         worktree=worker.worktree, result=worker.result,
                                         score=value, error=worker.error))
@@ -370,7 +404,10 @@ class Supervisor:
         for candidate in survivors:
             if not candidate.worktree.exists():
                 continue
-            verdict = revalidate(candidate.task, candidate.worktree).check(candidate.worktree)
+            with trace.span("revalidate", run_type="tool",
+                            inputs={"branch": candidate.branch}) as reval_span:
+                verdict = revalidate(candidate.task, candidate.worktree).check(candidate.worktree)
+                reval_span.outputs(passed=verdict.passed, feedback=verdict.feedback or None)
             glog.info("revalidate", branch=candidate.branch, score=round(candidate.score, 4),
                       passed=verdict.passed)
             if verdict.passed:

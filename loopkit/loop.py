@@ -280,6 +280,9 @@ def run_loop(config, agent: Agent, *, iteration_gate: Gate | None = None,
                     tick.warn("loop.halt", reason=reason.value, iterations=i, costUsd=round(cost, 4))
                     tick_span.outputs(halt=reason.value)
                     return _finish(run_span, RunResult(reason, i, cost, overfit=overfit))
+                # Not a terminal: record why this tick continues (the feedback the next tick gets),
+                # so a tick is never a blank row in the trace UI.
+                tick_span.outputs(result="continue", feedback=feedback or None)
 
         log.warn("loop.halt", reason=StopReason.ITERATION_CAP.value,
                  iterations=config.stops.max_iter, costUsd=round(cost, 4))

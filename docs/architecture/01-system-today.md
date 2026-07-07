@@ -46,7 +46,7 @@ Architecture mirrors the agentic-loops curriculum — **one module per concern**
 | `issues.py` | GitHub/GitLab issues as the fleet's work queue | II |
 | `cloud.py` | `loopkit cloud` — the CLI talking to a DOKS cluster, context-pinned | III · P2 |
 | `cloudrun.py` | `create_run()` — the ephemeral per-run Job topology it builds | III · P3 |
-| `triggers.py` | external events → runs (webhook + CronJob) via `create_run()` | III · P4 |
+| `triggers.py` | external events → runs (webhook + CronJob) via `create_run()`; parses issues **and** changes-requested reviews (revise) | III · P4 |
 | `creds.py` | per-submitter creds: identity → Secret + the typer-free run-creds decision policy | III · P5a |
 | `measure.py` | reliability — `pass^k` over N trials → `loopkit measure` | III |
 
@@ -196,6 +196,18 @@ stop. The fleet inherits all of this: each worker runs `run_loop`, so its runs t
 task id). *Dev-only sharp edge:* behind a corp TLS-intercepting proxy (Zscaler), the LangSmith
 uploader needs the OS trust store — `trace.py` injects `truststore` if it's importable (a **dev-only**
 dependency; absent in prod, where standard TLS works).
+
+**Concurrency + grouping (sharp edges paid for).** Contextvars are thread-local, so any fan-out
+seam that spawns loops in pool threads must (a) open an **umbrella span** and (b) run each worker in
+a `contextvars.copy_context()` snapshot — otherwise every worker's tree surfaces as its own root
+trace in LangSmith. `orchestrate.py` does both: `run_fleet` → one `loopkit fleet` trace, `evolve` →
+one `loopkit evolve` trace (candidate runs stamped with `slug`/`generation`/`candidate`, plus
+`score`/`revalidate` spans). Two SDK gotchas live in `trace.py` so callers never meet them: provider
+resolution is **lock-serialized** (the first resolve imports langsmith; marking it resolved early
+handed concurrent threads a `None` provider, silently no-oping their spans and orphaning the
+children into separate root traces), and loopkit's enablement decision is **normalized into the
+env** (`LANGSMITH_TRACING=true` exactly — the SDK's own `trace` context manager separately gates
+posting *and* parenting on that literal value, so auto-on via API key alone used to upload nothing).
 
 ## Extension seams — `None`-safe opt-ins
 

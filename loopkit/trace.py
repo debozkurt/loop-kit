@@ -21,6 +21,10 @@ Shape of a traced run (the whole system, single loop *and* fleet workers):
      │   └─ acceptance gate              tool    out: passed
      └─ DONE  cost=$0.21  iters=2
 
+Fan-out seams (`orchestrate.run_fleet` / `.evolve`) wrap N of these under one umbrella span
+("loopkit fleet" / "loopkit evolve"), propagating context into their pool threads — so a whole
+fleet or evolve round is ONE trace, each candidate's run nested and attributable.
+
 **Design invariants.** `langsmith` is an optional dependency behind the `loopkit[trace]` extra; the
 import is **deferred** so importing this module never pulls it and the disabled path is a cheap
 function call. Tracing **auto-activates** when `langsmith` is installed AND a LangSmith API key (or
@@ -33,6 +37,7 @@ object is threaded through the `Agent` contract.
 from __future__ import annotations
 
 import os
+import threading
 from contextlib import contextmanager
 from typing import Iterator
 
@@ -44,6 +49,7 @@ _FORCED: bool | None = None        # None = auto-detect from env; True/False = e
 _PROJECT: str | None = None        # LangSmith project name; None falls back to env, then "loopkit"
 _PROVIDER_CACHE: object | None = None   # the resolved langsmith `trace` factory (or None), cached
 _RESOLVED = False                  # whether _PROVIDER_CACHE has been computed yet
+_RESOLVE_LOCK = threading.Lock()   # serializes first resolution across concurrent loops (fleet/evolve)
 
 _MAX_FIELD_CHARS = 50_000          # cap any single traced field so a pathological blob can't balloon
 
@@ -70,15 +76,28 @@ def set_enabled(value: bool | None) -> None:
 
 def _reset() -> None:
     global _PROVIDER_CACHE, _RESOLVED
-    _PROVIDER_CACHE, _RESOLVED = None, False
+    with _RESOLVE_LOCK:
+        _PROVIDER_CACHE, _RESOLVED = None, False
+
+
+# The SDK's own tracing flags, in the SDK's precedence order (*_TRACING_V2 wins over *_TRACING).
+_ENV_FLAGS = ("LANGSMITH_TRACING_V2", "LANGCHAIN_TRACING_V2",
+              "LANGSMITH_TRACING", "LANGCHAIN_TRACING")
 
 
 def _enabled() -> bool:
-    """True if tracing should run: explicit override wins; else auto-detect a LangSmith key/flag."""
+    """True if tracing should run: explicit override wins; else an explicit env flag; else a key.
+
+    An explicitly-set tracing flag decides (so `LANGSMITH_TRACING=false` turns auto-on off even
+    with a key present); with no flag at all, the presence of a LangSmith API key auto-activates.
+    """
     if _FORCED is not None:
         return _FORCED
-    return bool(os.getenv("LANGSMITH_API_KEY") or os.getenv("LANGCHAIN_API_KEY")
-                or _truthy(os.getenv("LANGSMITH_TRACING")) or _truthy(os.getenv("LANGCHAIN_TRACING_V2")))
+    for var in _ENV_FLAGS:
+        value = os.getenv(var)
+        if value is not None and value.strip():
+            return _truthy(value)
+    return bool(os.getenv("LANGSMITH_API_KEY") or os.getenv("LANGCHAIN_API_KEY"))
 
 
 def _truthy(value: str | None) -> bool:
@@ -124,14 +143,37 @@ def _ensure_os_trust() -> None:
 
 
 def _provider():
-    """Resolve and cache the langsmith `trace` context-manager factory, or None if off/absent."""
+    """Resolve and cache the langsmith `trace` context-manager factory, or None if off/absent.
+
+    Thread-safe: the first resolution imports langsmith (slow), and concurrent loops (fleet/evolve
+    workers) all open their top-level span at once — so resolution runs under a lock and `_RESOLVED`
+    flips only *after* the cache holds the final value. Marking resolved first would hand every
+    other thread a `None` provider mid-import, silently no-oping their spans; each such dropped
+    span orphans its children into separate root traces in LangSmith.
+    """
     global _PROVIDER_CACHE, _RESOLVED
     if _RESOLVED:
         return _PROVIDER_CACHE
-    _RESOLVED = True
+    with _RESOLVE_LOCK:
+        if not _RESOLVED:
+            _PROVIDER_CACHE = _resolve()
+            _RESOLVED = True
+    return _PROVIDER_CACHE
+
+
+def _resolve():
+    """Compute the provider once: None when disabled/uninstalled, else langsmith's `trace`."""
     if not _enabled():
-        _PROVIDER_CACHE = None
         return None
+    # loopkit's decision is authoritative: langsmith's `trace` context manager separately gates on
+    # its env flags being the literal string "true" and, when that check fails, silently neither
+    # posts nor parents spans — auto-on via API key alone would upload nothing, and a flag like
+    # "1"/"yes" would too. Normalize the env to the SDK's spelling BEFORE the first langsmith
+    # import, which caches env reads (lru_cache in langsmith.utils.get_env_var).
+    for var in _ENV_FLAGS:
+        if os.getenv(var):
+            os.environ[var] = "true"
+    os.environ["LANGSMITH_TRACING"] = "true"
     _ensure_os_trust()
     try:
         from langsmith import trace as ls_trace
@@ -139,11 +181,9 @@ def _provider():
         # Enabled by env but the extra isn't installed — say so once, then stay a no-op.
         _log.warn("trace.unavailable", detail="LANGSMITH key set but langsmith not installed "
                   "(pip install 'loopkit[trace]')")
-        _PROVIDER_CACHE = None
         return None
     _log.info("trace.enabled", project=project())
-    _PROVIDER_CACHE = ls_trace
-    return _PROVIDER_CACHE
+    return ls_trace
 
 
 @contextmanager
