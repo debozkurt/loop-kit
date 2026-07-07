@@ -98,6 +98,49 @@ the work," nothing task-specific baked in. (Note: in a **keyless CI/cloud** cont
 call may have no credential — there the **draft PR + a human reviewer** is the clean held-out oracle;
 see [`../ci/`](../ci/).)
 
+## Gate vs. review hook — the same judge, two wirings
+
+An LLM reviewer like [`review.sh`](review.sh) can be wired **two ways**, and they behave very
+differently:
+
+- As the **acceptance gate** (`acceptance = "bash gate/review.sh"`) — runs **once**, after the
+  iteration gate passes, as the held-out oracle. Nondeterministic, so it belongs here, never as the
+  per-tick iteration gate.
+- As the **review hook** (`run --review "bash gate/review.sh"`) — runs **after every tick's commit**,
+  *before* the gates. A non-zero verdict blocks DONE and its reasons feed back as the next tick's
+  input, so the agent fixes review findings while the producing context is still fresh.
+
+```mermaid
+%%{init: {'theme':'base','themeVariables':{'background':'#1b1b1b','primaryColor':'#2b2b2b','primaryTextColor':'#e6e6e6','primaryBorderColor':'#5a5a5a','lineColor':'#8a8a8a','fontSize':'13px'}}}%%
+flowchart LR
+  P["prompt<br/>+ last feedback"] --> A["agent<br/>edits + commits"]
+  A --> RH["review hook<br/>--review · every tick"]
+  RH -- "REJECT" --> P
+  RH -- "clean" --> IG["iteration gate<br/>fast · seen"]
+  IG -- "fail" --> P
+  IG -- "pass" --> AG["acceptance gate<br/>held-out · unseen"]
+  AG -- "fail" --> P
+  AG -- "pass" --> D(["DONE"])
+```
+
+Same script, same rubric — the wiring decides whether it's a one-shot certifier at the end or a
+per-tick collaborator that shapes the change as it's built. A common setup uses the hook *during*
+the run **and** a held-out acceptance oracle for the final DONE decision.
+
+## Before the loop: `--validate`
+
+[`validate.sh`](validate.sh) is a **pre-loop** check (`run --validate <cmd>`): it runs before the
+agent and aborts the run (exit 3, nothing spent) if the goal no longer reproduces — e.g. the
+acceptance oracle *already passes*, so the work is already done. It's the fail-first check, automated
+as a preflight: the mirror image of the acceptance gate (there the oracle must pass to finish; here it
+must fail to start).
+
+## Beyond one loop: best-of-N
+
+For hard goals, [`../evolve/`](../evolve/) runs N candidates and keeps the best — with a scorer
+([`../evolve/score.sh`](../evolve/score.sh)) and a **separate held-out re-validation gate** so a
+lucky candidate that gamed the score can't win.
+
 ## …and the config is the whole loop, declaratively
 
 Every other knob is in the same file — the goal, the fixed-context anchors, the budget + adapter,
