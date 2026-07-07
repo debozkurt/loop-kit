@@ -260,7 +260,28 @@ def run(config: Path = typer.Option(DEFAULT_CONFIG, "--config", "-c"),
                                      help="claude-code: bill ANTHROPIC_API_KEY instead of the subscription "
                                           "(default). Sets [agent] use_api_key for this run."),
         sandbox: bool = typer.Option(False, "--sandbox",
-                                     help="Run the loop inside the loopkit Docker container (Ch 16).")) -> None:
+                                     help="Run the loop inside the loopkit Docker container (Ch 16)."),
+        review: str | None = typer.Option(None, "--review",
+                                          help="A review command run after each tick's commit "
+                                               "(ShellReviewHook). Exit 0 = clean; non-zero blocks "
+                                               "DONE and its output is fed back as the next tick's "
+                                               "review feedback. E.g. an adversarial LLM judge."),
+        skills: str | None = typer.Option(None, "--skills",
+                                          help="Directory for the skills flywheel (FileSkillRegistry): "
+                                               "learned lessons are rendered into every prompt and a "
+                                               "new one is written back on DONE. Persists across runs "
+                                               "— point successive runs at the same dir to compound."),
+        skills_distiller: str | None = typer.Option(None, "--skills-distiller",
+                                                    help="Command that distils a solved run's diff into "
+                                                         "a reusable lesson (ShellDistiller); its stdout "
+                                                         "is the skill guidance. Omit for provenance-only "
+                                                         "default distillation."),
+        validate: str | None = typer.Option(None, "--validate",
+                                            help="A pre-loop check run BEFORE the agent. Exit 0 = "
+                                                 "proceed; non-zero = abort without running the loop "
+                                                 "(its output is the reason). Use to confirm the goal "
+                                                 "still reproduces / is still accurate — so a stale or "
+                                                 "already-fixed task never spends a run.")) -> None:
     """Run the loop until it reaches a terminal. Point it at any repo via `repo` (or `--repo`).
 
     The CI deployment tier (Phase 5c) rides this same single-loop path: `--from-event`/`--from-issue`
@@ -312,6 +333,22 @@ def run(config: Path = typer.Option(DEFAULT_CONFIG, "--config", "-c"),
         err.print("Fix these or pass [bold]--force[/]  (see [bold]loopkit doctor[/]).")
         raise typer.Exit(1)
 
+    # Pre-loop validation (opt-in): confirm the goal is worth running BEFORE charging the agent — that
+    # it still reproduces and is still accurate against the current tree. A non-zero exit aborts the
+    # run (exit 3, distinct from a loop failure) so a stale or already-fixed task spends nothing.
+    if validate:
+        import subprocess
+        env = {**secrets.current().child_env(), "PYTHONDONTWRITEBYTECODE": "1"}
+        vproc = subprocess.run(validate, cwd=cfg.repo_path(), shell=True, env=env,
+                               capture_output=True, text=True)
+        if vproc.stdout:
+            console.print(vproc.stdout.rstrip())
+        if vproc.returncode != 0:
+            fail_out = ((vproc.stdout or "") + (vproc.stderr or "")).strip()[-500:]
+            err.print(f"[yellow]validate[/] aborted before the loop: {escape(fail_out) or 'non-zero exit'}")
+            raise typer.Exit(3)
+        console.print("[green]validate[/] goal reproduces + is current — proceeding")
+
     # Gate-determinism preflight (opt-in): a gate that flips verdict on an unchanged tree corrupts
     # every stop decision the loop makes (Ch 9). Run it N times on the initial tree before charging
     # the agent; refuse on disagreement. 0/1 = skip = exact prior behavior.
@@ -334,7 +371,16 @@ def run(config: Path = typer.Option(DEFAULT_CONFIG, "--config", "-c"),
         f"budget ${cfg.agent.max_cost_usd}"
         + (f" · issue #{issue_number}" if issue_number is not None else ""),
         title="loopkit run"))
-    result = run_loop(cfg, agent, dry_run=dry_run)
+    review_hook = None
+    if review:
+        from ..extensions.review import ShellReviewHook
+        review_hook = ShellReviewHook(review)
+    skills_registry = None
+    if skills:
+        from ..extensions.skills import FileSkillRegistry, ShellDistiller
+        distiller = ShellDistiller(skills_distiller) if skills_distiller else None
+        skills_registry = FileSkillRegistry(skills, distill=distiller)
+    result = run_loop(cfg, agent, dry_run=dry_run, review_hook=review_hook, skills=skills_registry)
     _render(result)
     # Outward edge (Ch 16): push the solved branch + open a PR, only if [remote] is enabled (which
     # --open-pr turns on). When the run was issue-sourced, the issue number rides into the PR body so
@@ -396,6 +442,12 @@ def measure(config: Path = typer.Option(DEFAULT_CONFIG, "--config", "-c"),
             mode: str = typer.Option("clone", "--mode",
                                      help="How each trial materialises the repo: clone | copy."),
             max_iter: int | None = typer.Option(None, "--max-iter", help="Override stops.max_iter per trial."),
+            from_issue: int | None = typer.Option(None, "--from-issue",
+                                                  help="Source the goal from a forge issue (gh/glab), "
+                                                       "same as `run` — so calibration measures the "
+                                                       "REAL task, not the config's placeholder goal."),
+            provider: str = typer.Option("auto", "--provider",
+                                         help="Forge for --from-issue: auto | github | gitlab."),
             out: Path | None = typer.Option(None, "--out",
                                             help="Write the full JSON ReliabilityReport here.")) -> None:
     """Measure how *reliably* the loop solves a goal: run it N times, report pass^k and pass@k.
@@ -415,6 +467,10 @@ def measure(config: Path = typer.Option(DEFAULT_CONFIG, "--config", "-c"),
         cfg.agent.adapter = adapter
     if max_iter is not None:
         cfg.stops.max_iter = max_iter
+    if from_issue is not None:
+        # Parity with `run`: calibrate reliability against the real issue-sourced goal, not the
+        # config's placeholder. Uses the (possibly --repo-overridden) repo so glab/gh runs there.
+        cfg.goal, _ = _goal_from_issue(cfg.repo_path(), from_issue, provider)
     if not cfg.gate.acceptance:
         # pass^k is defined by the held-out oracle: "pass" == the acceptance gate certified DONE.
         # Without it there is nothing to measure reliability against.
