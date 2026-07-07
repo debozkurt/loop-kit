@@ -52,6 +52,21 @@ def test_child_env_reinjects_only_the_allowlisted_var():
     assert "ANTHROPIC_API_KEY" not in env                       # the model key still withheld
 
 
+def test_harden_keeps_infra_key_in_parent_env_but_child_env_still_strips_it(monkeypatch):
+    # loopkit's own tracer reads LANGSMITH_API_KEY from os.environ in THIS process, so _harden must
+    # NOT pop it — while child_env() must still withhold it from agent subprocesses. Contrast with a
+    # model key, which is popped from the parent AND withheld from the child.
+    monkeypatch.setenv("LANGSMITH_API_KEY", "ls-secret")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-secret")
+    store = secrets.CredentialStore.load()                      # scans env, hardens (pops), registers
+    import os
+    assert os.environ.get("LANGSMITH_API_KEY") == "ls-secret"   # kept for loopkit's own tracer
+    assert "ANTHROPIC_API_KEY" not in os.environ                # model key scrubbed from the parent
+    child = store.child_env()
+    assert "LANGSMITH_API_KEY" not in child                     # but still withheld from the agent
+    assert "ANTHROPIC_API_KEY" not in child
+
+
 def test_child_env_prefers_store_value_for_reinjected_var():
     base = {"GITHUB_TOKEN": "from-env"}
     store = secrets.CredentialStore({"GITHUB_TOKEN": "from-store"})
