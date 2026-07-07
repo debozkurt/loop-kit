@@ -160,6 +160,7 @@ def run_loop(config, agent: Agent, *, iteration_gate: Gate | None = None,
 
         for i in range(1, config.stops.max_iter + 1):
             tick = log.bind(tick=i)
+            head_before = durability.current_head(repo)   # to detect an agent self-commit this tick
             with trace.span(f"tick {i}", run_type="chain", metadata={"tick": i}) as tick_span:
                 # Read edge of the flywheel (Ch 17): render learned skills into this tick's prompt.
                 # None registry -> no block -> v1 prompt exactly.
@@ -194,6 +195,10 @@ def run_loop(config, agent: Agent, *, iteration_gate: Gate | None = None,
 
                 commit_msg = f"loopkit: tick {i} on {config.branch}"
                 committed = durability.commit_progress(repo, commit_msg)
+                # A CLI agent (claude-code/codex) often commits its own work, so loopkit's commit is a
+                # no-op (committed=False) even though HEAD advanced. Detect either path so the review
+                # gate below can't be silently skipped for a self-committing agent.
+                advanced = committed or durability.current_head(repo) != head_before
                 signature = durability.state_signature(repo)
                 signatures.append(signature)
                 tick.info("tick.commit", committed=committed, sig=signature)
@@ -204,9 +209,10 @@ def run_loop(config, agent: Agent, *, iteration_gate: Gate | None = None,
                 # Continuous review (Ch 8): review the fresh commit before it can count as done. A
                 # clean review is a precondition for the done-check below; a failing one feeds back so
                 # the agent fixes it next tick, while the producing context is fresh (roborev loop).
-                # Only on a real commit — no new diff means nothing new to review. None => v1.
+                # Only when HEAD advanced this tick — no new diff means nothing new to review. This
+                # fires whether loopkit committed OR the agent self-committed (advanced). None => v1.
                 review_ok = True
-                if review_hook is not None and committed:
+                if review_hook is not None and advanced:
                     with trace.span("review", run_type="tool") as review_span:
                         review = review_hook.review(repo, commit_msg)
                         review_span.outputs(passed=review.passed, feedback=review.feedback or None)

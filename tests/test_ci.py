@@ -301,3 +301,39 @@ def test_shipped_ci_examples_match_the_scaffold_constants():
         == _CI_GITHUB_CLAUDE_CODE_TEMPLATE
     assert (_REPO_ROOT / "examples/ci/gitlab-ci-claude-code.yml").read_text() \
         == _CI_GITLAB_CLAUDE_CODE_TEMPLATE
+
+
+# --------------------------------------------------------------------------------------------
+# Pre-loop validation (--validate): a non-zero pre-check aborts BEFORE the agent runs.
+# --------------------------------------------------------------------------------------------
+def _stub_run_loop(reached):
+    from loopkit.loop import RunResult
+    from loopkit.stops import StopReason
+
+    def _fake(*a, **k):
+        reached["loop"] = True
+        return RunResult(StopReason.DONE, 1, 0.0)
+    return _fake
+
+
+def test_validate_passing_proceeds_into_the_loop(git_repo, monkeypatch, clean_creds):
+    # A passing validate (exit 0) must let the run reach the loop. Patch the CLI's own run_loop
+    # binding (cli.local imports it by name), and stub it so we don't need a real agent.
+    toml = _write_config(git_repo)
+    reached = {"loop": False}
+    monkeypatch.setattr("loopkit.cli.local.run_loop", _stub_run_loop(reached))
+    result = runner.invoke(app, ["run", "-c", str(toml), "--repo", str(git_repo),
+                                 "--adapter", "mock", "--validate", "true"])
+    assert result.exit_code == 0, result.output
+    assert reached["loop"] is True                     # validate passed → the loop ran
+
+
+def test_validate_failing_aborts_before_the_loop(git_repo, monkeypatch, clean_creds):
+    # A non-zero validate aborts with the distinct code 3 and the loop never runs — nothing spent.
+    toml = _write_config(git_repo)
+    reached = {"loop": False}
+    monkeypatch.setattr("loopkit.cli.local.run_loop", _stub_run_loop(reached))
+    result = runner.invoke(app, ["run", "-c", str(toml), "--repo", str(git_repo),
+                                 "--adapter", "mock", "--validate", "echo not-current; false"])
+    assert result.exit_code == 3, result.output
+    assert reached["loop"] is False

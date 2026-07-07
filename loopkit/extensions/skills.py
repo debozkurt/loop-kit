@@ -109,6 +109,40 @@ def _default_distiller(run_result: object, workspace: Path, goal: str) -> "Skill
                  source_goal=goal)
 
 
+class ShellDistiller:
+    """Distil a reusable lesson from a solved run by shelling out (symmetric with ShellReviewHook).
+
+    The command runs in the workspace (the just-solved tree, so it can inspect `git diff`) and its
+    stdout becomes the skill's guidance — a short, GENERAL lesson for future similar goals, not a
+    restatement of this one fix. Any headless agent/tool can produce it (e.g. `claude -p "summarize
+    the reusable lesson from this diff in 2-3 sentences"`). The output is length-bounded and
+    secret-scrubbed by the registry's `_sanitize_skill` before it is ever stored, pushed, or rendered,
+    so a distiller need not repeat those guards. Non-zero exit, empty output, or a timeout → no skill
+    (the flywheel simply doesn't learn from that run rather than learning noise).
+    """
+
+    def __init__(self, command: str, *, name_prefix: str = "skill", timeout: int = 300) -> None:
+        self.command = command
+        self._prefix = name_prefix
+        self._timeout = timeout
+
+    def __call__(self, run_result: object, workspace: Path, goal: str) -> "Skill | None":
+        if not goal.strip():
+            return None
+        env = {**secrets.current().child_env(), "PYTHONDONTWRITEBYTECODE": "1"}
+        try:
+            proc = subprocess.run(self.command, cwd=workspace, shell=True, env=env,
+                                  capture_output=True, text=True, timeout=self._timeout)
+        except subprocess.TimeoutExpired:
+            return None
+        guidance = (proc.stdout or "").strip()
+        if proc.returncode != 0 or not guidance:
+            return None
+        # Name by goal-slug so the same goal dedupes to one skill (the registry skips an existing name).
+        slug = "-".join(goal.lower().split()[:4]) or "run"
+        return Skill(name=f"{self._prefix}-{slug}", guidance=guidance, source_goal=goal)
+
+
 def _sanitize_skill(skill: "Skill", log) -> "Skill | None":
     """Bound + scrub a distilled skill before it is stored, pushed, and rendered (Finding B).
 

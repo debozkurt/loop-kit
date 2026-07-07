@@ -46,6 +46,36 @@ GateFactory = Callable[[dict, Path], tuple[Gate | None, Gate | None]]
 # winner whose high selection score was luck (selection inflation) rather than skill.
 Scorer = Callable[[dict, Path], float]
 RevalidateFactory = Callable[[dict, Path], Gate]
+
+
+class ShellScorer:
+    """Score a finished candidate's worktree by shelling out — stdout's last line is parsed as a
+    float fitness (higher = fitter). Symmetric with ShellGate/ShellReviewHook: scoring is just a
+    command, so any tool (a metric script, an LLM rating a diff) can rank candidates. A non-zero
+    exit, a timeout, or unparseable output scores the candidate `-inf` (unfit) — a broken scorer can
+    never crown a candidate. CWD = the candidate's worktree; env is credential-scrubbed like a gate.
+    """
+
+    def __init__(self, command: str, *, timeout: int = 600) -> None:
+        self.command = command
+        self._timeout = timeout
+
+    def __call__(self, task: dict, worktree: Path) -> float:
+        from .. import secrets
+        env = {**secrets.current().child_env(), "PYTHONDONTWRITEBYTECODE": "1"}
+        try:
+            proc = subprocess.run(self.command, cwd=worktree, shell=True, env=env,
+                                  capture_output=True, text=True, timeout=self._timeout)
+        except subprocess.TimeoutExpired:
+            return float("-inf")
+        if proc.returncode != 0:
+            return float("-inf")
+        try:
+            return float((proc.stdout or "").strip().splitlines()[-1])
+        except (ValueError, IndexError):
+            return float("-inf")
+
+
 # Build one candidate's task from (base_task, generation, candidate_index, seed_branch). The
 # default carries the prior winner forward both ways: tree-level (the worktree branches off
 # seed_branch) and prompt-level (a seed note appended to the goal, for live agents).

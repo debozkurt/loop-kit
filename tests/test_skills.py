@@ -131,3 +131,24 @@ def test_file_registry_persists_across_instances(tmp_path: Path):
     # A brand-new registry pointed at the same directory inherits the lesson (the durable flywheel).
     reborn = FileSkillRegistry(directory)
     assert "persist this lesson" in reborn.render()
+
+
+def test_shell_distiller_produces_skill_from_command_output(git_repo: Path):
+    # A solved run's diff is distilled into a reusable lesson via a shell command's stdout.
+    from loopkit.extensions.skills import ShellDistiller
+
+    skill = ShellDistiller("echo 'prefer the comma-ok form for type assertions'")(
+        object(), git_repo, "fix a Go type-assertion panic")
+    assert skill is not None
+    assert "comma-ok" in skill.guidance
+    assert skill.name.startswith("skill-")
+    assert skill.source_goal == "fix a Go type-assertion panic"
+
+
+def test_shell_distiller_returns_none_on_failure_empty_or_blank_goal(git_repo: Path):
+    # The flywheel declines to learn rather than learn noise: non-zero exit, empty output, blank goal.
+    from loopkit.extensions.skills import ShellDistiller
+
+    assert ShellDistiller("exit 1")(object(), git_repo, "a goal") is None
+    assert ShellDistiller("true")(object(), git_repo, "a goal") is None      # empty stdout
+    assert ShellDistiller("echo hi")(object(), git_repo, "   ") is None      # blank goal

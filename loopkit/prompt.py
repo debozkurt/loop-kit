@@ -31,7 +31,13 @@ def _read_one(path: Path, repo: Path) -> str:
         text = path.read_text(encoding="utf-8", errors="replace")[:_MAX_ANCHOR_BYTES]
     except OSError:
         return ""
-    return f"# --- {path.relative_to(repo)} ---\n{text}"
+    # An anchor may resolve outside the repo (a shared prompt file referenced by absolute path);
+    # `relative_to` raises there, so fall back to the bare name rather than crash the prompt build.
+    try:
+        label = path.relative_to(repo)
+    except ValueError:
+        label = path.name
+    return f"# --- {label} ---\n{text}"
 
 
 def build_prompt(config, feedback: str | None, skills: str | None = None) -> str:

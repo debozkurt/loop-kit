@@ -45,6 +45,10 @@ log = get_logger("secrets")
 # loopkit's OWN forge subprocess (git/gh/glab) authenticates on either — `gh`/git read
 # `GITHUB_TOKEN`/`GH_TOKEN`, `glab` reads `GITLAB_TOKEN`; the agent's scrubbed shell still gets none.
 GIT_ENV: tuple[str, ...] = ("GITHUB_TOKEN", "GH_TOKEN", "GITLAB_TOKEN")
+# loopkit's OWN observability keys — read by its tracer's SDK from `os.environ` in THIS process.
+# These are NOT scrubbed from the parent env (else loopkit's own tracing silently uploads nothing),
+# but they ARE credentials, so `child_env()` still strips them from every agent subprocess.
+INFRA_ENV_KEEP: frozenset[str] = frozenset({"LANGSMITH_API_KEY", "LANGCHAIN_API_KEY"})
 # Adapter → the env var(s) that adapter's SDK/binary CAN authenticate with (first present wins). This
 # is the projection/redaction set (cloud creds.py + the redaction registry) — NOT necessarily what a
 # run injects. The claude-code CLI defaults to the subscription only (see CLAUDE_CODE_SUBSCRIPTION_KEYS).
@@ -200,9 +204,17 @@ class CredentialStore:
 
     def _harden(self) -> None:
         """Delete loaded vars from `os.environ`, register them for redaction, drop core dumps, and
-        mark the process non-dumpable so the in-heap key can't be read by a same-uid neighbour."""
+        mark the process non-dumpable so the in-heap key can't be read by a same-uid neighbour.
+
+        Exception: loopkit's OWN observability SDKs (LangSmith) read their key from `os.environ` in
+        THIS process, so popping it would silently disable loopkit's own tracing (spans still form
+        but the uploader has no key). Those keys stay in the parent env; `child_env()` still strips
+        them (they're credentials) so agent subprocesses never see them. Values are still registered
+        for redaction, so they never reach a log or trace payload.
+        """
         for name, value in self._values.items():
-            os.environ.pop(name, None)
+            if name not in INFRA_ENV_KEEP:
+                os.environ.pop(name, None)
             register_secret(value, label=name)
         _disable_core_dumps()
         _set_non_dumpable()

@@ -57,10 +57,11 @@ EXPECTED: dict[str, list[str]] = {
     ],
     "init": ["ci", "path"],
     "learn": ["chapter", "live"],
-    "measure": ["adapter", "config", "k", "max_iter", "mode", "out", "repo", "trials"],
+    "measure": ["adapter", "config", "from_issue", "k", "max_iter", "mode", "out", "provider", "repo", "trials"],
     "run": [
         "adapter", "api_key", "branch", "check_gate", "config", "dry_run", "force", "from_event",
-        "from_issue", "max_iter", "open_pr", "provider", "repo", "sandbox",
+        "from_issue", "max_iter", "open_pr", "provider", "repo", "review", "sandbox",
+        "skills", "skills_distiller", "validate",
     ],
 }
 
