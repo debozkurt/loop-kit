@@ -92,6 +92,32 @@ def test_no_review_hook_is_unchanged(git_repo: Path):
     assert result.iterations == 1
 
 
+def test_review_runs_when_agent_self_commits(git_repo: Path):
+    # A CLI agent (claude-code/codex) often commits its OWN work, so loopkit's commit_progress is a
+    # no-op (committed=False) even though HEAD advanced. The review must still fire on that diff —
+    # otherwise a self-committing agent silently skips the review gate (the exact bug this guards).
+    import subprocess
+
+    def write_and_commit(workspace: Path) -> str:
+        (workspace / "solution.py").write_text("ok")
+        subprocess.run(["git", "add", "-A"], cwd=workspace, check=True)
+        subprocess.run(["git", "commit", "-qm", "agent self-commit"], cwd=workspace, check=True)
+        return "wrote + committed solution.py"
+
+    seen: list[str] = []
+
+    class CountingReview:
+        def review(self, workspace: Path, commit_message: str) -> GateResult:
+            seen.append(commit_message)
+            return GateResult(True, None)
+
+    gate = CallableGate(lambda ws: (ws / "solution.py").exists())
+    result = run_loop(_config(git_repo), MockAgent(behaviors=[write_and_commit]),
+                      iteration_gate=gate, acceptance_gate=gate, review_hook=CountingReview())
+    assert result.reason is StopReason.DONE
+    assert len(seen) == 1          # review fired despite loopkit's own commit being a no-op
+
+
 def test_shell_review_hook_passes_clean_and_fails_dirty(tmp_path: Path):
     # The production primitive: exit 0 is clean. `! grep` inverts — clean when no BUG is found.
     hook = ShellReviewHook("! grep -rn BUG .")

@@ -37,6 +37,12 @@ def current_branch(repo: Path) -> str:
     return _git(repo, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
 
 
+def current_head(repo: Path) -> str:
+    """The current HEAD commit sha (empty before the first commit). Used to detect that the tick
+    advanced HEAD — whether loopkit's own commit fired OR the agent self-committed."""
+    return _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+
 def is_clean(repo: Path) -> bool:
     return _git(repo, "status", "--porcelain").stdout.strip() == ""
 
