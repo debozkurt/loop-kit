@@ -31,6 +31,17 @@ pass^k) versus which need a human in the loop (low pass^k) — before you spend 
 A skill is a short, reusable lesson distilled from a solved run and rendered into future prompts.
 Point successive runs at the same `--skills` directory and learning accumulates on disk:
 
+```mermaid
+%%{init: {'theme':'base','themeVariables':{'background':'#1b1b1b','primaryColor':'#2b2b2b','primaryTextColor':'#e6e6e6','primaryBorderColor':'#5a5a5a','lineColor':'#8a8a8a','fontSize':'13px'}}}%%
+flowchart LR
+  R1["run A<br/>reaches DONE"] --> DI["distiller<br/>diff to lesson"]
+  DI --> SK[("skills/<br/>lessons on disk")]
+  SK --> PR["run B prompt<br/>+ rendered lessons"]
+  PR --> R2["run B<br/>starts ahead"]
+  R2 -. "its own lesson" .-> DI
+```
+
+
 ```bash
 loopkit run --config task.toml --from-issue 42 \
   --skills ./skills \
