@@ -133,3 +133,14 @@ def test_make_worktree_is_isolated_and_branch_survives_removal(git_repo: Path, t
     assert not path.exists()
     assert "loopkit/run-x" in _branches(git_repo)
     subprocess.run(["git", "worktree", "prune"], cwd=git_repo, capture_output=True)
+
+
+def test_shell_scorer_parses_float_and_disqualifies_on_failure(git_repo):
+    # A candidate's fitness is the last stdout line as a float; a non-zero exit / unparseable
+    # output scores -inf so a broken scorer can never crown a candidate.
+    from loopkit.extensions.orchestrate import ShellScorer
+
+    assert ShellScorer("echo 42.5")({}, git_repo) == 42.5
+    assert ShellScorer("echo noise; echo 7")({}, git_repo) == 7.0     # last line wins
+    assert ShellScorer("exit 1")({}, git_repo) == float("-inf")       # non-zero → unfit
+    assert ShellScorer("echo not-a-number")({}, git_repo) == float("-inf")
