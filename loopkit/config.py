@@ -60,6 +60,11 @@ class StopsConfig(BaseModel):
 
     max_iter: int = Field(default=30, ge=1)
     no_progress_after: int = Field(default=3, ge=1)
+    # Plan-driven backlog only: halt if no checklist item completes for this many ticks (NoProgress
+    # watches the git tree, which a churning plan-mode agent keeps changing — this watches the
+    # done-count). Coarser than no_progress_after because a plan item legitimately spans several
+    # ticks. Keep it < max_iter so it can fire before the cap. Ignored off plan mode.
+    plan_stall_after: int = Field(default=6, ge=1)
 
 
 class SafetyConfig(BaseModel):

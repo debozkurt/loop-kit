@@ -48,6 +48,9 @@ regression = "pytest tests/regression -q"  # optional second oracle — previous
 [stops]
 max_iter          = 20           # hard cap
 no_progress_after = 3            # halt if N ticks change nothing
+plan_stall_after  = 6            # plan mode only: halt if N ticks complete no checklist item
+                                 # (no_progress watches the git tree, which a churning plan-mode
+                                 # agent keeps changing; this watches the done-count). Keep < max_iter.
 
 [safety]
 protected_paths = ["tests/"]     # the loop may not touch these (so it can't game its gates)

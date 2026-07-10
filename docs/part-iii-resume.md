@@ -44,6 +44,19 @@ Each phase is built + unit-tested token-free; the live column is what still need
 
 ## Recent work (newest first — priming only; full history in `git log`)
 
+- **2026-07-10 — plan-mode → GA step 1: plan-stall detection (branch `feat/plan-driven-backlog`):** the
+  one GA-blocking gap the v1 reassessment surfaced. Plan mode defeated *both* early-halt guards —
+  `NoProgress` watches the git signature, but a plan-mode agent wedged on one item still edits files
+  every tick (signature changes → never fires), and `BudgetCeiling` is blind on the Claude Code
+  subscription (cost parses `$0`); only `max_iter` (60 in the scaffold) bounded a stuck run. Fix: a new
+  `PlanStall` stop (`stops.py`) that watches the **done-count** instead of the tree — halts when no
+  `- [x]` item completes for `stops.plan_stall_after` ticks (default 6, scaffold 8; `<=` so a
+  regression counts too). Plan-mode-only (`hard_stops.append` gated on `config.plan.file`), so off plan
+  mode the stop set is byte-identical. `LoopState.plan_dones` carries the history; halt stamps an
+  informative `detail` (groundwork for a future `NEEDS_HUMAN` terminal, roadmap #6). Precedence now
+  `DONE > SAFETY > BUDGET > NO_PROGRESS > PLAN_STALL > CAP`. +3 tests (10 in `test_plan.py`). Docs:
+  CONTROL-FILES `[stops]`, USING-ON-YOUR-REPO headroom bullet, arch `01` (row + master diagram +
+  precedence prose), README roadmap (stall ✅; planner / per-item PRs / per-item oracle still tracked).
 - **2026-07-10 — plan-driven backlog mode (`loopkit init --plan`), v1 (branch `feat/plan-driven-backlog`,
   not merged — for reassessment):** shape #2 — one loop grinds a markdown checklist, one item per tick,
   committing + verifying as it goes. DONE now requires the checklist empty **AND** the acceptance gate

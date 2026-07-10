@@ -18,7 +18,7 @@ Architecture mirrors the agentic-loops curriculum — **one module per concern**
 | `prompt.py` | fixed prompt rebuilt into a fresh context every tick | 4-5 |
 | `plan.py` | plan-driven backlog mode — the `- [ ]` checklist that gates DONE (`[plan]`, opt-in) | 4-5 |
 | `gate.py` | the iteration gate + the held-out acceptance gate | 6-7, 9 |
-| `stops.py` | the three hard stops + precedence | 13-14 |
+| `stops.py` | the hard stops + precedence (+ the plan-mode `PLAN_STALL`) | 13-14 |
 | `durability.py` | commit every tick; resume from git | 15 |
 | `safety.py` | blast-radius preflight + protected-path guard | 16 |
 | `loop.py` | the controller that wires them — the tick lifecycle | spine |
@@ -67,17 +67,21 @@ flowchart LR
   H --> D(["DONE"])
   I -- "fail" --> P
   H -- "overfit" --> P
-  C --> S["hard stops<br/>BUDGET > NO_PROGRESS > CAP"]
+  C --> S["hard stops<br/>BUDGET > NO_PROGRESS<br/>> PLAN_STALL > CAP"]
   S -- "halt" --> T(["stop"])
 ```
 
-**Terminal precedence is `DONE > SAFETY > BUDGET > NO_PROGRESS > CAP`**, and the order is
+**Terminal precedence is `DONE > SAFETY > BUDGET > NO_PROGRESS > PLAN_STALL > CAP`**, and the order is
 load-bearing, not cosmetic. It encodes a safety lattice: a genuine completion (`DONE`) is honored
 first; a safety violation (`SAFETY`) preempts any "success" so a loop can never declare victory by
 touching something it must not; budget preempts progress heuristics so cost can't be out-run by an
 agent that keeps "looking busy"; no-progress preempts the raw iteration cap so a stalled loop dies
 on its stall, not on the clock. Evaluating in any other order would let a lower-severity terminal
-mask a higher-severity one.
+mask a higher-severity one. `PLAN_STALL` is the plan-mode-only sibling of `NO_PROGRESS`: it watches
+the checklist's **done-count** rather than the git tree, because a plan-mode agent wedged on one item
+keeps editing files — so `NO_PROGRESS` (which watches the tree) never fires, and only `PLAN_STALL`
+catches a backlog that has stopped advancing. It sits below `NO_PROGRESS` (a frozen tree is the
+stronger, sooner signal) and above the raw cap (dying on the stall beats dying on the clock).
 
 **Fresh context every tick** (`prompt.build_prompt`, Ch 4–5): the prompt is rebuilt from durable
 anchors (goal, the repo's `PROMPT.md`, the last gate/review feedback, the rendered skills) rather

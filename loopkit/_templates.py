@@ -77,6 +77,9 @@ acceptance = "python -m pytest tests/ -q"   # held-out, whole-project: the finis
 [stops]
 max_iter = 60                    # a backlog needs many more ticks than one task (Ch 13)
 no_progress_after = 4
+plan_stall_after = 8             # halt if no checklist item completes for 8 ticks (a wedged item
+                                 # still churns files, so no_progress can't see it — this watches the
+                                 # done-count). Raise it if your items are large; keep it < max_iter.
 
 [safety]
 protected_paths = ["tests/"]     # the loop may not touch these (Ch 9 + 16)
