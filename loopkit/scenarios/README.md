@@ -2,7 +2,9 @@
 
 These are **runnable code, not docs.** Each `chNN_*.py` is a self-contained scenario that
 `loopkit demo`/`loopkit learn` imports and plays — mostly against `MockAgent` (zero tokens, no
-network), so they double as the executable companion to the agentic-loops course. They live under
+network), so they double as the executable companion to the
+[*Agentic Loops* manual](https://github.com/debozkurt/loop-guide) — each `chNN` mirrors the manual's
+chapter N. They live under
 `loopkit/` (not `docs/` or `examples/`) because they import the package's own modules (`agent`,
 `loop`, `gate`, …) and ship in the wheel, so `pip install loopkit && loopkit demo 9` works.
 

@@ -1,10 +1,18 @@
 # loopkit
 
 A self-governed coding loop you can point at any repository — the runnable form of the
-agentic-loops engineering manual. You give it a goal and two gates; it drives a coding agent
-toward the goal, tick by tick, with the guardrails that keep an autonomous loop from running
-off a cliff: an external verification gate, a **held-out acceptance gate**, three hard stops,
-durable git state, and a blast-radius safety envelope.
+[*Agentic Loops* engineering manual](https://github.com/debozkurt/loop-guide). You give it a goal
+and two gates; it drives a coding agent toward the goal, tick by tick, with the guardrails that keep
+an autonomous loop from running off a cliff: an external verification gate, a **held-out acceptance
+gate**, three hard stops, durable git state, and a blast-radius safety envelope.
+
+> **Paired with the manual.** loopkit is the reference implementation of the *Agentic Loops* manual —
+> a written course on self-governed coding loops
+> ([github.com/debozkurt/loop-guide](https://github.com/debozkurt/loop-guide)). The manual teaches
+> each concept against a minimal, stdlib-only harness; loopkit is those same patterns built out as a
+> product, and the chapter numbers throughout this README (and in `loopkit demo N`) map to its
+> chapters. If you're new to the ideas, read the manual for the concepts and the capstone; loopkit is
+> where you run them at production scale.
 
 ```mermaid
 %%{init: {'theme':'base','themeVariables':{'background':'#1b1b1b','primaryColor':'#2b2b2b','primaryTextColor':'#e6e6e6','primaryBorderColor':'#5a5a5a','lineColor':'#8a8a8a','fontSize':'13px'}}}%%
@@ -27,7 +35,8 @@ out and the core behaves exactly as above. See *Beyond one loop* below.
 |---|---|
 | **Run it now** — watch a loop reach `DONE` | [`examples/walkthrough/`](examples/walkthrough/) |
 | **Use it on your repo** | [`docs/USING-ON-YOUR-REPO.md`](docs/USING-ON-YOUR-REPO.md) |
-| **Learn the concepts** — the runnable course | `loopkit demo` · [`loopkit/scenarios/`](loopkit/scenarios/) |
+| **Learn the concepts** — the written manual | [the *Agentic Loops* manual](https://github.com/debozkurt/loop-guide) |
+| **Run the concepts** — the manual's labs, in code | `loopkit demo` · [`loopkit/scenarios/`](loopkit/scenarios/) |
 | **Understand how it's built** | [`docs/architecture/`](docs/architecture/README.md) |
 | **All docs · all examples** | [`docs/README.md`](docs/README.md) · [`examples/`](examples/) |
 
@@ -86,9 +95,9 @@ The shipped `examples/demo-repo` is built to show this: its visible tests pass *
 boundary bug, and only the held-out tests catch it. Run `loopkit demo 9` to watch the held-out
 gate refuse to call it done.
 
-## The whole tool is the course
+## The whole tool mirrors the manual
 
-Each module implements one part of the manual and is a named, swappable seam:
+Each module implements one part of the [manual](https://github.com/debozkurt/loop-guide) and is a named, swappable seam (its chapter in the last column):
 
 | Module | What it is | Chapter |
 |---|---|---|

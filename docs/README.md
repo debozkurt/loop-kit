@@ -3,6 +3,10 @@
 Start with the **operator guides**; drop into the **architecture wiki** for how it's built; the
 **phase references** are the design records + the current-phase resume doc.
 
+> These are loopkit's **operator + design** docs. The *concepts* live in the paired
+> [*Agentic Loops* manual](https://github.com/debozkurt/loop-guide) — loopkit is its reference
+> implementation, and the chapter numbers across these docs map to it.
+
 ## 🧭 Operator guides — using loopkit on your repo
 
 | Doc | When |
