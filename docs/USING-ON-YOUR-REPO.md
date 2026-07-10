@@ -86,8 +86,18 @@ green acceptance gate is not enough while items remain.
 - **This is the *sequential* shape.** For *independent* tasks in parallel (a bug queue), use the fleet
   instead (below) — a different tool: many branches at once, not one checklist in order.
 
-Pick by the work: a coherent feature with dependent steps → `--plan` (one loop, ordered). A pile of
-unrelated tasks → the fleet (`fleet run --from-issues`, parallel).
+### Three ways to point loopkit at work
+
+| Shape | How | Best for |
+|---|---|---|
+| **One task** | `loopkit run` | a single fix or feature |
+| **Sequential backlog** — one loop, ordered | `loopkit init --plan` → `loopkit run` | a coherent feature/refactor with dependent steps |
+| **Parallel batch** — N loops at once | the fleet (`fleet run --from-issues`, §3), git worktrees (below), or the `run_fleet` Python API | a pile of *independent* tasks (a bug queue) |
+
+The sequential backlog and the parallel batch are different tools, not the same thing: `--plan` is one
+agent grinding an ordered checklist with shared state; the fleet is many agents on unrelated work, one
+branch each. Today a parallel batch on one machine is a worktree loop (below) or the `run_fleet` Python
+API; a one-command **no-infra batch CLI** (`loopkit batch --tasks …`, no Redis) is planned.
 
 ---
 
@@ -198,7 +208,9 @@ module **[`part-iii-ecosystem.md`](part-iii-ecosystem.md)**; the templates live 
 
 The fleet (§3) is the issue-driven, Redis-backed path. For a quick "run N goals at once on this box" —
 no Redis, no issues — give each run its own **git worktree**: a checkout has exactly one branch, so
-parallel runs can't share one. One worktree = one branch = one loop.
+parallel runs can't share one. One worktree = one branch = one loop. (From Python, the same thing is
+`run_fleet(tasks=[…], max_workers=N)` — N loops in-process, no Redis; a one-command `loopkit batch`
+wrapper over it is on the Roadmap.)
 
 ```bash
 for slug in featA featB featC; do

@@ -425,6 +425,21 @@ Smaller enhancements: an optional **dashboard** over `FleetResult`/`EvolutionRes
 reseed** for `fleet evolve` (today's is prompt-level — tree-level needs the winner's tree on a
 shared volume); finer fleet scoring (`_grade` → held-out pass fraction).
 
+**Multi-task shapes — the backlog + batch work.** loopkit points at work three ways: **one task**
+(`loopkit run`), a **sequential backlog** in one loop (`loopkit init --plan`, v1 on branch
+`feat/plan-driven-backlog` — one checklist, one item per tick), and a **parallel batch** of independent
+tasks (the fleet — `run_fleet` in-process, `fleet run` on Redis, `fleet run --from-issues`, or git
+worktrees). Tracked next:
+
+- **Plan mode → GA:** plan-stall detection (halt when the *done-count* stalls, not just the git diff —
+  ties to a `NEEDS_HUMAN` terminal); incremental / per-item draft PRs (v1 lands one PR at the end);
+  an optional **planner** (decompose a one-line goal → the checklist); per-item held-out checks
+  (oracle synthesis). See [`docs/USING-ON-YOUR-REPO.md`](docs/USING-ON-YOUR-REPO.md) and the resume doc.
+- **A no-infra batch CLI** — `loopkit batch --tasks tasks.yaml` (or `run --tasks`) surfacing the
+  in-process `run_fleet` (bounded by `max_workers`, no Redis), so a parallel batch of N tasks needs
+  neither a cluster nor a hand-rolled worktree loop. The *capability* exists today (`run_fleet` /
+  worktrees); this is the ergonomic one-command wrapper.
+
 ## License
 
 [MIT](LICENSE) © Derrick Bozkurt. Fork it freely — bring your own agent/git/cloud credentials
