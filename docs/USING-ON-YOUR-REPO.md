@@ -81,8 +81,11 @@ green acceptance gate is not enough while items remain.
 
 - **One branch, one PR.** Every item commits to the run branch; add a `[remote]` block (or
   `run --open-pr`) to land the finished backlog as a single draft PR.
-- **Give it headroom.** A backlog needs a higher `stops.max_iter` than one task (the scaffold sets 60)
-  and a real budget ceiling — both still bound it.
+- **Give it headroom, but it still can't run away.** A backlog needs a higher `stops.max_iter` than
+  one task (the scaffold sets 60) and a real budget ceiling. It's also bounded by
+  `stops.plan_stall_after` (scaffold: 8) — the run halts if it goes that many ticks without checking
+  off *any* item, because an agent wedged on one item keeps editing files and so slips past the
+  ordinary `no_progress` stop (which only watches the git tree). Raise it if your items are large.
 - **This is the *sequential* shape.** For *independent* tasks in parallel (a bug queue), use the fleet
   instead (below) — a different tool: many branches at once, not one checklist in order.
 

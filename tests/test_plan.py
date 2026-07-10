@@ -15,7 +15,7 @@ from loopkit.config import Config, GateConfig, PlanConfig, StopsConfig
 from loopkit.gate import CallableGate
 from loopkit.loop import run_loop
 from loopkit.plan import PlanState, read_plan
-from loopkit.stops import StopReason
+from loopkit.stops import LoopState, PlanStall, StopReason
 
 
 def _config(repo: Path, **overrides) -> Config:
@@ -120,6 +120,53 @@ def test_empty_plan_falls_back_to_gates(git_repo: Path):
     assert (result.plan_open, result.plan_total) == (0, 1)
 
 
+# --- plan-stall detection (the plan-mode NoProgress) -------------------------------------------
+
+def _state(dones):
+    return LoopState(iteration=1, cost_usd=0.0, signature="s", signatures=["s"], plan_dones=dones)
+
+
+def test_plan_stall_policy_watches_the_done_count():
+    stall = PlanStall(window=3)                       # fires once window+1 ticks show no gain
+    assert stall.triggered(_state(None)) is False     # off plan mode: never fires
+    assert stall.triggered(_state([0, 0, 0])) is False   # too few samples (len <= window)
+    assert stall.triggered(_state([0, 0, 0, 0])) is True    # 4 ticks, nothing completed -> stalled
+    assert stall.triggered(_state([2, 3, 4, 5])) is False   # one item a tick -> healthy
+    assert stall.triggered(_state([2, 2, 2, 3])) is False   # completed at the end of the window -> ok
+    assert stall.triggered(_state([4, 4, 4, 3])) is True     # an item got UN-checked -> stalled/regressed
+
+
+def test_plan_stall_halts_churn_even_when_no_progress_is_blind(git_repo: Path):
+    # The whole reason PlanStall exists: the agent writes a NEW file every tick (the git signature
+    # changes, so NoProgress — disabled here anyway — could never fire) but never marks the item.
+    # PlanStall must halt it EARLY, well before the iteration cap, on the done-count.
+    (git_repo / "IMPLEMENTATION_PLAN.md").write_text("# plan\n- [ ] never gets done\n")
+    cfg = _config(git_repo, plan=PlanConfig(file="IMPLEMENTATION_PLAN.md"),
+                  stops=StopsConfig(max_iter=20, no_progress_after=99, plan_stall_after=3))
+    agent = MockAgent(behaviors=[_writes(f"f{i}.txt", str(i)) for i in range(20)])
+    always = CallableGate(lambda ws: True)
+    result = run_loop(cfg, agent, iteration_gate=always, acceptance_gate=always)
+    assert result.reason is StopReason.PLAN_STALL
+    assert result.iterations == 4                      # window 3 -> fires on the 4th no-gain tick
+    assert result.iterations < 20                      # the point: not the cap
+    assert (result.plan_open, result.plan_total) == (1, 1)
+    assert "no checklist item completed" in result.detail
+
+
+def test_plan_stall_tolerates_a_slow_item_that_eventually_completes(git_repo: Path):
+    # A legitimately hard item may span a few ticks before it lands. As long as an item completes
+    # inside the window, PlanStall must NOT fire and the run reaches DONE.
+    (git_repo / "IMPLEMENTATION_PLAN.md").write_text("# plan\n- [ ] one slow item\n")
+    cfg = _config(git_repo, plan=PlanConfig(file="IMPLEMENTATION_PLAN.md"),
+                  stops=StopsConfig(max_iter=20, no_progress_after=99, plan_stall_after=4))
+    agent = MockAgent(behaviors=[_writes("f1.txt"), _writes("f2.txt"), _complete_one_item()])
+    always = CallableGate(lambda ws: True)
+    result = run_loop(cfg, agent, iteration_gate=always, acceptance_gate=always)
+    assert result.reason is StopReason.DONE            # completed on tick 3, inside the 4-tick window
+    assert result.iterations == 3
+    assert (result.plan_open, result.plan_total) == (0, 1)
+
+
 # --- the `init --plan` scaffold ----------------------------------------------------------------
 
 def test_plan_scaffold_config_is_valid_and_wired(tmp_path: Path):
@@ -127,5 +174,6 @@ def test_plan_scaffold_config_is_valid_and_wired(tmp_path: Path):
     assert cfg.plan.file == "IMPLEMENTATION_PLAN.md"                 # plan mode on
     assert "IMPLEMENTATION_PLAN.md" in cfg.prompt.anchors           # the agent can read/maintain it
     assert cfg.stops.max_iter >= 30                                 # a backlog needs headroom
+    assert 1 <= cfg.stops.plan_stall_after < cfg.stops.max_iter     # stall stop can fire before the cap
     assert "- [ ]" in _PLAN_IMPLEMENTATION_TEMPLATE                 # starter checklist has open items
     assert "one item" in _PLAN_PROMPT_TEMPLATE.lower()             # prompt is the one-item-a-tick discipline

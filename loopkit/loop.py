@@ -29,7 +29,7 @@ from .gate import AlwaysPass, Gate, ShellGate
 from .log import get_logger
 from .prompt import build_prompt
 from .plan import PlanState, read_plan
-from .stops import BudgetCeiling, LoopState, NoProgress, StopReason, first_triggered
+from .stops import BudgetCeiling, LoopState, NoProgress, PlanStall, StopReason, first_triggered
 
 if TYPE_CHECKING:
     # Typing-only imports: the core never depends on an extension at runtime — the hook and the
@@ -141,6 +141,12 @@ def run_loop(config, agent: Agent, *, iteration_gate: Gate | None = None,
     # Per-tick hard stops, in precedence order. The iteration cap is the loop's own bound.
     hard_stops = [BudgetCeiling(config.agent.max_cost_usd),
                   NoProgress(config.stops.no_progress_after)]
+    # Plan-driven backlog: NoProgress watches the git signature, but an agent stuck on one item still
+    # edits files each tick (signature changes) so it never fires — the run would grind to the cap on
+    # a wedged item, spending the whole budget. Add a stall stop that watches the done-count instead.
+    # Plan-mode-only, so off it the stop set is byte-identical to the single-task loop's.
+    if config.plan.file:
+        hard_stops.append(PlanStall(config.stops.plan_stall_after))
 
     durability.ensure_branch(repo, config.branch)
     log.info("run.start", goalLen=len(config.goal), branch=config.branch,
@@ -162,6 +168,7 @@ def run_loop(config, agent: Agent, *, iteration_gate: Gate | None = None,
         overfit = False
         plan_file = config.plan.file            # plan-driven backlog mode; None = single-task (prior)
         last_plan: PlanState | None = None
+        plan_dones: list[int] = []              # done-count history for the PlanStall stop (Ch 13)
 
         def _res(reason, iterations, cost_usd, **kw):
             # Stamp the latest checklist progress onto every terminal (None when not in plan mode).
@@ -218,11 +225,13 @@ def run_loop(config, agent: Agent, *, iteration_gate: Gate | None = None,
                 # durable working memory AND the loop's completion signal below. None-safe: no [plan].
                 if plan_file:
                     last_plan = read_plan(repo, plan_file)
+                    plan_dones.append(last_plan.done)   # feeds the PlanStall stop below
                     tick.info("plan.progress", done=last_plan.done, open=last_plan.open,
                               total=last_plan.total)
                     tick_span.metadata(plan_done=last_plan.done, plan_open=last_plan.open)
                 state = LoopState(iteration=i, cost_usd=cost, signature=signature,
-                                  signatures=signatures)
+                                  signatures=signatures,
+                                  plan_dones=plan_dones if plan_file else None)
 
                 # Continuous review (Ch 8): review the fresh commit before it can count as done. A
                 # clean review is a precondition for the done-check below; a failing one feeds back so
@@ -304,12 +313,20 @@ def run_loop(config, agent: Agent, *, iteration_gate: Gate | None = None,
                     else:
                         feedback = secrets.redact(gate.feedback)
 
-                # Hard stops, in precedence order (budget > no-progress). Cap is the loop bound below.
+                # Hard stops, in precedence order (budget > no-progress > plan-stall). Cap is the
+                # loop bound below.
                 reason = first_triggered(hard_stops, state)
                 if reason is not None:
+                    detail = ""
+                    if reason is StopReason.PLAN_STALL and last_plan is not None:
+                        # Stuck, not progressing — say so, so a human (or a future NEEDS_HUMAN
+                        # escalation) knows this halted on a wedged item, not a finished backlog.
+                        detail = (f"no checklist item completed in "
+                                  f"{config.stops.plan_stall_after} ticks — {last_plan.open} of "
+                                  f"{last_plan.total} items still open")
                     tick.warn("loop.halt", reason=reason.value, iterations=i, costUsd=round(cost, 4))
                     tick_span.outputs(halt=reason.value)
-                    return _finish(run_span, _res(reason, i, cost, overfit=overfit))
+                    return _finish(run_span, _res(reason, i, cost, overfit=overfit, detail=detail))
                 # Not a terminal: record why this tick continues (the feedback the next tick gets),
                 # so a tick is never a blank row in the trace UI.
                 tick_span.outputs(result="continue", feedback=feedback or None)
