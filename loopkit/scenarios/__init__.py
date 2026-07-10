@@ -159,7 +159,7 @@ def _registry() -> dict[int, Scenario]:
     from . import (ch05_context, ch07_feedback, ch08_review, ch09_held_out, ch10_orchestration,
                    ch11_evolution, ch12_fleet, ch13_hard_stops, ch14_economics, ch16_safety,
                    ch17_skills, ch20_triggers, ch21_ci, ch22_isolation, ch23_skills_repo,
-                   ch24_reliability)
+                   ch24_reliability, ch25_synth_gate)
     items = [ch05_context.SCENARIO, ch07_feedback.SCENARIO, ch08_review.SCENARIO,
              ch09_held_out.SCENARIO, ch10_orchestration.SCENARIO, ch11_evolution.SCENARIO,
              ch12_fleet.SCENARIO, ch13_hard_stops.SCENARIO, ch14_economics.SCENARIO,
@@ -168,7 +168,9 @@ def _registry() -> dict[int, Scenario]:
              # plus the skills repo (Phase 5b: the Ch 17 flywheel made durable across machines) and
              # the reliability measurement layer (pass^k — discovery vs. reliability).
              ch20_triggers.SCENARIO, ch21_ci.SCENARIO, ch22_isolation.SCENARIO,
-             ch23_skills_repo.SCENARIO, ch24_reliability.SCENARIO]
+             ch23_skills_repo.SCENARIO, ch24_reliability.SCENARIO,
+             # Part IV — molding loopkit to a repo: synth-gate, the fail-first oracle verification.
+             ch25_synth_gate.SCENARIO]
     return {s.chapter: s for s in items}
 
 

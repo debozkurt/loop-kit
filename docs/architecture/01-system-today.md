@@ -50,6 +50,7 @@ Architecture mirrors the agentic-loops curriculum — **one module per concern**
 | `triggers.py` | external events → runs (webhook + CronJob) via `create_run()`; parses issues **and** changes-requested reviews (revise) | III · P4 |
 | `creds.py` | per-submitter creds: identity → Secret + the typer-free run-creds decision policy | III · P5a |
 | `measure.py` | reliability — `pass^k` over N trials → `loopkit measure` | III |
+| `synth_gate.py` | fail-first (and, with `--fix`, fail→pass) oracle verification → `loopkit synth-gate` | IV · molding L2 |
 
 ## The tick spine
 
@@ -246,6 +247,21 @@ measurement. It also carries **`cost_per_accepted`** — total spend over the tr
 and trials attempted flatter you; what ships is what was accepted (the cost axis of the open
 measurement layer). `demo 24` shows reliability collapsing while discovery climbs. This is the first
 brick of the *open measurement layer* ([prior-art](../part-iii-prior-art.md)).
+
+**Oracle synthesis (fail-first verification).** `extensions/synth_gate.py` + `loopkit synth-gate` verify
+that a *proposed* held-out acceptance oracle is real before anyone trusts it — the load-bearing primitive
+of the [molding kit](../part-iv-molding-kit.md) (Part IV, Layer 2). Proposing a test is easy; proving it
+certifies anything is the job, and it's the half a copilot skips. `verify_oracle` runs the oracle across
+the fail→pass transition SWE-bench validates its FAIL_TO_PASS tests with: **fail-first** (mandatory) — the
+oracle must FAIL on the current (buggy) tree, else it reproduces nothing and would certify `DONE` on tick
+zero — and, given a reference `--fix`, **pass-on-fix** (gold) — apply the fix to an isolated copy and the
+oracle must PASS, proving it *discriminates* buggy-from-fixed rather than failing for some unrelated
+reason. It **reuses the core `executor.run_gate`** (credential-free child env, fail-closed timeout, shaped
+output), so what it blesses behaves identically when the loop later runs it; the runner is injectable for
+token-free tests. Blessed iff every check holds; the `OracleVerdict` is an auditable provenance record
+(oracle + fix + short signature + version + timestamp), exit **0 = blessed / 3 = not real**. It generalizes
+the `run --validate` pre-loop seam into a first-class "is this oracle real?" check — never generating a
+test, only certifying one. `demo 25` is the runnable lab.
 
 ## The fleet — queue-driven across containers (Ch 12) 🟢
 

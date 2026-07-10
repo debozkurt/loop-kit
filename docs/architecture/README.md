@@ -37,6 +37,12 @@ key-holder, and the tracked follow-ups) and [`../part-iii-prior-art.md`](../part
 (the canonical harnesses mapped to loopkit's design — what validates its bets, the ACI / two-oracle /
 `pass^k` lessons it adopted or should, and where the field is heading).
 
+For **Part IV — molding loopkit to a repo** (the copilot molds *with* a verified kit, not a monolith):
+[`../part-iv-molding-kit.md`](../part-iv-molding-kit.md) (design) · [`../part-iv-resume.md`](../part-iv-resume.md)
+(resume). Layers 1–2 built: the `loopkit-mold` skill (`examples/molding/`) and `loopkit synth-gate` —
+fail-first oracle verification (`extensions/synth_gate.py`, described under *Oracle synthesis* in
+[`01-system-today.md`](01-system-today.md)).
+
 ## Deployment tiers
 
 loopkit runs at three escalating tiers — pick the smallest that fits; each reuses the same single-loop

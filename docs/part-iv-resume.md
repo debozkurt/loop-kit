@@ -16,13 +16,31 @@ the judgment can't self-supply.**
 
 ## Current state (2026-07-10)
 
-- **Layer 1 BUILT** (uncommitted at time of writing unless the next line says otherwise): `examples/molding/`
-  — the `loopkit-mold` Claude Code skill (`SKILL.md`), `coverage-tiers.md` (the `ledger2issues.py`
-  typed-DoD brain, generalized), and `templates/` (per-issue config · acceptance dispatcher · oracle
-  skeleton · judge rubric · worktree recipe). It **references, not duplicates** `examples/gates|evolve|skills|ci`.
-  Validated: shell `bash -n` clean, TOML/frontmatter parse, all cross-links resolve, drift guards green.
-- Zero new code paths — Layer 1 is a skill + templates a copilot uses today. Install:
-  `ln -s "$(pwd)/examples/molding" ~/.claude/skills/loopkit-mold`.
+- **Layer 1 BUILT** (committed `b571d8f`): `examples/molding/` — the `loopkit-mold` Claude Code skill
+  (`SKILL.md`), `coverage-tiers.md` (the `ledger2issues.py` typed-DoD brain, generalized), and
+  `templates/` (per-issue config · acceptance dispatcher · oracle skeleton · judge rubric · worktree
+  recipe). It **references, not duplicates** `examples/gates|evolve|skills|ci`. Zero new code paths — a
+  skill + templates a copilot uses today. Install: `ln -s "$(pwd)/examples/molding" ~/.claude/skills/loopkit-mold`.
+- **Layer 2 BUILT** (uncommitted at time of writing): **`loopkit synth-gate`** — fail-first oracle
+  verification, the load-bearing half of oracle synthesis (roadmap #1). New `extensions/synth_gate.py`
+  (`verify_oracle` → `OracleVerdict`/`OracleCheck`, self-contained: stdlib + the core
+  `executor.run_gate`, **no fleet coupling** — the `measure.py` shape) + the `synth-gate` CLI command in
+  `cli/local.py` (lazy import; ORACLE positional defaults to the config's `gate.acceptance`;
+  `--fix`/`--isolate`/`--mode`/`--repo`/`--out`; exit **0 = blessed, 3 = not real**) + `demo 25`
+  (`scenarios/ch25_synth_gate.py`) + `tests/test_synth_gate.py` (16 tests, no tokens: fake-runner logic
+  + a real fail→pass over the demo-repo + the CLI exit-code contract) + the surface-snapshot entry.
+  - **What it checks:** *fail-first* (mandatory) — the oracle must FAIL on the current (buggy) tree, so
+    passing it later is real evidence; and, given a reference `--fix`, *pass-on-fix* (gold) — apply the
+    fix to an isolated copy and the oracle must PASS (SWE-bench FAIL_TO_PASS validation), proving it
+    *discriminates* buggy-from-fixed rather than failing for some unrelated reason. Blessed iff every
+    check holds; the verdict is an auditable provenance record (oracle + fix + signature + version + ts).
+  - **Two failure modes it catches:** an already-green oracle (reproduces nothing, certifies DONE on
+    tick zero) and an unsatisfiable one (fails forever, burns the budget). Fail-first alone can't tell
+    "fails for the right reason" from "fails because broken" — that's why the CLI always surfaces the
+    fail-first output, and why `--fix` is the real answer when a reference fix exists.
+  - Generalizes the `run --validate` pre-loop seam; `examples/gates/validate.sh` still does the raw
+    preflight, `synth-gate` supersedes it for verifying an oracle *at molding time*. SKILL.md step 3 +
+    the oracle template now cite the command.
 
 ## Decisions locked (with the maintainer)
 
@@ -40,21 +58,26 @@ the judgment can't self-supply.**
 
 ## Next step
 
-**Layer 2 — `loopkit synth-gate`** (fail-first oracle verification): take a proposed acceptance oracle →
-run it against the current tree → assert it FAILS → only then bless it. This is roadmap #1 (oracle
-synthesis) — the highest-value, least-duplicative primitive, and the #1 real-use friction (hand-authoring
-a fail-first oracle). Build as an **extension** (`extensions/` + a lazy-imported CLI command, the `measure`
-pattern), reusing the core gate-running machinery + the `--validate` seam; add a demo/learn lab and tests
-(MockAgent + a real fail→pass fixture, no tokens). Then Layer 3 `loopkit detect`, Layer 4 reliability-gated
-routing, Layer 5 the unattended molding step (generalize the spacer `sequencer.py`/`ledger2issues.py`).
+**Layer 3 — `loopkit detect`** (deterministic repo introspection): file-marker heuristics decide the
+*mechanical, safety-critical* config a copilot must not guess — test runner (`pyproject.toml`/`tox.ini` →
+pytest, `package.json` `scripts.test`, `go.mod` → `go test`, a `Makefile` target), protected-path
+candidates (CI/chart/migration/lockfile paths + the gate files themselves), the default branch, and which
+adapter is on `PATH` — and **prints** a proposed `loopkit.toml` (`--write` opt-in, never overwriting an
+existing config without `--force`; it proposes, the molder decides). Build as an **extension** + a
+lazy-imported CLI command (the same `synth-gate`/`measure` shape); deterministic core ⇒ testable at zero
+tokens. Then Layer 4 reliability-gated routing (wire `measure` → `evolve` escalation into the playbook +
+a thin helper), Layer 5 the unattended molding step (generalize the spacer `sequencer.py`/`ledger2issues.py`).
 
 ## Sharp edges to carry
 
 - **Don't duplicate the copilot.** Every layer must be a *verified primitive* or *packaging* the copilot
   can't self-supply — not "an LLM writes your config/checklist." If a layer is just an LLM call, it belongs
   in the skill, not in code.
-- **Fail-first is the load-bearing half of oracle synthesis** — proposing a test is easy; proving it fails
-  on the buggy tree is the value. Layer 2 is the *verification*, not the generation.
+- **Fail-first is the load-bearing half of oracle synthesis** — proving the oracle fails on the buggy
+  tree is the value; proposing the test is easy. Layer 2 (`synth-gate`) is the *verification*, not the
+  generation — it never writes a test. `--fix` completes it: fail→pass proves the oracle *discriminates*,
+  which fail-first alone can't (a broken oracle fails for free). Future layers keep this line: a layer
+  that's just "an LLM writes your X" belongs in the skill, not in code.
 - **`examples/ci/` is drift-guarded** (`test_ci` byte-equality) — don't edit those templates casually.
 - **Keep it killer, not bloated** (the roadmap invariant): resist growing a general config-generation
   framework. The kit is a skill + templates + two small extensions.

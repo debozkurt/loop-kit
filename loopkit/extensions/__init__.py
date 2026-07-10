@@ -21,4 +21,8 @@ measurement layer:
     triggers.py     external events -> runs via the one create_run() seam: webhook + CronJob (Phase 4)
     creds.py        per-submitter creds: identity -> Secret, projected into a run          (Phase 5a)
     measure.py      reliability — pass^k over N trials of one goal      -> `loopkit measure` (runs local)
+
+Part IV — the molding kit (configure loopkit for a repo; the copilot molds with verified primitives):
+
+    synth_gate.py   fail-first (and, with a fix, fail->pass) oracle verification -> `loopkit synth-gate`
 """

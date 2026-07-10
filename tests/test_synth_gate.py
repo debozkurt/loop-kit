@@ -1,0 +1,206 @@
+"""Oracle synthesis — fail-first (and fail→pass) verification of a proposed held-out gate.
+
+Two layers of test: the **logic** over an injected fake gate-runner (a marker file stands in for
+"is the tree fixed?", so every branch — blessed, already-green, unsatisfiable, fix-errored, isolated
+— is exercised with no subprocess), and the **real machinery** end-to-end over the bundled demo-repo
+with the actual `LocalToolExecutor` (pytest as the oracle, a python one-liner as the reference fix).
+The CLI test drives the composed app through `CliRunner` so the exit-code contract (0 blessed, 3 not
+real) is proven the way a user hits it. No tokens, no network.
+"""
+from __future__ import annotations
+
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+from loopkit.extensions.synth_gate import (FAIL_FIRST, PASS_ON_FIX, OracleVerdict, oracle_signature,
+                                           verify_oracle)
+from loopkit.gate import GateResult
+
+TS = "2026-07-10T00:00:00+00:00"          # a fixed timestamp (the verdict takes the clock as input)
+
+
+def _marker_runner(marker: str = "FIXED"):
+    """A fake gate runner: the oracle 'passes' iff `marker` exists in the workspace it's run against.
+
+    Stands in for a real oracle that fails on the buggy tree and passes once fixed — the fix commands
+    in these tests create the marker. Records each (command, workspace) it saw for assertions.
+    """
+    seen: list[tuple[str, str]] = []
+
+    def run(command: str, workspace: Path) -> GateResult:
+        seen.append((command, str(workspace)))
+        fixed = (Path(workspace) / marker).exists()
+        return GateResult(fixed, None if fixed else "E   assert 20.0 == 18.0  (boundary not discounted)")
+
+    run.seen = seen        # type: ignore[attr-defined]
+    return run
+
+
+# --- fail-first, in place (the common case, no fix) ----------------------------------------
+def test_fail_first_blesses_an_oracle_that_fails_on_the_buggy_tree(tmp_path: Path):
+    (tmp_path / "a.txt").write_text("buggy")               # no FIXED marker → the oracle fails
+    verdict = verify_oracle("run oracle", tmp_path, timestamp=TS, run_gate=_marker_runner())
+    assert verdict.blessed is True and verdict.isolated is False
+    assert [c.name for c in verdict.checks] == [FAIL_FIRST]
+    assert verdict.checks[0].ok and verdict.checks[0].expected == "fail"
+    # The failing output is kept as evidence — the molder must see *why* it failed.
+    assert "boundary" in (verdict.checks[0].evidence or "")
+
+
+def test_fail_first_refuses_an_already_green_oracle(tmp_path: Path):
+    # A runner that always passes = an oracle that's green on the buggy tree. It certifies nothing.
+    verdict = verify_oracle("noop", tmp_path, timestamp=TS,
+                            run_gate=lambda c, w: GateResult(True, None))
+    assert verdict.blessed is False
+    assert verdict.checks[0].name == FAIL_FIRST and verdict.checks[0].ok is False
+    assert "ALREADY PASSES" in verdict.checks[0].detail
+    assert "no output captured" in (verdict.checks[0].evidence or "")   # exited 0 → synthesized note
+
+
+def test_fail_first_runs_in_place_by_default(tmp_path: Path):
+    runner = _marker_runner()
+    verify_oracle("run oracle", tmp_path, timestamp=TS, run_gate=runner)
+    # Without --fix / --isolate the oracle runs against the caller's tree itself, not a copy.
+    assert runner.seen == [("run oracle", str(tmp_path.resolve()))]
+
+
+# --- pass-on-fix (the gold fail→pass check) -------------------------------------------------
+def test_pass_on_fix_blesses_an_oracle_that_flips(tmp_path: Path):
+    (tmp_path / "a.txt").write_text("buggy")
+    runner = _marker_runner()
+    # The fix creates FIXED in the isolated copy → the oracle flips fail→pass.
+    verdict = verify_oracle("run oracle", tmp_path, timestamp=TS, fix="touch FIXED", run_gate=runner)
+    assert verdict.blessed is True and verdict.isolated is True
+    assert [c.name for c in verdict.checks] == [FAIL_FIRST, PASS_ON_FIX]
+    assert all(c.ok for c in verdict.checks)
+    # Both checks ran in the SAME throwaway copy (never the caller's tree).
+    workspaces = {ws for _, ws in runner.seen}
+    assert len(workspaces) == 1 and str(tmp_path) not in workspaces
+
+
+def test_pass_on_fix_refuses_an_unsatisfiable_oracle(tmp_path: Path):
+    (tmp_path / "a.txt").write_text("buggy")
+    # A no-op fix leaves the tree buggy → the oracle still fails after it → it doesn't discriminate.
+    verdict = verify_oracle("run oracle", tmp_path, timestamp=TS, fix="true", run_gate=_marker_runner())
+    assert verdict.blessed is False
+    fix_check = next(c for c in verdict.checks if c.name == PASS_ON_FIX)
+    assert fix_check.ok is False and "STILL FAILS" in fix_check.detail
+
+
+def test_a_reference_fix_that_errors_is_a_failed_check_not_a_crash(tmp_path: Path):
+    (tmp_path / "a.txt").write_text("buggy")
+    verdict = verify_oracle("run oracle", tmp_path, timestamp=TS, fix="exit 7", run_gate=_marker_runner())
+    assert verdict.blessed is False
+    fix_check = next(c for c in verdict.checks if c.name == PASS_ON_FIX)
+    assert fix_check.ok is False and "did not apply cleanly" in fix_check.detail and "exit 7" in fix_check.detail
+
+
+def test_isolate_runs_fail_first_in_a_copy_without_a_fix(tmp_path: Path):
+    (tmp_path / "a.txt").write_text("buggy")
+    runner = _marker_runner()
+    verdict = verify_oracle("run oracle", tmp_path, timestamp=TS, isolate=True, run_gate=runner)
+    assert verdict.blessed is True and verdict.isolated is True
+    assert [c.name for c in verdict.checks] == [FAIL_FIRST]           # no fix → still just fail-first
+    assert str(tmp_path) not in {ws for _, ws in runner.seen}         # but run in a copy, not in place
+
+
+def test_clone_mode_materializes_committed_state(git_repo: Path):
+    # clone mode must reach a real git repo (the CLI's non-default materialization path).
+    runner = _marker_runner()
+    verdict = verify_oracle("run oracle", git_repo, timestamp=TS, fix="touch FIXED", mode="clone",
+                            run_gate=runner)
+    assert verdict.blessed is True and [c.name for c in verdict.checks] == [FAIL_FIRST, PASS_ON_FIX]
+
+
+def test_unknown_mode_raises(tmp_path: Path):
+    with pytest.raises(ValueError):
+        verify_oracle("o", tmp_path, timestamp=TS, fix="true", mode="bogus", run_gate=_marker_runner())
+
+
+# --- provenance: signature + JSON self-description ------------------------------------------
+def test_signature_is_stable_and_sensitive():
+    assert oracle_signature("o", None, "copy") == oracle_signature("o", None, "copy")
+    assert oracle_signature("o", None, "copy") != oracle_signature("o", "git apply x", "copy")
+    assert oracle_signature("o", None, "copy") != oracle_signature("o2", None, "copy")
+
+
+def test_verdict_json_roundtrip_is_self_describing(tmp_path: Path):
+    verdict = verify_oracle("run oracle", tmp_path, timestamp=TS, fix="touch FIXED",
+                            run_gate=_marker_runner())
+    data = json.loads(verdict.to_json())
+    assert data["blessed"] is True and data["timestamp"] == TS
+    assert data["signature"] and data["loopkit_version"] and data["fix"] == "touch FIXED"
+    assert [c["name"] for c in data["checks"]] == [FAIL_FIRST, PASS_ON_FIX]
+
+
+# --- end to end over the real LocalToolExecutor + the bundled demo-repo (no tokens) ---------
+def _demo_copy(tmp_path: Path) -> Path:
+    """A working copy of the bundled demo-repo (with the seeded `> 10` bug)."""
+    import shutil
+
+    from loopkit.scenarios import demo_src
+    repo = tmp_path / "demo"
+    shutil.copytree(demo_src(), repo, ignore=shutil.ignore_patterns(".pytest_cache", "__pycache__"))
+    return repo
+
+
+def test_real_oracle_fails_first_and_flips_on_the_real_fix(tmp_path: Path):
+    # The real seam the CLI uses: pytest as the held-out oracle, a python one-liner as the reference
+    # fix (`> 10` → `>= 10`). Fail-first: the holdout boundary test fails on the buggy tree. Pass-on-
+    # fix: after the fix it passes. Blessed — proven with the actual gate machinery, no fake runner.
+    repo = _demo_copy(tmp_path)
+    py = sys.executable
+    oracle = f"{py} -m pytest tests/holdout -q"
+    fix = (f"{py} -c \"import pathlib; p = pathlib.Path('pricing.py'); "
+           f"p.write_text(p.read_text().replace('> 10', '>= 10'))\"")
+    verdict = verify_oracle(oracle, repo, timestamp=TS, fix=fix)
+    assert verdict.blessed is True
+    assert [(c.name, c.ok) for c in verdict.checks] == [(FAIL_FIRST, True), (PASS_ON_FIX, True)]
+    assert isinstance(verdict, OracleVerdict)
+
+
+def test_real_seen_suite_is_refused_as_an_oracle(tmp_path: Path):
+    # The Chapter-9 trap: the *seen* suite passes even on the buggy tree (it misses the boundary), so
+    # it certifies nothing held-out — synth-gate must refuse it.
+    repo = _demo_copy(tmp_path)
+    verdict = verify_oracle(f"{sys.executable} -m pytest tests/seen -q", repo, timestamp=TS)
+    assert verdict.blessed is False and verdict.checks[0].name == FAIL_FIRST
+
+
+# --- the CLI exit-code contract -------------------------------------------------------------
+def _run_cli(args: list[str], cwd: Path, monkeypatch, tmp_path: Path):
+    from typer.testing import CliRunner
+
+    from loopkit.cli import app
+    nocreds = tmp_path / "nocreds"
+    nocreds.mkdir(exist_ok=True)
+    monkeypatch.setenv("LOOPKIT_CREDS_DIR", str(nocreds))            # don't scrub the dev env
+    monkeypatch.chdir(cwd)
+    return CliRunner().invoke(app, ["synth-gate", *args])
+
+
+def test_cli_blesses_a_real_oracle_exit_0(tmp_path: Path, monkeypatch):
+    repo = _demo_copy(tmp_path)
+    out = tmp_path / "verdict.json"
+    result = _run_cli([f"{sys.executable} -m pytest tests/holdout -q", "--out", str(out)],
+                      repo, monkeypatch, tmp_path)
+    assert result.exit_code == 0, result.output
+    assert json.loads(out.read_text())["blessed"] is True
+
+
+def test_cli_refuses_an_already_green_oracle_exit_3(tmp_path: Path, monkeypatch):
+    repo = _demo_copy(tmp_path)
+    result = _run_cli(["true"], repo, monkeypatch, tmp_path)
+    assert result.exit_code == 3, result.output
+    assert "not blessed" in result.output
+
+
+def test_cli_errors_when_no_oracle_and_no_config(tmp_path: Path, monkeypatch):
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    result = _run_cli([], empty, monkeypatch, tmp_path)                # no arg, no loopkit.toml
+    assert result.exit_code == 1 and "no oracle" in result.output
