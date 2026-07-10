@@ -1,6 +1,6 @@
-# Examples — six folders, six different questions
+# Examples — seven folders, seven different questions
 
-These aren't six versions of the same thing. Each answers a distinct question, so pick by what you
+These aren't seven versions of the same thing. Each answers a distinct question, so pick by what you
 want *right now* rather than reading all of them:
 
 | Folder | The question it answers | Runnable? | Remote (push/PR) |
@@ -11,10 +11,11 @@ want *right now* rather than reading all of them:
 | [`skills/`](skills/) | *How do I make runs reliable + compounding?* The `measure` (**pass^k**) calibration + **skills-flywheel** guide, with a diff-to-lesson distiller. | ✗ (read + copy) | off |
 | [`evolve/`](evolve/) | *What if one run isn't reliable enough?* **Best-of-N**: N candidates → score → re-validate the winner on a held-out gate it never competed on. | ✗ (read + copy) | off |
 | [`ci/`](ci/) | *How do I deploy it to my forge?* The CI workflow templates (GitHub/GitLab × API-key/claude-code) — a labelled issue becomes a draft PR. The middle of loopkit's three tiers (*local · **CI** · cloud fleet*). | ✓ (in CI) | **on** — `--open-pr` opens a real draft PR |
+| [`molding/`](molding/) | *How do I set loopkit up for MY repo/issue?* The **`loopkit-mold` skill** — point a copilot at your repo and it molds loopkit (config + gates + a fail-first oracle + which features fit), using the blocks above. Composes the others; doesn't duplicate them. (Part IV.) | ✗ (a skill a copilot runs) | via the per-issue config |
 
 **Start here:** new to loopkit → [`walkthrough/`](walkthrough/). Setting up your own repo →
-copy [`gates/loopkit.example.toml`](gates/loopkit.example.toml) and keep what fits (or run
-`loopkit init`). Wiring it into CI → [`ci/`](ci/).
+[`molding/`](molding/) (let a copilot mold it) or copy [`gates/loopkit.example.toml`](gates/loopkit.example.toml)
+and keep what fits (or run `loopkit init`). Wiring it into CI → [`ci/`](ci/).
 
 ## On the two config files (a common point of confusion)
 

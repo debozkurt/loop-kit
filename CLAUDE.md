@@ -11,6 +11,7 @@ Kubernetes.
 | When | Read |
 |---|---|
 | Picking up the **current phase** (Part III — cloud productionization) | [`docs/part-iii-resume.md`](docs/part-iii-resume.md) — the single next-session source of truth |
+| Picking up **Part IV — molding loopkit to a repo** (the `loopkit-mold` kit; Layer 1 built, next = `synth-gate`) | [`docs/part-iv-resume.md`](docs/part-iv-resume.md) (resume) · [`docs/part-iv-molding-kit.md`](docs/part-iv-molding-kit.md) (design) |
 | Understanding **how the system is built / designed** | [`docs/architecture/`](docs/architecture/README.md) — the living architecture wiki |
 | The **previous phase** (Part II library + dev fleet, done) | [`docs/archive/part-ii-resume.md`](docs/archive/part-ii-resume.md) |
 | Using loopkit on a real repo / the steering files | [`docs/USING-ON-YOUR-REPO.md`](docs/USING-ON-YOUR-REPO.md), [`docs/CONTROL-FILES.md`](docs/CONTROL-FILES.md) |

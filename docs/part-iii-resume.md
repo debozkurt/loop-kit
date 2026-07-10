@@ -44,6 +44,11 @@ Each phase is built + unit-tested token-free; the live column is what still need
 
 ## Recent work (newest first — priming only; full history in `git log`)
 
+- **2026-07-10 — Part IV kicked off (molding loopkit to a repo), Layer 1 built.** A parallel product
+  direction — a `loopkit-mold` skill + verified building blocks so a copilot molds loopkit per repo/issue
+  (config + gates + a fail-first oracle + which features fit), rather than an auto-configurator monolith.
+  Now has its own resume + design doc: [`part-iv-resume.md`](part-iv-resume.md),
+  [`part-iv-molding-kit.md`](part-iv-molding-kit.md). Part III's open items are unaffected.
 - **2026-07-10 — plan-mode → GA step 1: plan-stall detection (branch `feat/plan-driven-backlog`):** the
   one GA-blocking gap the v1 reassessment surfaced. Plan mode defeated *both* early-halt guards —
   `NoProgress` watches the git signature, but a plan-mode agent wedged on one item still edits files
