@@ -181,8 +181,20 @@ module mirrors its two ecosystem chapters, and the labs are the chapter demos:
 
 | Course chapter | This module / lab |
 |---|---|
-| **Ch 20 — Triggers as Infrastructure** | the webhook section above · `loopkit demo 20` |
+| **Ch 20 — Triggers as Infrastructure** | the webhook section above · `loopkit demo 20` (incl. the revise beat) |
 | **Ch 21 — The CI Deployment Tier** | the three tiers + the CI tier above · `loopkit demo 21` |
 
 The manual's chapters teach the *concept* against a minimal stdlib harness; this doc and the labs are
 the *production* realization. (The manual lives in the tutor curriculum under `loops/20`–`loops/21`.)
+
+The manual now also teaches the **post-PR follow-through** as foundational — a loop's job isn't "open a
+PR," it's "get a change merged," and a human's changes-requested review is a fresh goal. That's this
+repo's [revise run](part-iii-resume.md) (`triggers.parse_review_event` + `run --from-event`, one run per
+review round, gated to `loop/*` branches, never on CI failure), mirrored in `demo 20`'s revise beat.
+
+**The full concept→loopkit map** — which manual idea and capstone artifact becomes which loopkit part,
+when to graduate, and where the two repos meet at the frontier (oracle synthesis, the bounded note
+channel, semantic stops) — is the manual's `loops/graduating-to-loopkit.md` (in the tutor curriculum,
+alongside `loops/20`–`loops/21`). It's the two-way pairing link: read the manual to learn the pattern,
+then that map to find its production form here. (The manual is a separate repo, so this is a textual
+pointer, not a link.)

@@ -44,6 +44,29 @@ Each phase is built + unit-tested token-free; the live column is what still need
 
 ## Recent work (newest first — priming only; full history in `git log`)
 
+- **2026-07-10 — guide↔loopkit pairing pass (docs only, no code):** distilled real-use lessons into the
+  *Agentic Loops* manual as **foundational chapter content** (not a bolted-on "lessons" section) and
+  paired the two repos hand-in-hand. Manual side (tutor `loops/`): Ch 5 (the *rediscovery* tax +
+  the bounded note channel), Ch 9 (oracle-authoring friction → **oracle synthesis**, the top adoption
+  lever), Ch 13 (semantic thrash + a `NEEDS_HUMAN` terminal), Ch 14 (`cost_per_iteration` as a lever —
+  model escalation + per-seam routing), Ch 21 (**the loop doesn't stop at the PR** — the revise-run
+  lifecycle), plus a new `loops/graduating-to-loopkit.md` concept→capstone→loopkit map. loopkit side
+  (threaded, no new doc): `part-iii-ecosystem.md` (two-way graduation-map pointer + revise-run mirror),
+  `part-iii-prior-art.md` (surfaced oracle synthesis + tied the scratchpad item to `loops/05`). Cross-repo
+  refs kept **textual** (the manual is a separate repo). Roadmap unchanged; **Next step still Security E**.
+- **2026-07-07 — trace grouping fixed (fleet/evolve = ONE LangSmith trace):** diagnosed from live
+  spacer-remediation traces splitting into per-tick/per-gate roots. Root cause 1: `trace._provider()`
+  marked itself resolved **before** the slow first `import langsmith`, so concurrent loops
+  (evolve/fleet threads all opening `loopkit run` at once) got a `None` provider and their spans
+  silently no-oped — every later span in that thread became its own root trace. Now lock-serialized,
+  resolved-flag set last. Root cause 2: pool threads start with empty contextvars, so worker trees
+  couldn't parent under a supervisor span — `orchestrate._dispatch` now runs each worker in a
+  `contextvars.copy_context()` snapshot under a new `loopkit fleet`/`loopkit evolve` umbrella span
+  (+ per-candidate `slug`/`generation`/`candidate` metadata, `score`/`revalidate` spans, tick
+  `continue` outputs). Bonus fix: auto-on (API key, no flag) now sets `LANGSMITH_TRACING=true` for
+  the SDK — langsmith's own `trace` cm gates posting *and* parenting on that exact value, so key-only
+  auto-on used to upload **nothing**; an explicit `LANGSMITH_TRACING=false` now wins over the key.
+  Proved against real langsmith 0.9.8 (network stubbed) + thread-race and nesting-fake tests.
 - **2026-07-07 — revise runs (the post-PR follow-through, CI tier):** a GitHub `pull_request_review`
   event with **changes requested** on a `loopkit/*` branch now dispatches a **revise run** — the
   review is the goal (`triggers.revise_goal`), the run **resumes the PR's head branch**
