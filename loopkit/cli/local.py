@@ -20,7 +20,7 @@ from rich.table import Table
 
 from .. import pricing, safety, scenarios, secrets, trace
 from ..agent import build_agent
-from ..config import Config
+from ..config import Config, load_config
 from ..loop import run_loop
 from ..pricing import DEFAULT_MODELS
 from ..stops import StopReason
@@ -571,6 +571,106 @@ def _reliability_table(report) -> Table:
     table.add_column("pass@k  (discovery ↑)", justify="right")
     for kk in sorted(report.pass_hat_k):
         table.add_row(str(kk), f"{report.pass_hat_k[kk]:.3f}", f"{report.pass_at_k[kk]:.3f}")
+    return table
+
+
+@app.command("synth-gate")
+def synth_gate(oracle: str | None = typer.Argument(None,
+                    help="The proposed held-out acceptance command to verify. Omit to verify the "
+                         "gate.acceptance already declared in --config."),
+               config: Path = typer.Option(DEFAULT_CONFIG, "--config", "-c",
+                    help="loopkit.toml — sources the default oracle + target when they aren't passed."),
+               repo: Path | None = typer.Option(None, "--repo", "-C",
+                    help="Repo/tree to verify against (default: the config's repo, else the CWD)."),
+               fix: str | None = typer.Option(None, "--fix",
+                    help="A reference fix: a command that transitions a COPY of the tree from "
+                         "buggy→fixed (e.g. `git apply fix.patch`, `git checkout fixed -- .`). When "
+                         "given, ALSO assert the oracle PASSES after it — the gold fail→pass check that "
+                         "proves the oracle discriminates buggy-from-fixed, run in an isolated copy."),
+               isolate: bool = typer.Option(False, "--isolate",
+                    help="Run the fail-first check in a throwaway copy too (default: in place). Use for "
+                         "an untrusted/goal-derived oracle (CI) that must not touch or litter the real "
+                         "tree. A --fix already isolates."),
+               mode: str = typer.Option("copy", "--mode",
+                    help="How the isolated copy is materialized: copy (working tree, incl. uncommitted) "
+                         "| clone (committed state)."),
+               out: Path | None = typer.Option(None, "--out",
+                    help="Write the full JSON OracleVerdict here — the auditable provenance record.")) -> None:
+    """Verify a proposed held-out oracle is *real*: fail-first, and (with --fix) fail→pass.
+
+    Proposing an acceptance test is easy; proving it certifies anything is the job. This runs the
+    oracle against the current (buggy) tree and asserts it **FAILS** — an oracle that already passes
+    reproduces nothing and would certify DONE on tick zero. With `--fix`, it also applies a reference
+    fix to an isolated copy and asserts the oracle **PASSES** (SWE-bench's FAIL_TO_PASS validation):
+    a gate that never flips certifies as little as one that always passes. Only a gate that clears
+    every check is **blessed** — with a signature + version + timestamp, so the blessing is auditable.
+
+    Generalizes the `run --validate` pre-loop seam into a first-class "is this oracle real?" check —
+    the load-bearing half of oracle synthesis (Part IV, Layer 2). Exit 0 = blessed; exit 3 = not real.
+    """
+    secrets.install(secrets.CredentialStore.load(os.environ.get("LOOPKIT_CREDS_DIR")))
+    cfg = load_config(config) if config.exists() else None
+    the_oracle = oracle or (cfg.gate.acceptance if cfg else None)
+    if not the_oracle:
+        fail("synth-gate", "no oracle to verify — pass one as an argument, or set a held-out "
+                           "[bold]gate.acceptance[/] in loopkit.toml.")
+    if repo is not None:
+        target = repo.expanduser().resolve()
+    elif cfg is not None:
+        target = cfg.repo_path()
+    else:
+        target = Path.cwd()
+    if cfg is not None:
+        trace.configure(cfg.trace)
+
+    from ..extensions.synth_gate import verify_oracle
+
+    console.print(Panel.fit(
+        f"[bold]{escape(the_oracle)}[/]\ntree {escape(str(target))} · "
+        f"{'fail→pass (isolated)' if fix else ('fail-first, isolated' if isolate else 'fail-first, in place')}",
+        title="loopkit synth-gate"))
+
+    with trace.span("loopkit synth-gate", run_type="chain", tags=["loopkit", "synth-gate"],
+                    inputs={"oracle": the_oracle, "target": str(target)},
+                    metadata={"has_fix": fix is not None, "isolate": isolate}) as span:
+        verdict = verify_oracle(
+            the_oracle, target, timestamp=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            fix=fix, mode=mode, isolate=isolate)
+        span.outputs(blessed=verdict.blessed, checks=len(verdict.checks), signature=verdict.signature)
+
+    console.print(_oracle_verdict_table(verdict))
+    for check in verdict.checks:
+        mark = "[green]✓[/]" if check.ok else "[red]✗[/]"
+        console.print(f"{mark} [bold]{check.name}[/] — {escape(check.detail)}")
+        # Always surface the fail-first output — even when it passes, the molder must eyeball *why* it
+        # fails (a real assertion about the target, not a broken import/path that fails for free). For
+        # pass-on-fix the output only matters on a surprise (it still failed / the fix errored).
+        show = check.evidence and (check.name == "fail-first" or not check.ok)
+        if show:
+            note = "confirm this is the target failing, not a broken oracle" if check.ok else "the surprise"
+            console.print(Panel(escape(check.evidence), title=f"{check.name} output — {note}",
+                                border_style="dim"))
+    if verdict.blessed:
+        console.print(f"[green]blessed[/] — the oracle is real. [dim]sig {verdict.signature} · loopkit "
+                      f"{verdict.loopkit_version} · {verdict.timestamp}[/]")
+    else:
+        console.print("[red]not blessed[/] — this oracle certifies nothing yet; fix it above before "
+                      "wiring it as [bold]gate.acceptance[/].")
+    if out is not None:
+        out.write_text(verdict.to_json())
+        console.print(f"[green]wrote[/] {out}")
+    raise typer.Exit(0 if verdict.blessed else 3)
+
+
+def _oracle_verdict_table(verdict) -> Table:
+    """The verification checks side by side: what a real oracle does at each stage vs. what happened."""
+    table = Table(title=f"oracle verification — {'blessed' if verdict.blessed else 'NOT blessed'}")
+    table.add_column("check", justify="left")
+    table.add_column("a real oracle…", justify="left")
+    table.add_column("this oracle", justify="left")
+    for check in verdict.checks:
+        got = "[green]met[/]" if check.ok else "[red]did not[/]"
+        table.add_row(check.name, f"must {check.expected}", got)
     return table
 
 

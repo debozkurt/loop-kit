@@ -63,9 +63,27 @@ it is real evidence — but only if it actually fails on the current (buggy) tre
 
 - Copy [`templates/acceptance-oracle.sh`](templates/acceptance-oracle.sh) to `acceptance/<key>/run.sh`
   and write the hidden test it copies in / runs. Keep it **out of the tree the agent edits**.
-- **Fail-first verify it** with [`../gates/validate.sh`](../gates/validate.sh): run the oracle against
-  the current tree — it MUST fail. An oracle that passes on the buggy tree certifies nothing. Wire it as
-  the pre-loop check: `run --validate "GATE_ORACLE='bash acceptance/<key>/run.sh' bash examples/gates/validate.sh"`.
+- **Fail-first verify it with `loopkit synth-gate`** (Part IV Layer 2 — the verified primitive; do not
+  hand-roll this check): run the proposed oracle and assert it FAILS on the current tree. An oracle
+  that already passes reproduces nothing and would certify DONE on tick zero.
+
+  ```bash
+  loopkit synth-gate "bash acceptance/<key>/run.sh"        # exit 0 = blessed (fails first); exit 3 = not real
+  ```
+
+  When you have a reference fix (a patch, a `git checkout fixed -- .`, a fix script), pass `--fix` for
+  the **gold fail→pass check** — it applies the fix to an isolated copy and asserts the oracle then
+  PASSES, proving it *discriminates* buggy-from-fixed (SWE-bench FAIL_TO_PASS validation), not just
+  that it fails for some unrelated reason:
+
+  ```bash
+  loopkit synth-gate "bash acceptance/<key>/run.sh" --fix "git apply fix.patch" --out verdict.json
+  ```
+
+  `--out` writes an auditable provenance record (oracle + fix + signature + version). For an untrusted,
+  goal-derived oracle (CI), add `--isolate` so even the fail-first run never touches the real tree. The
+  older [`../gates/validate.sh`](../gates/validate.sh) does the same fail-first check as a raw
+  `run --validate` preflight — `synth-gate` supersedes it for verifying an oracle at molding time.
 - Chain the structural gate before the oracle with
   [`templates/acceptance-dispatcher.sh`](templates/acceptance-dispatcher.sh) (has-tests → oracle), so a
   fix with no shipped test can't pass.

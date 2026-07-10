@@ -1,7 +1,9 @@
 # Part IV — Molding loopkit to a repo (the molding kit)
 
-> **Status:** 2026-07-10. **Layer 1 BUILT** (`examples/molding/` — the `loopkit-mold` skill + templates,
-> zero new code paths); Layers 2–5 are design. This doc argues *what to build, why, and in what order*.
+> **Status:** 2026-07-10. **Layers 1–2 BUILT** — Layer 1 = `examples/molding/` (the `loopkit-mold`
+> skill + templates, zero new code paths); Layer 2 = `loopkit synth-gate` (fail-first oracle
+> verification — `extensions/synth_gate.py` + the CLI command + demo 25 + tests). Layers 3–5 are
+> design. This doc argues *what to build, why, and in what order*.
 > It deliberately **supersedes** the broad "auto-molding harness / self-configuring monolith" sketch that
 > preceded it — see [Why not a monolith](#why-not-a-monolith-the-design-boundary). The design decisions
 > below were dialled in with the maintainer; the open questions at the end are the ones still live.
@@ -154,10 +156,16 @@ The skill's content:
   paths → protected-path candidates; default branch; which adapter is on `PATH`), and prints a
   **proposed** `loopkit.toml` for the copilot to refine. The copilot (not `detect`) writes the
   `PROMPT.md` guidance prose. Deterministic core ⇒ testable at zero tokens.
-- **`loopkit synth-gate`** — take a proposed acceptance oracle, run it against the current tree, assert
-  it **FAILS** (fail-first), and only then bless it as trustworthy. Generalizes the existing `--validate`
-  seam into a first-class "is this oracle real?" check. This *is* roadmap #1 (oracle synthesis) — the one
-  primitive whose entire value is the verification loop, so it must be code, not a prompt.
+- **`loopkit synth-gate`** ✅ **BUILT** — take a proposed acceptance oracle, run it against the current
+  tree, assert it **FAILS** (fail-first), and only then bless it as trustworthy. With a reference `--fix`
+  it also applies the fix to an isolated copy and asserts the oracle **PASSES** — the gold fail→pass
+  check (SWE-bench FAIL_TO_PASS validation) that proves the oracle *discriminates* buggy-from-fixed, not
+  just that it fails for some unrelated reason. Generalizes the existing `--validate` seam into a
+  first-class "is this oracle real?" check, emitting an auditable verdict (oracle + fix + signature +
+  version + timestamp). This *is* roadmap #1 (oracle synthesis) — the one primitive whose entire value
+  is the verification loop, so it must be code, not a prompt. Lives in `extensions/synth_gate.py`
+  (self-contained, stdlib + the core executor's `run_gate`, no fleet coupling); `loopkit demo 25` is the
+  runnable lab.
 
 ## The security boundary (non-negotiable)
 
@@ -182,9 +190,12 @@ Each layer is independently shippable and review-gated. Build in order; do not f
    (config · acceptance dispatcher · oracle skeleton · judge rubric · worktree recipe). References — does
    not duplicate — `examples/gates|evolve|skills|ci`. A copilot can use this **today**, zero new code
    paths. Install: symlink `examples/molding` → `~/.claude/skills/loopkit-mold`.
-2. **`loopkit synth-gate`** — fail-first oracle verification. The one primitive that must be code;
-   roadmap #1; valuable in every tier; the biggest single friction removed (hand-authoring a fail-first
-   oracle was the #1 real-use pain).
+2. **✅ BUILT — `loopkit synth-gate`** — fail-first oracle verification (and, given a `--fix`, the gold
+   fail→pass check). The one primitive that must be code; roadmap #1; valuable in every tier; the
+   biggest single friction removed (hand-authoring a fail-first oracle was the #1 real-use pain).
+   `extensions/synth_gate.py` + the CLI command + `demo 25` + `tests/test_synth_gate.py` (16 tests, no
+   tokens). Reuses the core `executor.run_gate` so a blessed oracle behaves identically when the loop
+   later runs it.
 3. **`loopkit detect`** — deterministic introspection, so neither a copilot nor an unattended agent
    hand-guesses the safety-critical config.
 4. **Reliability-gated routing** — wire `measure` → `evolve` escalation into the playbook + a thin helper.

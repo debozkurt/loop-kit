@@ -8,7 +8,8 @@
 # Contract: exit 0 = the fix is correct, non-zero = not yet (feedback on stdout).
 #
 # CRITICAL: verify this oracle FAILS on the current (buggy) tree before you trust it — the fail-first
-# check (examples/gates/validate.sh). An oracle that passes on the buggy tree certifies nothing.
+# check: `loopkit synth-gate "bash acceptance/<key>/run.sh"` (add --fix <cmd> for the fail→pass proof).
+# An oracle that passes on the buggy tree certifies nothing.
 set -uo pipefail
 
 # FILL 1 — where the hidden test lands in the repo (a path the agent is NOT told about):

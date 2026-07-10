@@ -62,11 +62,14 @@ loopkit init --plan            # OR: plan-driven backlog mode — a checklist th
 loopkit doctor                 # preflight: safe to run here? gates set? agent on PATH?
 loopkit run                    # loops to the goal (use --dry-run to rehearse the control flow)
 loopkit measure -n 10          # reliability: run the goal 10× → pass^k / pass@k (harness-stamped)
+loopkit synth-gate <cmd>       # is this held-out oracle real? fail-first verify it (--fix ⇒ fail→pass)
 ```
 
 Or let a coding-agent copilot mold loopkit *for* your repo — detect the stack, wire the gates + a
 fail-first oracle, pick the features that fit — with the [`loopkit-mold` skill](examples/molding/)
-(Part IV; [design](docs/part-iv-molding-kit.md)).
+(Part IV; [design](docs/part-iv-molding-kit.md)). Its load-bearing primitive, `loopkit synth-gate`,
+proves a proposed acceptance oracle actually reproduces the goal (fails on the buggy tree) before you
+trust it — the verification a copilot rarely does by hand.
 
 Or learn the concepts from the runnable course:
 
