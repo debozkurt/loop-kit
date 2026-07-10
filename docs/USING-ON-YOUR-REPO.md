@@ -62,6 +62,35 @@ behaviour."
 
 ---
 
+## Work a whole backlog in one loop (`--plan`)
+
+Everything above drives **one** goal to done. To hand loopkit a *checklist of requirements* for a whole
+feature or project and have it work through them one at a time — committing and verifying as it goes —
+scaffold **plan-driven backlog mode**:
+
+```bash
+loopkit init --plan            # writes loopkit.toml + PROMPT.md + IMPLEMENTATION_PLAN.md
+```
+
+Fill `IMPLEMENTATION_PLAN.md` with a markdown checklist (`- [ ]` per requirement), then `loopkit run`.
+Each tick the loop reads the plan, does the single most important open item, verifies it against the
+fast iteration gate, commits, and marks it `- [x]`. It repeats with a fresh context — the plan file is
+its durable memory — until every item is checked **and** the whole-project acceptance gate passes. That
+two-part condition is the point: an open item keeps the run going even when the gates are green, and a
+green acceptance gate is not enough while items remain.
+
+- **One branch, one PR.** Every item commits to the run branch; add a `[remote]` block (or
+  `run --open-pr`) to land the finished backlog as a single draft PR.
+- **Give it headroom.** A backlog needs a higher `stops.max_iter` than one task (the scaffold sets 60)
+  and a real budget ceiling — both still bound it.
+- **This is the *sequential* shape.** For *independent* tasks in parallel (a bug queue), use the fleet
+  instead (below) — a different tool: many branches at once, not one checklist in order.
+
+Pick by the work: a coherent feature with dependent steps → `--plan` (one loop, ordered). A pile of
+unrelated tasks → the fleet (`fleet run --from-issues`, parallel).
+
+---
+
 ## 2. Sync the result to a remote (GitHub / GitLab)
 
 The loop is always durable locally (commit every tick). To take the finished branch *outward*, add

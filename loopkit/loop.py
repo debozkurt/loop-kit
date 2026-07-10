@@ -28,6 +28,7 @@ from .agent import Agent
 from .gate import AlwaysPass, Gate, ShellGate
 from .log import get_logger
 from .prompt import build_prompt
+from .plan import PlanState, read_plan
 from .stops import BudgetCeiling, LoopState, NoProgress, StopReason, first_triggered
 
 if TYPE_CHECKING:
@@ -73,6 +74,8 @@ class RunResult:
     cost_usd: float
     overfit: bool = False          # iteration gate passed but acceptance gate did not, at halt
     detail: str = ""
+    plan_open: int | None = None   # plan-driven backlog: open / total checklist items at halt
+    plan_total: int | None = None  # (both None when not in plan mode — exact prior RunResult)
 
 
 class _DryResult:
@@ -157,6 +160,14 @@ def run_loop(config, agent: Agent, *, iteration_gate: Gate | None = None,
         signatures = [durability.state_signature(repo)]
         feedback: str | None = None
         overfit = False
+        plan_file = config.plan.file            # plan-driven backlog mode; None = single-task (prior)
+        last_plan: PlanState | None = None
+
+        def _res(reason, iterations, cost_usd, **kw):
+            # Stamp the latest checklist progress onto every terminal (None when not in plan mode).
+            po = last_plan.open if last_plan else None
+            pt = last_plan.total if last_plan else None
+            return RunResult(reason, iterations, cost_usd, plan_open=po, plan_total=pt, **kw)
 
         for i in range(1, config.stops.max_iter + 1):
             tick = log.bind(tick=i)
@@ -190,7 +201,7 @@ def run_loop(config, agent: Agent, *, iteration_gate: Gate | None = None,
                                first=violations[0])
                     durability.revert_uncommitted(repo)
                     tick_span.outputs(halt="safety", protected_path=violations[0])
-                    return _finish(run_span, RunResult(
+                    return _finish(run_span, _res(
                         StopReason.SAFETY, i, cost, detail=f"touched protected path {violations[0]}"))
 
                 commit_msg = f"loopkit: tick {i} on {config.branch}"
@@ -203,6 +214,13 @@ def run_loop(config, agent: Agent, *, iteration_gate: Gate | None = None,
                 signatures.append(signature)
                 tick.info("tick.commit", committed=committed, sig=signature)
                 tick_span.metadata(committed=committed, cost_usd=round(cost, 6))
+                # Plan-driven backlog (Ch 4-5): read the checklist fresh each tick — it is the agent's
+                # durable working memory AND the loop's completion signal below. None-safe: no [plan].
+                if plan_file:
+                    last_plan = read_plan(repo, plan_file)
+                    tick.info("plan.progress", done=last_plan.done, open=last_plan.open,
+                              total=last_plan.total)
+                    tick_span.metadata(plan_done=last_plan.done, plan_open=last_plan.open)
                 state = LoopState(iteration=i, cost_usd=cost, signature=signature,
                                   signatures=signatures)
 
@@ -231,7 +249,10 @@ def run_loop(config, agent: Agent, *, iteration_gate: Gate | None = None,
                             gate = iteration_gate.check(repo)
                         gate_span.outputs(passed=gate.passed, feedback=gate.feedback or None)
                     tick.info("gate.iteration", passed=gate.passed)
-                    if gate.passed:
+                    # Plan-driven backlog: with open checklist items the run is not finished, so skip
+                    # the (expensive) whole-project acceptance gate and keep going — one item a tick.
+                    plan_blocks = last_plan is not None and last_plan.blocks_done
+                    if gate.passed and not plan_blocks:
                         with trace.span("acceptance gate", run_type="tool",
                                         inputs={"command": config.gate.acceptance}) as acc_span:
                             with _heartbeat(tick, "acceptance_gate"):
@@ -249,7 +270,7 @@ def run_loop(config, agent: Agent, *, iteration_gate: Gate | None = None,
                             tick.info("gate.regression", passed=reg.passed)
                             if reg.passed:
                                 tick.info("run.done", iterations=i, costUsd=round(cost, 4))
-                                done = RunResult(StopReason.DONE, i, cost)
+                                done = _res(StopReason.DONE, i, cost)
                                 # Write edge of the flywheel (Ch 17): distil this success into a skill —
                                 # but only through the registry's gate, so a thin win can't mint a lesson.
                                 if skills is not None:
@@ -271,6 +292,15 @@ def run_loop(config, agent: Agent, *, iteration_gate: Gate | None = None,
                             feedback = ("The visible checks pass but the held-out acceptance checks "
                                         "fail: you have fit the visible tests, not solved the goal. Make "
                                         "the behaviour correct.\n" + secrets.redact(acc.feedback or ""))
+                    elif gate.passed:
+                        # Plan mode: the tick's item is verified, but the checklist is not finished.
+                        tick.info("plan.incomplete", open=last_plan.open, total=last_plan.total)
+                        feedback = (f"The iteration gate passes and nothing is broken, but "
+                                    f"{last_plan.open} of {last_plan.total} checklist items in "
+                                    f"{plan_file} are still open. Mark the item you just finished "
+                                    f"`- [x]` if you haven't, then do the single most important "
+                                    f"remaining one — the run is not done until every item is checked "
+                                    f"and the acceptance gate passes.")
                     else:
                         feedback = secrets.redact(gate.feedback)
 
@@ -279,12 +309,12 @@ def run_loop(config, agent: Agent, *, iteration_gate: Gate | None = None,
                 if reason is not None:
                     tick.warn("loop.halt", reason=reason.value, iterations=i, costUsd=round(cost, 4))
                     tick_span.outputs(halt=reason.value)
-                    return _finish(run_span, RunResult(reason, i, cost, overfit=overfit))
+                    return _finish(run_span, _res(reason, i, cost, overfit=overfit))
                 # Not a terminal: record why this tick continues (the feedback the next tick gets),
                 # so a tick is never a blank row in the trace UI.
                 tick_span.outputs(result="continue", feedback=feedback or None)
 
         log.warn("loop.halt", reason=StopReason.ITERATION_CAP.value,
                  iterations=config.stops.max_iter, costUsd=round(cost, 4))
-        return _finish(run_span, RunResult(StopReason.ITERATION_CAP, config.stops.max_iter, cost,
-                                           overfit=overfit))
+        return _finish(run_span, _res(StopReason.ITERATION_CAP, config.stops.max_iter, cost,
+                                      overfit=overfit))

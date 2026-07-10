@@ -55,7 +55,7 @@ EXPECTED: dict[str, list[str]] = {
         "adapter", "executor_socket", "gate_acceptance", "gate_iteration", "max_iter", "name",
         "redis_namespace", "redis_url", "skills_branch", "skills_repo", "target",
     ],
-    "init": ["ci", "path"],
+    "init": ["ci", "path", "plan"],
     "learn": ["chapter", "live"],
     "measure": ["adapter", "config", "from_issue", "k", "max_iter", "mode", "out", "provider", "repo", "trials"],
     "run": [

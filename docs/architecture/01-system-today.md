@@ -16,6 +16,7 @@ Architecture mirrors the agentic-loops curriculum — **one module per concern**
 | `config.py` | the one `Config` object — the whole loop as one file | 18 |
 | `agent.py` | the model as a subroutine the loop invokes (the 2×2 adapter matrix) | 1-3 |
 | `prompt.py` | fixed prompt rebuilt into a fresh context every tick | 4-5 |
+| `plan.py` | plan-driven backlog mode — the `- [ ]` checklist that gates DONE (`[plan]`, opt-in) | 4-5 |
 | `gate.py` | the iteration gate + the held-out acceptance gate | 6-7, 9 |
 | `stops.py` | the three hard stops + precedence | 13-14 |
 | `durability.py` | commit every tick; resume from git | 15 |
