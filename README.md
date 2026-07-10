@@ -64,6 +64,10 @@ loopkit run                    # loops to the goal (use --dry-run to rehearse th
 loopkit measure -n 10          # reliability: run the goal 10× → pass^k / pass@k (harness-stamped)
 ```
 
+Or let a coding-agent copilot mold loopkit *for* your repo — detect the stack, wire the gates + a
+fail-first oracle, pick the features that fit — with the [`loopkit-mold` skill](examples/molding/)
+(Part IV; [design](docs/part-iv-molding-kit.md)).
+
 Or learn the concepts from the runnable course:
 
 ```bash

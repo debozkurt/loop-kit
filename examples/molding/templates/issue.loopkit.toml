@@ -1,0 +1,44 @@
+# issue.loopkit.toml — a per-issue molded instance (one issue → one loopkit run).
+# Copy per issue, fill the FILL markers. The goal is sourced from the issue at run time (--from-issue),
+# so it isn't hard-coded here. Generalized from the spacer remediation `configs/<finding>.toml` pattern.
+#
+# Run it:  loopkit run --config issue.loopkit.toml --repo <clone> --from-issue <N> --provider github --open-pr
+
+goal   = "Set per-run from the issue via --from-issue."
+repo   = "."
+branch = "loopkit/issue"          # per-issue: loopkit/issue-<N>; never main/master (Ch 16)
+
+[agent]
+adapter      = "claude-code"      # mock | claude-code | codex | claude-api | openai-api
+max_cost_usd = 8.0                # one issue's ceiling — raise for harder work (Ch 14)
+
+[prompt]
+anchors = ["PROMPT.md"]           # + "CLAUDE.md"/"AGENTS.md" if the repo has house rules
+
+[gate]
+# iteration: fast, in-sample, every tick — the repo's own suite, SCOPED to the touched module.
+iteration  = "python -m pytest tests/FILL_MODULE -q"
+# acceptance: held-out, once — the dispatcher chains has-tests → this issue's hidden oracle.
+acceptance = "GATE_KEY=FILL_KEY bash gate/acceptance-dispatcher.sh"
+# regression (optional second oracle): a held-out PASS_TO_PASS set — previously-green stays green.
+# regression = "python -m pytest tests/regression -q"
+
+[stops]
+max_iter          = 12
+no_progress_after = 4
+
+[safety]
+# Protect the grader (Ch 9, verifier hacking) + infra the task must not touch. Add the MINIMAL unlock
+# this issue needs (e.g. drop "migrations" from the list for a migration task) — nothing more.
+protected_paths     = ["tests/", "gate/", "acceptance/", ".github", ".gitlab-ci.yml", "chart", "helm", "migrations"]
+require_clean_tree  = true
+allow_branches      = ["loopkit/*"]
+forbid_branches     = ["main", "master"]     # + the repo's default branch if different
+gate_stability_runs = 0                      # >=2 to probe a flaky iteration gate before starting
+
+# [remote]                        # opt-in OUTWARD edge: at DONE, push + open ONE draft PR/MR for review.
+# enabled  = true
+# open_pr  = true
+# provider = "github"             # github | gitlab
+# pr_base  = "main"               # the repo's default branch
+# draft    = true                 # a human is always the merge authority
