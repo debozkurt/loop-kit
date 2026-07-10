@@ -44,6 +44,18 @@ Each phase is built + unit-tested token-free; the live column is what still need
 
 ## Recent work (newest first — priming only; full history in `git log`)
 
+- **2026-07-10 — plan-driven backlog mode (`loopkit init --plan`), v1 (branch `feat/plan-driven-backlog`,
+  not merged — for reassessment):** shape #2 — one loop grinds a markdown checklist, one item per tick,
+  committing + verifying as it goes. DONE now requires the checklist empty **AND** the acceptance gate
+  green: an open `- [ ]` item overrides green gates, and the whole-project gate certifies the finished
+  set. None-safe — no `[plan]` config = exact prior single-task behavior. New `plan.py`
+  (`read_plan`/`PlanState`, anchored `- [ ]`/`- [x]` parse), `config.PlanConfig`, a plan-gate in
+  `loop.py` before the acceptance gate + per-tick `plan.progress` + `RunResult.plan_open/total`,
+  `init --plan` (3 scaffold templates) + a `run` checklist line. +7 tests (`test_plan.py`); cli-surface
+  snapshot updated. The distinction that motivated it: `--plan` is the *sequential* backlog (one loop,
+  ordered, dependent steps); the fleet is the *parallel* batch (independent tasks). Docs: CONTROL-FILES
+  `[plan]`, USING-ON-YOUR-REPO backlog recipe, arch ownership table. `test_creds` fails pre-existing
+  (kubernetes client quirk, unrelated).
 - **2026-07-10 — guide↔loopkit pairing pass (docs only, no code):** distilled real-use lessons into the
   *Agentic Loops* manual as **foundational chapter content** (not a bolted-on "lessons" section) and
   paired the two repos hand-in-hand. Manual side (tutor `loops/`): Ch 5 (the *rediscovery* tax +

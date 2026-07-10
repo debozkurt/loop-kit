@@ -34,6 +34,14 @@ class PromptConfig(BaseModel):
     anchors: list[str] = Field(default_factory=lambda: ["PROMPT.md"])
 
 
+class PlanConfig(BaseModel):
+    """Plan-driven backlog mode (shape #2): point one loop at a markdown checklist it grinds through,
+    one item per tick. `file` is both a prompt anchor the agent maintains AND the loop's completion
+    signal — the run is not DONE while any `- [ ]` item is open. None = off (single-task behavior)."""
+
+    file: str | None = None               # e.g. "IMPLEMENTATION_PLAN.md"; None = plan mode off
+
+
 class GateConfig(BaseModel):
     """The gates: the in-sample iteration gate, the held-out acceptance gate, and an optional
     held-out regression gate (the two-oracle pattern — see `acceptance`/`regression`)."""
@@ -108,6 +116,7 @@ class Config(BaseModel):
     branch: str = "loopkit/run"
     agent: AgentConfig = Field(default_factory=AgentConfig)
     prompt: PromptConfig = Field(default_factory=PromptConfig)
+    plan: PlanConfig = Field(default_factory=PlanConfig)
     gate: GateConfig
     stops: StopsConfig = Field(default_factory=StopsConfig)
     safety: SafetyConfig = Field(default_factory=SafetyConfig)

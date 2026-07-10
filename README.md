@@ -58,6 +58,7 @@ Point it at a repository:
 ```bash
 cd your-repo
 loopkit init                   # scaffolds loopkit.toml + PROMPT.md
+loopkit init --plan            # OR: plan-driven backlog mode — a checklist the loop works through
 loopkit doctor                 # preflight: safe to run here? gates set? agent on PATH?
 loopkit run                    # loops to the goal (use --dry-run to rehearse the control flow)
 loopkit measure -n 10          # reliability: run the goal 10× → pass^k / pass@k (harness-stamped)

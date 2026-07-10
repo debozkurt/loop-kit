@@ -24,21 +24,33 @@ from ..config import Config
 from ..loop import run_loop
 from ..pricing import DEFAULT_MODELS
 from ..stops import StopReason
-from .._templates import _CI_TEMPLATES, _CONFIG_TEMPLATE, _PROMPT_TEMPLATE
+from .._templates import (_CI_TEMPLATES, _CONFIG_TEMPLATE, _PLAN_CONFIG_TEMPLATE,
+                          _PLAN_IMPLEMENTATION_TEMPLATE, _PLAN_PROMPT_TEMPLATE, _PROMPT_TEMPLATE)
 from ._support import DEFAULT_CONFIG, _load, _render, app, console, err, fail
 
 
 @app.command()
 def init(path: Path = typer.Argument(Path("."), help="Repository to set up."),
+         plan: bool = typer.Option(False, "--plan",
+                                   help="Plan-driven backlog mode: scaffold a checklist the loop grinds "
+                                        "through, one item per tick (instead of a single task)."),
          ci: str | None = typer.Option(None, "--ci",
                                         help="Also scaffold a CI workflow: github | gitlab (Phase 5c).")) -> None:
     """Scaffold a starter loopkit.toml and PROMPT.md in PATH (never overwrites).
+
+    With `--plan`, scaffold plan-driven backlog mode instead: a loopkit.toml wired to a checklist, a
+    plan-driven PROMPT.md, and a starter IMPLEMENTATION_PLAN.md. One loop works through the checklist
+    item by item — the run is DONE when every item is checked and the acceptance gate passes.
 
     With `--ci github|gitlab`, also scaffold a CI workflow that runs the loop on a labelled issue with
     no cluster (the CI deployment tier) — see docs/part-iii-ci-mode.md.
     """
     path = path.expanduser().resolve()
-    files = [("loopkit.toml", _CONFIG_TEMPLATE), ("PROMPT.md", _PROMPT_TEMPLATE)]
+    if plan:
+        files = [("loopkit.toml", _PLAN_CONFIG_TEMPLATE), ("PROMPT.md", _PLAN_PROMPT_TEMPLATE),
+                 ("IMPLEMENTATION_PLAN.md", _PLAN_IMPLEMENTATION_TEMPLATE)]
+    else:
+        files = [("loopkit.toml", _CONFIG_TEMPLATE), ("PROMPT.md", _PROMPT_TEMPLATE)]
     if ci is not None:
         if ci not in _CI_TEMPLATES:
             fail("init", f"unknown --ci value {ci!r} (expected: github | gitlab).")
@@ -54,7 +66,11 @@ def init(path: Path = typer.Argument(Path("."), help="Repository to set up."),
         wrote.append(name)
     body = "\n".join(f"[green]wrote[/] {w}" for w in wrote) or "nothing new to write"
     console.print(Panel.fit(body, title="loopkit init"))
-    console.print("Next: edit the goal + gates, then [bold]loopkit doctor[/] to validate.")
+    if plan:
+        console.print("Next: fill [bold]IMPLEMENTATION_PLAN.md[/] with your requirements checklist, set "
+                      "the gates in loopkit.toml, then [bold]loopkit doctor[/] to validate.")
+    else:
+        console.print("Next: edit the goal + gates, then [bold]loopkit doctor[/] to validate.")
 
 
 @app.command()
@@ -390,6 +406,9 @@ def run(config: Path = typer.Option(DEFAULT_CONFIG, "--config", "-c"),
         skills_registry = FileSkillRegistry(skills, distill=distiller)
     result = run_loop(cfg, agent, dry_run=dry_run, review_hook=review_hook, skills=skills_registry)
     _render(result)
+    if result.plan_total:      # plan-driven backlog: show how much of the checklist landed
+        console.print(f"[dim]checklist[/] {result.plan_total - result.plan_open}/{result.plan_total} "
+                      f"items done")
     # Outward edge (Ch 16): push the solved branch + open a PR, only if [remote] is enabled (which
     # --open-pr turns on). When the run was issue-sourced, the issue number rides into the PR body so
     # the forge auto-closes it on merge.

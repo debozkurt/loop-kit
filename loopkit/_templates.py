@@ -50,6 +50,109 @@ The visible tests are an incomplete check — passing them is necessary but not 
 Make the behaviour correct. Do not weaken, delete, or skip any test.
 """
 
+# Plan-driven backlog mode (shape #2): `loopkit init --plan` scaffolds these three files instead of the
+# single-task pair above. One loop grinds a markdown checklist, one item per tick — the plan file is
+# both a prompt anchor the agent maintains AND the loop's completion signal (`[plan] file`, loop.py).
+_PLAN_CONFIG_TEMPLATE = """\
+# loopkit.toml — plan-driven backlog mode. One loop works through IMPLEMENTATION_PLAN.md, one item a
+# tick, committing + verifying as it goes; DONE = every item checked AND the acceptance gate passes.
+goal = "Complete every item in IMPLEMENTATION_PLAN.md, verifying each one as you go."
+repo = "."
+branch = "loopkit/plan"          # never main/master (Ch 16)
+
+[agent]
+adapter = "claude-code"          # mock | claude-code | codex | claude-api | openai-api
+max_cost_usd = 20.0              # a whole backlog costs more than one task — raise the ceiling (Ch 14)
+
+[prompt]
+anchors = ["PROMPT.md", "IMPLEMENTATION_PLAN.md"]   # the plan is an anchor the agent reads + maintains
+
+[plan]
+file = "IMPLEMENTATION_PLAN.md"  # the checklist; the run is NOT done while any `- [ ]` item is open
+
+[gate]
+iteration  = "python -m pytest -q"          # fast, per-tick: the item just finished broke nothing
+acceptance = "python -m pytest tests/ -q"   # held-out, whole-project: the finished checklist must pass this
+
+[stops]
+max_iter = 60                    # a backlog needs many more ticks than one task (Ch 13)
+no_progress_after = 4
+
+[safety]
+protected_paths = ["tests/"]     # the loop may not touch these (Ch 9 + 16)
+require_clean_tree = true
+allow_branches = ["loopkit/*"]
+
+# [remote]                       # opt-in OUTWARD edge (Ch 16): at DONE, push the branch + open one draft
+# enabled = true                 # PR. OFF by default — the whole backlog lands as a single review.
+# open_pr = true
+"""
+
+_PLAN_PROMPT_TEMPLATE = """\
+<!--
+  PROMPT.md — the FIXED anchor prompt for plan-driven backlog mode (Ch 4-5). Piped to the agent
+  verbatim every tick; it does NOT change between ticks. The loop's memory lives on disk —
+  IMPLEMENTATION_PLAN.md, git history, specs/ — not in this prompt or a growing conversation.
+-->
+
+# Your task this iteration
+
+You are one iteration of an autonomous loop working through a checklist. You have a **fresh context** —
+everything you need is on disk, not in your memory. Do exactly one item, verify it, record it, and
+stop. The loop invokes you again with a fresh context for the next item.
+
+## Orient (read these first — they are your only memory)
+
+1. Read `IMPLEMENTATION_PLAN.md` — the checklist. `- [ ]` is open, `- [x]` is done: what is left to
+   build, and the record of what is finished.
+2. Read `specs/` if present — the source of truth for *what* to build and what "done" means per item.
+3. Read `AGENTS.md` / `CLAUDE.md` if present — house rules, build/test commands, hard constraints.
+4. If a `## Verification feedback` section is appended below, the last tick's gate failed — that is
+   your error signal. Fix the cause it names before anything else.
+
+## Do ONE item
+
+- Pick the single most important **open** (`- [ ]`) item. Do only that item. Resist "just one more
+  thing" — large changes per tick reintroduce the long-context problems this loop avoids (Ch 5).
+
+## Verify it end to end (Ch 7)
+
+- Run the build, tests, typechecker, linter — whatever proves the item actually works, not just that
+  it compiles. If it does not pass, fix it now, this tick, while the producing context is fresh.
+- Do not weaken, delete, or skip tests to make a check pass — the loop catches that (Ch 9).
+
+## Record progress (Ch 15)
+
+- In `IMPLEMENTATION_PLAN.md`: change the item you finished from `- [ ]` to `- [x]`, note anything the
+  next tick needs, and **prune** resolved notes so the plan stays small. Add a new `- [ ]` item for
+  any required work you discovered.
+
+## Stop
+
+- When your one item is done and verified, stop. The loop commits, starts the next tick, and once the
+  checklist is empty runs the whole-project acceptance gate before declaring DONE. One verified item.
+"""
+
+_PLAN_IMPLEMENTATION_TEMPLATE = """\
+# Implementation plan
+
+The loop reads this file every tick, does the single most important **open** item, verifies it, marks
+it `- [x]`, and stops — repeating with a fresh context until every item is checked and the acceptance
+gate passes. Keep it small and current: mark done, prune resolved notes, add sub-tasks you discover.
+
+`- [ ]` = open (to do)   ·   `- [x]` = done
+
+## Requirements
+
+- [ ] <first requirement — state precisely what "done" means for it>
+- [ ] <second requirement>
+- [ ] <third requirement>
+
+## Notes / discovered work
+
+<the loop appends what the next iteration needs here; prune it as items resolve>
+"""
+
 # CI deployment tier (Phase 5c): run the single loop from the forge's CI on a labelled issue, no
 # cluster. The forge is the trigger, the secret store, the identity, and the per-job sandbox; loopkit
 # is just the loop. These are the canonical templates `loopkit init --ci <forge>` scaffolds and

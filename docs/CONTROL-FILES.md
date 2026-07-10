@@ -35,6 +35,11 @@ use_api_key  = false             # claude-code: false = bill your SUBSCRIPTION (
 [prompt]
 anchors = ["PROMPT.md", "CLAUDE.md"]   # the files reloaded into a fresh context each tick
 
+[plan]                                 # OPTIONAL — plan-driven backlog mode (one loop, many items)
+file = "IMPLEMENTATION_PLAN.md"        # a `- [ ]` checklist; the run isn't DONE while any item is open.
+                                       # Also list it under [prompt].anchors so the agent maintains it.
+                                       # Scaffold the whole thing with `loopkit init --plan`.
+
 [gate]
 iteration  = "pytest tests/seen -q"        # fast, in-sample — optimized every tick
 acceptance = "pytest tests/holdout -q"     # held-out — the honest "done" check (Ch 9)
