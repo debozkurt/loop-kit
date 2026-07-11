@@ -111,6 +111,18 @@ def test_worker_job_is_the_fine_grained_work_queue_pattern():
     assert pod["imagePullSecrets"] == [{"name": "ghcr-pull"}]
 
 
+def test_node_pool_pins_pods_via_nodeselector_when_set_else_absent():
+    # Pin the fleet to a DOKS node pool (e.g. an autoscaling worker pool); None (default) = any node.
+    pinned = cloudrun.build_worker_job(
+        cloudrun.RunSpec(run_id="a", image="i", target="t", goal="g", node_pool="worker-pool")
+    )["spec"]["template"]["spec"]
+    assert pinned["nodeSelector"] == {"doks.digitalocean.com/node-pool": "worker-pool"}
+    default = cloudrun.build_worker_job(
+        cloudrun.RunSpec(run_id="a", image="i", target="t", goal="g")
+    )["spec"]["template"]["spec"]
+    assert "nodeSelector" not in default          # None-safe: unset => schedulable on any pool
+
+
 def test_worker_pod_has_emptydir_scratch_with_a_size_limit():
     spec = cloudrun.RunSpec(run_id="a", image="i", target="t", goal="g", scratch_size="3Gi")
     pod = cloudrun.build_worker_job(spec)["spec"]["template"]["spec"]

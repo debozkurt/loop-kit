@@ -28,17 +28,17 @@ EXPECTED: dict[str, list[str]] = {
     "cloud run": [
         "adapter", "allow_fleet_fallback", "as_submitter", "context", "env_name", "evolve",
         "from_env", "from_issues", "generations", "goal", "image", "in_cluster", "keep",
-        "kubeconfig", "label", "name", "population", "provider", "skills_branch", "skills_repo",
-        "target", "workers", "yes",
+        "kubeconfig", "label", "name", "node_pool", "population", "provider", "skills_branch",
+        "skills_repo", "target", "workers", "yes",
     ],
     "cloud schedule": [
         "adapter", "allow_fleet_fallback", "as_submitter", "context", "cron", "env_name",
-        "from_issues", "goal", "image", "kubeconfig", "label", "name", "provider", "target",
-        "workers", "yes",
+        "from_issues", "goal", "image", "in_cluster", "kubeconfig", "label", "name", "provider",
+        "target", "workers", "yes",
     ],
-    "cloud schedules": ["kubeconfig"],
+    "cloud schedules": ["in_cluster", "kubeconfig"],
     "cloud status": ["kubeconfig", "run"],
-    "cloud unschedule": ["context", "kubeconfig", "name", "yes"],
+    "cloud unschedule": ["context", "in_cluster", "kubeconfig", "name", "yes"],
     "cloud webhook": [
         "adapter", "allow_fleet_fallback", "as_submitter", "context", "env_name", "host", "image",
         "label", "port", "provider", "redis_url", "secret", "workers",

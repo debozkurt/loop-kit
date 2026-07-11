@@ -44,6 +44,20 @@ Each phase is built + unit-tested token-free; the live column is what still need
 
 ## Recent work (newest first — priming only; full history in `git log`)
 
+- **2026-07-11 — the ops pod + deploy-on-merge CI/CD (always-on in-cluster control surface).** A
+  persistent, single-replica `loopkit-ops` Deployment (`k8s/cloud/ops/`) you `kubectl exec` into to
+  drive `loopkit cloud … --in-cluster` — launch fleets, sweep issues, manage CronJobs — with no laptop
+  kubeconfig and no public endpoint (the interactive sibling of the webhook listener; same
+  `loopkit-control` SA, no LoadBalancer). Runs the loopkit image kept alive with `sleep infinity`;
+  creds via a `loopkit-ops` Secret (`envFrom`), so its `--from-env` runs spend the subscription token.
+  Enabling changes: (1) `20-rbac.yaml` — added `cronjobs` to the `loopkit-control` `batch` rule so the
+  pod can create schedules in-cluster; (2) `cloud schedule/schedules/unschedule` now thread
+  `--in-cluster` (through `create/delete/list_schedule` → `current_context`/`api_client`), so schedules
+  can be created from the pod, not just a laptop; (3) new `.github/workflows/deploy-cloud.yml` —
+  deploy-on-merge CD: fires via `workflow_run` **after** `worker-image` builds on `main`, rolls the ops
+  pod to the immutable `sha-<commit>` tag (context-pinned, `set image` + `rollout status`), a clean
+  no-op until `DIGITALOCEAN_ACCESS_TOKEN` is set; (4) `Makefile` `cloud-ops`/`cloud-ops-shell` targets;
+  (5) ecosystem-doc "ops pod" section. +1 schedule in-cluster test; CLI-surface snapshot updated.
 - **2026-07-11 — subscription path unblocked for the cloud fleet (first DOKS deploy prep).** Two seams
   stood between the Claude Code **subscription** and a `--adapter claude-code` cloud run, both fixed:
   (1) the worker `Dockerfile` now ships the `claude` CLI (Node + `@anthropic-ai/claude-code`) — the
@@ -54,8 +68,8 @@ Each phase is built + unit-tested token-free; the live column is what still need
   (`⋃ ADAPTER_KEYS ∪ GIT_ENV`) so it can't drift again; `project()` still narrows per-adapter downstream.
   +2 regression tests (`test_creds.py`). The OAuth token still arrives only at run time via the per-run
   Secret (`envFrom`), never baked into the image. **Next: the actual first DOKS apply** — `cloud
-  bootstrap` → `cloud run --from-issues --adapter claude-code --from-env` against
-  `do-nyc1-metallabs-k8s/default` (context pinned via `LOOPKIT_CLOUD_CONTEXT`), image built by the
+  bootstrap` → `cloud run --from-issues --adapter claude-code --from-env` against your DOKS context
+  (pinned via `LOOPKIT_CLOUD_CONTEXT`; real cluster/context names live in private config, not this repo), image built by the
   `worker-image` workflow on a `v*` tag. This is the first live cluster apply — expect to debug
   image-pull (make the GHCR package public or seed a `ghcr-pull` secret per run-ns) and the egress
   NetworkPolicy on the first run. Security E (Redis AUTH) remains the tracked no-cluster code task.

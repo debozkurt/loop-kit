@@ -38,7 +38,8 @@ CLOUD_KUBECONFIG := $(CURDIR)/.kube/loopkit-cloud.yaml
 CLOUD_ENV         = KUBECONFIG=$(CLOUD_KUBECONFIG) LOOPKIT_CLOUD_CONTEXT=$(CLOUD_CONTEXT)
 
 .PHONY: fleet-up fleet-down fleet-nodes tilt-up tilt-down fleet-run fleet-evolve \
-        cloud-provision cloud-kubeconfig cloud-context cloud-doctor cloud-bootstrap cloud-webhook test demo help
+        cloud-provision cloud-kubeconfig cloud-context cloud-doctor cloud-bootstrap cloud-webhook \
+        cloud-ops cloud-ops-shell test demo help
 
 help:
 	@grep -E '^[a-zA-Z_-]+:.*?# ' $(MAKEFILE_LIST) | sort | \
@@ -107,6 +108,18 @@ cloud-webhook: # apply the opt-in webhook listener (Deployment + paid LoadBalanc
 	@echo "Pre-req: create the loopkit-webhook Secret (see k8s/cloud/webhook/secret.example.yaml)."
 	@KUBECONFIG=$(CLOUD_KUBECONFIG) kubectl --context=$(CLOUD_CONTEXT) \
 	  apply -f k8s/cloud/webhook/deployment.yaml -f k8s/cloud/webhook/service.yaml
+
+# The always-on ops/control pod — exec in to drive `loopkit cloud ... --in-cluster` (no LoadBalancer,
+# no public endpoint). Explicit --context= per the global kubectl-safety rule. Needs the loopkit-ops
+# Secret (never the placeholder secret.example.yaml). Replace OWNER in the Deployment image first.
+cloud-ops: # apply the always-on ops pod (exec in to launch fleets/schedules); needs loopkit-ops Secret
+	@echo "Pre-req: create the loopkit-ops Secret (see k8s/cloud/ops/secret.example.yaml)."
+	@KUBECONFIG=$(CLOUD_KUBECONFIG) kubectl --context=$(CLOUD_CONTEXT) \
+	  apply -f k8s/cloud/ops/deployment.yaml
+
+cloud-ops-shell: # open an interactive shell in the ops pod
+	@KUBECONFIG=$(CLOUD_KUBECONFIG) kubectl --context=$(CLOUD_CONTEXT) -n loopkit-system \
+	  exec -it deploy/loopkit-ops -- bash
 
 test: # run the unit suite (fakeredis + MockAgent — no cluster, no tokens)
 	@.venv/bin/python -m pytest -q

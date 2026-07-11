@@ -211,6 +211,8 @@ def cloud_run(
         keep: int = typer.Option(2, "--keep", "-k"),
         image: str | None = typer.Option(None, "--image", envvar="LOOPKIT_WORKER_IMAGE",
                                          help="Worker image (ghcr.io/<owner>/loopkit-worker:<tag>)."),
+        node_pool: str | None = typer.Option(None, "--node-pool", envvar="LOOPKIT_NODE_POOL",
+                                             help="Pin worker/coordinator pods to a DOKS node pool (nodeSelector)."),
         skills_repo: str | None = typer.Option(None, "--skills-repo", envvar="LOOPKIT_SKILLS_REPO",
                                                help="loopkit-skills git repo for the cross-run flywheel (Phase 5b)."),
         skills_branch: str = typer.Option("main", "--skills-branch",
@@ -251,7 +253,8 @@ def cloud_run(
             goal=goal, from_issues=from_issues, label=label, provider=provider,
             mode="evolve" if evolve else "fanout",
             generations=generations, population=population, keep=keep, env_name=env_name,
-            submitter=submitter, skills_repo=skills_repo, skills_branch=skills_branch)
+            submitter=submitter, skills_repo=skills_repo, skills_branch=skills_branch,
+            node_pool=node_pool)
     except ValueError as exc:
         fail("run", escape(str(exc)))
     kc = kc_str(kubeconfig)
@@ -363,6 +366,8 @@ def cloud_schedule(
                                                   help="Permit the shared 'fleet' key (cron is operator-authored)."),
         context: str | None = typer.Option(None, "--context", envvar="LOOPKIT_CLOUD_CONTEXT"),
         kubeconfig: Path | None = typer.Option(None, "--kubeconfig", envvar="KUBECONFIG"),
+        in_cluster: bool = typer.Option(False, "--in-cluster",
+                                        help="Create from inside the cluster (ops pod SA), not a kubeconfig."),
         yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt.")) -> None:
     """Create a CronJob that fires `loopkit cloud run --in-cluster` on a schedule (guarded).
 
@@ -384,25 +389,28 @@ def cloud_schedule(
             allow_fleet_fallback=allow_fleet_fallback)
     except ValueError as exc:
         fail("schedule", escape(str(exc)))
-    current = guard_context(kubeconfig, context)
+    current = guard_context(kubeconfig, context, in_cluster=in_cluster)
     work = "issues" + (f" (label {label})" if label else "") if from_issues else "fixed goal"
     console.print(Panel.fit(
         f"schedule [bold]{spec.name}[/] · cron \"{cron}\" → loopkit-system\n"
         f"target {target} · {work} · adapter {adapter} · {workers} worker(s)\n"
         f"context [bold]{current}[/] · image {image}",
         title="loopkit cloud schedule"))
-    confirm_or_abort(f"Create schedule '{spec.name}' on '{current}'?", yes=yes)
-    created = triggers.create_schedule(spec, expected=context, kubeconfig=kc_str(kubeconfig))
+    confirm_or_abort(f"Create schedule '{spec.name}' on '{current}'?", yes=yes, in_cluster=in_cluster)
+    created = triggers.create_schedule(spec, expected=context, kubeconfig=kc_str(kubeconfig),
+                                       in_cluster=in_cluster)
     console.print(f"[green]scheduled[/] {created} (\"{cron}\") · `loopkit cloud schedules`")
 
 
 @guarded_command("schedules")
 def cloud_schedules(
-        kubeconfig: Path | None = typer.Option(None, "--kubeconfig", envvar="KUBECONFIG")) -> None:
+        kubeconfig: Path | None = typer.Option(None, "--kubeconfig", envvar="KUBECONFIG"),
+        in_cluster: bool = typer.Option(False, "--in-cluster",
+                                        help="List from inside the cluster (ops pod SA), not a kubeconfig.")) -> None:
     """List loopkit CronJobs in loopkit-system (read-only)."""
     _require_cloud_extra()
     from ..extensions import triggers
-    schedules = triggers.list_schedules(kubeconfig=kc_str(kubeconfig))
+    schedules = triggers.list_schedules(kubeconfig=kc_str(kubeconfig), in_cluster=in_cluster)
     if not schedules:
         console.print("[dim]no schedules[/]")
         return
@@ -420,13 +428,16 @@ def cloud_unschedule(
         name: str = typer.Argument(..., help="Schedule name to delete."),
         context: str | None = typer.Option(None, "--context", envvar="LOOPKIT_CLOUD_CONTEXT"),
         kubeconfig: Path | None = typer.Option(None, "--kubeconfig", envvar="KUBECONFIG"),
+        in_cluster: bool = typer.Option(False, "--in-cluster",
+                                        help="Delete from inside the cluster (ops pod SA), not a kubeconfig."),
         yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt.")) -> None:
     """Delete a CronJob by name — guarded by the context pin."""
     _require_cloud_extra()
     from ..extensions import triggers
-    current = guard_context(kubeconfig, context)
-    confirm_or_abort(f"Delete schedule '{name}' on '{current}'?", yes=yes)
-    removed = triggers.delete_schedule(name, expected=context, kubeconfig=kc_str(kubeconfig))
+    current = guard_context(kubeconfig, context, in_cluster=in_cluster)
+    confirm_or_abort(f"Delete schedule '{name}' on '{current}'?", yes=yes, in_cluster=in_cluster)
+    removed = triggers.delete_schedule(name, expected=context, kubeconfig=kc_str(kubeconfig),
+                                       in_cluster=in_cluster)
     console.print(f"[green]unscheduled[/] {removed}")
 
 

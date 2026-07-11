@@ -508,6 +508,20 @@ def test_create_schedule_refuses_wrong_context_before_applying(pinned):
     assert recorded == []                                 # guard ran first — nothing applied
 
 
+def test_create_schedule_threads_in_cluster_to_the_guard(monkeypatch):
+    # The ops pod creates schedules from *inside* the cluster: --in-cluster must reach the context
+    # lookup so the guard authenticates via the pod ServiceAccount (in-cluster) not a kubeconfig.
+    seen: dict = {}
+    monkeypatch.setattr(cloud, "current_context",
+                        lambda kubeconfig=None, in_cluster=False: (seen.update(in_cluster=in_cluster) or PROD))
+    spec = triggers.ScheduleSpec(name="nightly", schedule="0 9 * * *", target="t", image="i",
+                                 from_issues=True)
+    recorded: list[dict] = []
+    triggers.create_schedule(spec, expected=PROD, in_cluster=True, applier=recorded.extend)
+    assert seen == {"in_cluster": True}                   # the guard ran in in-cluster mode
+    assert [o["kind"] for o in recorded] == ["CronJob"]
+
+
 def test_delete_schedule_guard_first(pinned):
     deleted: list[str] = []
     name = triggers.delete_schedule("Nightly!", expected=pinned, deleter=deleted.append)

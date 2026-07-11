@@ -33,9 +33,11 @@ rules:
   - apiGroups: [""]
     resources: ["namespaces"]
     verbs: ["create", "get", "list", "watch", "delete"]
-  # The run's workload: coordinator + worker Jobs (and their pods, for logs/status).
+  # The run's workload: coordinator + worker Jobs (and their pods, for logs/status). CronJobs too,
+  # so an in-cluster control pod (the ops pod / webhook listener) can create/list/delete schedules
+  # via `loopkit cloud schedule --in-cluster` — the CronJob itself then fires `cloud run --in-cluster`.
   - apiGroups: ["batch"]
-    resources: ["jobs"]
+    resources: ["jobs", "cronjobs"]
     verbs: ["create", "get", "list", "watch", "delete"]
   - apiGroups: [""]
     resources: ["pods"]
