@@ -36,8 +36,9 @@ to make that molder good and consistent** by shipping three things:
    verification, worktree isolation, the per-issue instance skeleton).
 2. **A molding playbook** — a decision guide the copilot reads: how to assemble the blocks for *this*
    repo/issue, and when to reach for each feature.
-3. **Two small code primitives** that are only trustworthy as code, not prose — `loopkit detect`
-   (deterministic introspection) and `loopkit synth-gate` (propose an oracle → **fail-first verify** it).
+3. **Three small code primitives** that are only trustworthy as code, not prose — `loopkit detect`
+   (deterministic introspection), `loopkit synth-gate` (propose an oracle → **fail-first verify** it), and
+   `loopkit route` (measured `pass^k` → single-run-vs-`evolve` decision).
 
 The copilot keeps the judgment; loopkit supplies the determinism, verification, and provenance the
 judgment can't self-supply. The same kit works whether the molder is an interactive copilot **or** an
@@ -90,7 +91,7 @@ copilot's judgment. loopkit gains only:
 
 - `examples/molding/` — the generalized, repo-agnostic building blocks.
 - a `docs/` **playbook** — the recipe + the feature-routing decision guide.
-- two small, opt-in CLI primitives — `detect` and `synth-gate`.
+- three small, opt-in CLI primitives — `detect`, `synth-gate`, and `route`.
 
 No new heavy dependency, no orchestration DSL, no first-class judge/debate framework. This is loopkit's
 own **extend-at-the-seams** invariant applied to configuration: ship seams and verified primitives, let
@@ -229,15 +230,24 @@ Each layer is independently shippable and review-gated. Build in order; do not f
    feedback loop the skill routes through — `extensions/route.py` (stdlib, reuses `measure`'s estimators)
    + the CLI command (`--from-report` for the free path) + `demo 27` + `tests/test_route.py` (21 tests,
    no tokens). Advisory: it prints the strategy + exact command, never launching an evolve itself.
-5. **(later) the unattended molding step** — bake the kit into a CI/fleet pre-run so a triggered run
-   molds itself: the spacer `sequencer.py` + `ledger2issues.py`, generalized. This is the no-human tier
-   closing the configuration gap end to end.
+5. **(later, and gated on need) the unattended molding step** — bake the kit into a CI/fleet pre-run so a
+   triggered run molds itself: the spacer `sequencer.py` + `ledger2issues.py`, generalized. This is the
+   no-human tier closing the configuration gap end to end. **Its value is concentrated, not general:** it
+   pays off for autonomous *batch* remediation (many heterogeneous findings, no copilot per finding);
+   for everyday "one repo, issues → draft PRs" the CI tier (Phase 5c) already suffices with a standing
+   config + the repo's own gate, so the per-issue oracle synthesis is marginal there. **The crux** is that
+   L5 must *propose* the oracle (generation), not just verify it — the judgment part the kit leaves to the
+   molder; fail-first can't tell "fails right" from "fails broken" without a reference `--fix` a novel
+   issue lacks, so the coverage-tier→typed-DoD table must carry the proposal (mechanical), with an LLM
+   proposer only as the *triggering agent's* judgment. Build it **only if batch-remediation is a real
+   target**, and dogfood Layers 1–4 end to end on a real repo first (validate they compose; surface the
+   proposal crux). See [`part-iv-resume.md`](part-iv-resume.md) *Next step* for the full sequencing.
 
 ## What this is NOT (scope guards)
 
 - Not a `loopkit onboard` / `loopkit plan` monolith. The earlier two-verb sketch is **retired** by the
   copilot-molds-with-a-kit reframe — molding *orchestration* is the copilot + playbook, and the surviving
-  loopkit surface is the `detect` + `synth-gate` primitives.
+  loopkit surface is the `detect` + `synth-gate` + `route` primitives.
 - Not a general multi-agent orchestration framework or plugin DSL (simplicity is the feature).
 - Not a replacement for human review of the resulting PR/MR — the loop still opens draft PRs a human
   merges.
@@ -248,9 +258,9 @@ Each layer is independently shippable and review-gated. Build in order; do not f
   (versioned with the code, ships with the repo, the newcomer on-ramp); global availability via a
   symlink into `~/.claude/skills/`, not a divergent second copy. Distinct from loopkit's runtime skill
   flywheel — the README must say so. A `loopkit demo`/`learn` scenario can follow so `demo` keeps pace.
-- **`detect` and `synth-gate` are extensions**, exposed as CLI commands with a lazy import (the `measure`
-  pattern), so the core keeps no runtime dependency on `extensions/` and `pip install loopkit` pulls
-  nothing extra. Each is a self-contained, independently reviewable file with its own tests + demo lab.
+- **`detect`, `synth-gate`, and `route` are extensions**, exposed as CLI commands with a lazy import (the
+  `measure` pattern), so the core keeps no runtime dependency on `extensions/` and `pip install loopkit`
+  pulls nothing extra. Each is a self-contained, independently reviewable file with its own tests + demo lab.
   (`synth-gate` still *reuses* the core gate-running machinery + the `--validate` preflight seam; it does
   not live in the core.)
 - **`detect` proposes, it does not pre-empt:** it **prints** a proposed `loopkit.toml` by default (the

@@ -97,17 +97,43 @@ the judgment can't self-supply.**
 
 ## Next step
 
-**Layer 5 — the unattended molding step (the last layer).** Bake the kit into a CI/fleet pre-run so a
-*triggered* run molds itself end to end: on an incoming issue, run `detect` → assemble the config,
-classify the goal into a coverage tier → propose the held-out oracle, `synth-gate` it (fail-first
-**mandatory** for the attacker-shaped goal), `measure` a representative task → `route` single-vs-evolve,
-then run — all with no human in the loop, bounded by the standing guardrails (protected-path guard, never
-`main`, budget ceiling, keyless executor). This is where Parts III and IV meet: it makes the CI/fleet
-tiers self-configuring. Generalize the spacer `sequencer.py` + `ledger2issues.py` (the hand-built proof).
-The security boundary is load-bearing here — a synthesized oracle/config/checklist derived from an
-untrusted issue body must never be auto-trusted (same discipline as the flywheel's poisoning guards).
-Build it as the connective tissue over the four primitives now in place (L1 skill, L2 synth-gate, L3
-detect, L4 route), not a new monolith.
+The four **code primitives are in place** (L1 skill · L2 synth-gate · L3 detect · L4 route). The honest
+question now is *not* "build Layer 5" reflexively — it is **where the remaining value is**, because
+Layer 5's payoff is real but **concentrated**, and two cheaper moves de-risk it.
+
+**Do these two first (higher leverage than L5):**
+
+1. **Dogfood Layers 1–4 end to end on a real external repo.** They have unit tests but have never been
+   exercised as an *integrated* flow (`detect` → author the oracle → `synth-gate` → `measure` → `route`)
+   against a repo that isn't the bundled demo. This validates they *compose*, and it surfaces exactly
+   where the oracle-*proposal* step breaks — which is L5's crux (see below). Stacking L5 on unexercised
+   primitives risks compounding a weak link.
+2. **A `pytest` CI lane.** The repo has none — `worker-image.yml` only proves the image builds,
+   `loopkit.yml` only fires on labelled issues, so the ~420-test suite is a **local-only gate** (green CI
+   ≠ tests ran on GitHub). Small, protects everything else, highest immediate ROI.
+
+**Then Layer 5 — the unattended molding step — but only if autonomous *batch* remediation is a real
+target.** Bake the kit into a CI/fleet pre-run so a *triggered* run molds itself end to end (`detect` →
+config, tier-classify → propose the oracle, `synth-gate` it [fail-first **mandatory** for the
+attacker-shaped goal], `measure` → `route`, then run), bounded by the standing guardrails (protected-path
+guard, never `main`, budget ceiling, keyless executor). Where Parts III and IV meet; the spacer
+`sequencer.py`/`ledger2issues.py` is the hand-built proof.
+
+- **Where its value actually is:** the *batch-remediation* case — many heterogeneous findings, **no
+  copilot per finding** — where a per-finding held-out oracle must be synthesized at scale. For everyday
+  "one repo, issues → draft PRs", the **CI tier already does that today** with a standing `loopkit.toml`
+  and the repo's own suite as the gate; the per-issue oracle synthesis is marginal there. So L5 is a
+  *batch* feature, not a general one — build it only if that's the goal.
+- **The crux / risk:** L5 must **propose** the oracle (generation), not just verify it — and that is the
+  judgment part the kit deliberately leaves to the molder. `synth-gate` blesses a fail-first oracle, but
+  fail-first can't tell "fails for the right reason" from "fails because broken" without a reference
+  `--fix`, which a novel issue lacks. So the coverage-tier→typed-DoD table must carry the proposal
+  (mechanical), with an LLM proposer only as the *triggering agent's* judgment (consistent with "the
+  molder is the triggering agent") — never a rule pretending to be judgment.
+- **"No human" is bounded:** unattended ≠ blind trust. It means the mechanical molding runs without a
+  human while the **guardrails do the containing**; L5 should emit a *reviewable* molded instance under
+  the full envelope, not a fire-and-forget run. Build it as connective tissue over the four primitives,
+  **not a new monolith**.
 
 ## Sharp edges to carry
 
@@ -121,7 +147,10 @@ detect, L4 route), not a new monolith.
   that's just "an LLM writes your X" belongs in the skill, not in code.
 - **`examples/ci/` is drift-guarded** (`test_ci` byte-equality) — don't edit those templates casually.
 - **Keep it killer, not bloated** (the roadmap invariant): resist growing a general config-generation
-  framework. The kit is a skill + templates + two small extensions.
+  framework. The kit is a skill + templates + three small extensions (`synth_gate`, `detect`, `route`).
+- **Layer 5 is a *batch* feature, gated on need.** Its value concentrates in autonomous batch remediation
+  (no copilot per finding); for everyday issue→PR the CI tier already suffices. Don't build it on faith —
+  dogfood L1–4 end to end first, and only build L5 if batch-remediation is a real target (see Next step).
 
 ## Relationship to Part III
 
