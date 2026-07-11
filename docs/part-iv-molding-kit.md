@@ -1,9 +1,11 @@
 # Part IV — Molding loopkit to a repo (the molding kit)
 
-> **Status:** 2026-07-10. **Layers 1–2 BUILT** — Layer 1 = `examples/molding/` (the `loopkit-mold`
+> **Status:** 2026-07-10. **Layers 1–3 BUILT** — Layer 1 = `examples/molding/` (the `loopkit-mold`
 > skill + templates, zero new code paths); Layer 2 = `loopkit synth-gate` (fail-first oracle
-> verification — `extensions/synth_gate.py` + the CLI command + demo 25 + tests). Layers 3–5 are
-> design. This doc argues *what to build, why, and in what order*.
+> verification — `extensions/synth_gate.py` + the CLI command + demo 25 + tests); Layer 3 =
+> `loopkit detect` (deterministic repo introspection → a proposed `loopkit.toml` —
+> `extensions/detect.py` + the CLI command + demo 26 + tests). Layers 4–5 are design. This doc argues
+> *what to build, why, and in what order*.
 > It deliberately **supersedes** the broad "auto-molding harness / self-configuring monolith" sketch that
 > preceded it — see [Why not a monolith](#why-not-a-monolith-the-design-boundary). The design decisions
 > below were dialled in with the maintainer; the open questions at the end are the ones still live.
@@ -150,12 +152,19 @@ The skill's content:
 
 ### 3. Code primitives
 
-- **`loopkit detect`** — deterministic repo introspection (hybrid per the maintainer decision):
-  file-marker heuristics decide the *mechanical, safety-critical* config (`pyproject.toml`/`tox.ini` →
-  pytest; `package.json` → the declared test script; `go.mod` → `go test`; CI/chart/migration/lockfile
-  paths → protected-path candidates; default branch; which adapter is on `PATH`), and prints a
-  **proposed** `loopkit.toml` for the copilot to refine. The copilot (not `detect`) writes the
-  `PROMPT.md` guidance prose. Deterministic core ⇒ testable at zero tokens.
+- **`loopkit detect`** ✅ **BUILT** — deterministic repo introspection (hybrid per the maintainer
+  decision): file-marker heuristics decide the *mechanical, safety-critical* config
+  (`pyproject.toml`/`pytest.ini`/`tox.ini` → pytest; a real `package.json` `scripts.test` → `<pm> test`;
+  `go.mod` → `go test ./...`; `Cargo.toml` → `cargo test`; a `Makefile` `test:` target → `make test`;
+  the test dir + CI/chart/migration/lockfile paths → protected-path candidates, *existing only*;
+  `origin/HEAD` → the default branch; `claude`/`codex` on `PATH` → the adapter), and **prints** a
+  **proposed** `loopkit.toml` for the molder to refine (`--write` opt-in, never overwriting an existing
+  config without `--force`). Every fact carries its **evidence** + a confidence, so the proposal is
+  auditable. It deliberately leaves the two things no marker can read — the **goal** and the **held-out
+  acceptance oracle** (author + `synth-gate` it) — as annotated placeholders; the copilot (not `detect`)
+  writes those and the `PROMPT.md` prose. Lives in `extensions/detect.py` (stdlib-only, no core/executor
+  coupling — the most standalone primitive); `loopkit demo 26` is the runnable lab. Deterministic core ⇒
+  testable at zero tokens.
 - **`loopkit synth-gate`** ✅ **BUILT** — take a proposed acceptance oracle, run it against the current
   tree, assert it **FAILS** (fail-first), and only then bless it as trustworthy. With a reference `--fix`
   it also applies the fix to an isolated copy and asserts the oracle **PASSES** — the gold fail→pass
@@ -196,8 +205,11 @@ Each layer is independently shippable and review-gated. Build in order; do not f
    `extensions/synth_gate.py` + the CLI command + `demo 25` + `tests/test_synth_gate.py` (16 tests, no
    tokens). Reuses the core `executor.run_gate` so a blessed oracle behaves identically when the loop
    later runs it.
-3. **`loopkit detect`** — deterministic introspection, so neither a copilot nor an unattended agent
-   hand-guesses the safety-critical config.
+3. **✅ BUILT — `loopkit detect`** — deterministic introspection, so neither a copilot nor an unattended
+   agent hand-guesses the safety-critical config. `extensions/detect.py` (stdlib-only) + the CLI command
+   + `demo 26` + `tests/test_detect.py` (30 tests, no tokens). Reads the test runner, protected-path
+   candidates, default branch, and adapter off file markers → a proposed `loopkit.toml`; leaves the goal
+   + held-out oracle as placeholders (the judgment stays the molder's).
 4. **Reliability-gated routing** — wire `measure` → `evolve` escalation into the playbook + a thin helper.
 5. **(later) the unattended molding step** — bake the kit into a CI/fleet pre-run so a triggered run
    molds itself: the spacer `sequencer.py` + `ledger2issues.py`, generalized. This is the no-human tier

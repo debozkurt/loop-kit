@@ -44,6 +44,7 @@ EXPECTED: dict[str, list[str]] = {
         "label", "port", "provider", "redis_url", "secret", "workers",
     ],
     "demo": ["chapter", "live"],
+    "detect": ["force", "out", "repo", "write"],
     "doctor": ["config", "gate"],
     "executor": ["socket_path"],
     "fleet evolve": ["drain_workers", "generations", "keep", "population", "redis_namespace", "redis_url"],
