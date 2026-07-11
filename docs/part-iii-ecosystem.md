@@ -106,6 +106,87 @@ prefix: the loop only revises `loopkit/*` branches — its own PRs, never a huma
 loopkit credential hygiene from Phase 5a still applies — `glab`/git get the token re-injected into
 loopkit's *own* forge subprocess, while the agent's shell is scrubbed.)
 
+## The cloud fleet tier in depth
+
+Where the CI tier runs **one** loop per issue in a throwaway runner, the cloud fleet runs **many
+concurrently** — the same loop core, fanned out across Kubernetes Jobs. `loopkit cloud run` (or a
+`CronJob`, or the webhook listener) stamps out a **per-run namespace** holding two Jobs and a queue:
+
+```mermaid
+%%{init: {'theme':'base','themeVariables':{'background':'#1b1b1b','primaryColor':'#2b2b2b','primaryTextColor':'#e6e6e6','primaryBorderColor':'#5a5a5a','lineColor':'#8a8a8a','fontSize':'13px'}}}%%
+flowchart LR
+  T["trigger<br/>CLI · CronJob · webhook"] --> C["coordinator Job · 1 pod<br/>enqueue · collect · drain"]
+  C -- "1 task / open issue<br/>(or N × --goal)" --> Q[("Redis queue<br/>per-run namespace")]
+  Q --> W1["worker pod 1<br/>BRPOP · clone · loop"]
+  Q --> W2["worker pod 2<br/>BRPOP · clone · loop"]
+  Q --> WN["worker pod N<br/>parallelism = --workers"]
+  W1 --> P1(["PR · Closes #a"])
+  W2 --> P2(["PR · Closes #b"])
+  WN --> PN(["PR · Closes #c"])
+  C -. "N sentinels → pods exit 0" .-> Q
+```
+
+The fan-out is the Kubernetes **work-queue pattern**: the **worker Job** sets `parallelism: N` with
+`completions` unset, so N pods run at once, each looping `BRPOP → clone the target → run_loop (commit
+every tick, both gates) → push branch + open PR`. The **coordinator Job** (one pod) enqueues the work —
+one task per open issue with `--from-issues`, or N independent attempts at one `--goal` — collects the
+results, then pushes **N sentinels** so every ephemeral worker pops one and exits 0. Fan-out width is
+just `--workers N` (or `--population` under `--evolve`, the generational-search mode). One issue lands
+one branch → one PR (`Closes #N`); the loop proposes, a human merges — same as the CI tier.
+
+Everything the CI tier delegated to the forge, this tier hand-builds *around each run*: its own
+namespace, ServiceAccount + RBAC, ResourceQuota / LimitRange, and a default-deny NetworkPolicy — plus
+the **two-container worker pod** (loopkit-core holds the key and does the LLM call + git; a keyless
+executor sidecar runs the agent's tool calls and the held-out gate in a different uid / PID namespace).
+See [`part-iii-agent-isolation.md`](part-iii-agent-isolation.md) for that split and
+[`architecture/02-cloud-architecture.md`](architecture/02-cloud-architecture.md) for the full topology.
+
+## The ops pod: driving the cluster from inside
+
+The fleet is ephemeral, but it's convenient to have **one always-on pod** you exec into to launch
+runs, sweep issues, and manage schedules — a control surface that lives *in* the cluster, so no laptop
+kubeconfig and no public endpoint sit in the loop. That's the **ops pod** (`k8s/cloud/ops/`): a
+single-replica Deployment running the loopkit image as `loopkit-control` (the one SA allowed to create
+run namespaces / Jobs / Secrets / CronJobs), kept alive with `sleep infinity` so you can exec in. It
+carries the agent + git creds via a `loopkit-ops` Secret, and every `loopkit cloud … --in-cluster`
+it runs authenticates through its ServiceAccount.
+
+```bash
+# one-time: create the creds Secret, then deploy the pod (after replacing OWNER in the manifest)
+kubectl -n loopkit-system create secret generic loopkit-ops \
+  --from-literal=CLAUDE_CODE_OAUTH_TOKEN="$(claude setup-token)" \
+  --from-literal=GITHUB_TOKEN="$GITHUB_TOKEN"
+kubectl apply -f k8s/cloud/ops/deployment.yaml --context=<your-doks-context>
+
+# then drive the fleet from inside — issue automations on demand:
+kubectl -n loopkit-system exec -it deploy/loopkit-ops -- \
+  loopkit cloud run --in-cluster --from-issues --label loopkit --adapter claude-code --from-env -w 4
+
+# set up a recurring sweep (a CronJob, created in-cluster as loopkit-control):
+kubectl -n loopkit-system exec -it deploy/loopkit-ops -- \
+  loopkit cloud schedule nightly --in-cluster --target https://github.com/<owner>/<repo> \
+    --cron "0 9 * * *" --from-issues --label loopkit --adapter claude-code -w 4 -y
+
+kubectl -n loopkit-system exec -it deploy/loopkit-ops -- bash   # or just get a shell
+```
+
+`--in-cluster` is what makes this work off a laptop: it authenticates via the pod's SA and pins the
+context to `in-cluster`, so the same context guard that protects a laptop still fails closed here. The
+webhook listener uses the identical pattern; the ops pod is its interactive sibling (no LoadBalancer).
+
+**Pin the fleet to a node pool.** Pass `--node-pool <name>` (or set `$LOOPKIT_NODE_POOL` in the
+`loopkit-ops` Secret) and the worker/coordinator pods get a `doks.digitalocean.com/node-pool`
+nodeSelector — e.g. a dedicated autoscaling worker pool that scales to zero when idle. The pool name
+is runtime config, never committed (same posture as the cluster/context names).
+
+**CI/CD — deploy on merge.** Two workflows keep the ops pod current with `main`:
+`worker-image.yml` builds + pushes the image (multi-arch, GHCR) on every merge and `v*` tag; then
+`deploy-cloud.yml` fires via `workflow_run` *after* that build succeeds and rolls the ops pod to the
+immutable `sha-<commit>` tag (`kubectl set image` + `rollout status`, context pinned). It's a clean
+no-op until you set the `DIGITALOCEAN_ACCESS_TOKEN` secret, and you can switch it from on-merge to
+manual/release by changing its trigger. So: merge to main → image built → ops pod rolled → next run
+uses the merged code.
+
 ## Triggers as infrastructure (lab: `loopkit demo 20`)
 
 The CI tier delegates the trigger to the forge's CI. The **cloud fleet** tier, by contrast, builds the

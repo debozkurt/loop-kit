@@ -1,0 +1,132 @@
+# loopkit Part III — Continuous deployment to the DOKS ops pod (deploy on merge to main).
+#
+# The worker-image workflow BUILDS the image (on merge to main and on `v*` tags); this workflow
+# DEPLOYS it — it rolls the always-on `loopkit-ops` Deployment (k8s/cloud/ops/) to the freshly-built,
+# SHA-pinned image so the in-cluster control surface always runs the merged code. Ephemeral fleet Jobs
+# pull whatever image the ops pod's `$LOOPKIT_WORKER_IMAGE` points at, so rolling the ops pod updates
+# future runs too.
+#
+# ORDERING: it triggers via `workflow_run` — it fires only AFTER worker-image completes successfully
+# on main, so the image is guaranteed to exist before we roll to it (a plain `push` trigger would race
+# the build). It deploys the immutable `sha-<commit>` tag, not a moving tag, so a deploy is traceable
+# to a commit and re-runnable.
+#
+# SAFETY: this mutates a managed cloud cluster on every merge to main. Per the global kubectl-safety
+# rule it PINS the expected context and refuses any other, passing --context=<expected> explicitly on
+# every mutating call. It is a clean no-op until you opt in by setting the DIGITALOCEAN_ACCESS_TOKEN
+# secret, so merging it changes nothing on its own. To make deploys deliberate instead of on-merge,
+# drop the `workflow_run` trigger and keep `workflow_dispatch` (manual) — or gate on releases.
+#
+# This is a PUBLIC-REPO TEMPLATE: it hardcodes NO cluster names. Every deployer supplies their own
+# cluster via private repo Secrets, so nothing about your infra is committed or logged. The
+# workflow stays an inert no-op until all three are set (token absent → skip; token present but
+# cluster/context unset → fail with a clear message).
+#
+# One-time setup (the real values live only in your repo's private Variables/Secrets, never in git):
+#   1. Add repo SECRETS:  DIGITALOCEAN_ACCESS_TOKEN   (a DO API token with k8s read/write)
+#                         DOKS_CLUSTER                your doctl cluster name    (e.g. my-cluster)
+#                         DOKS_CONTEXT                your expected kube-context (e.g. do-<region>-<cluster>)
+#      Use SECRETS, not Variables: on a PUBLIC repo, Variable values are readable in Settings and —
+#      worse — appear UNMASKED in the world-readable Actions logs. Secrets are masked (***) in logs
+#      and can never be read back in the UI. (Masking is best-effort; private logs are the real fix.)
+#   3. Deploy the ops pod once by hand (k8s/cloud/ops/), then let merges keep it current.
+#   4. (optional) Settings → Environments → production → add "Required reviewers" to gate prod deploys
+#      behind a manual approval (the GitHub analog of a GitLab `when: manual` protected environment).
+name: deploy-cloud
+
+on:
+  workflow_run:
+    workflows: ["worker-image"]   # after the image is built + pushed...
+    types: [completed]
+    branches: ["main"]            # ...on a merge to main
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Image tag to deploy (default: latest)"
+        required: false
+        type: string
+
+# Never let two deploys race the same cluster.
+concurrency:
+  group: deploy-cloud
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    # GitHub Environment — the analog of a GitLab environment. Gives: deployment history in the repo's
+    # Environments tab, environment-scoped secrets, and (if you add "Required reviewers" to this
+    # environment in the UI) a manual approval gate before prod — i.e. `when: manual` on a protected
+    # GitLab deploy. Auto-created on first run with no protection; opt into gating whenever you want.
+    environment: production
+    # workflow_run fires on success AND failure — only deploy when the build actually succeeded.
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    env:
+      DO_TOKEN: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
+      IMAGE: ghcr.io/${{ github.repository_owner }}/loopkit-worker
+      # SECRETS, not vars — on a public repo, variable values are UNMASKED in the (public) run logs,
+      # whereas secret values are auto-masked. No defaults: a public template hardcodes no cluster.
+      CLUSTER: ${{ secrets.DOKS_CLUSTER }}
+      EXPECTED_CONTEXT: ${{ secrets.DOKS_CONTEXT }}
+    steps:
+      # Gate: no token → skip cleanly (inert template). Token present but cluster/context unset →
+      # fail loudly (half-configured), since nothing is hardcoded to fall back to.
+      - name: Preflight config
+        id: gate
+        run: |
+          if [ -z "$DO_TOKEN" ]; then
+            echo "::warning::DIGITALOCEAN_ACCESS_TOKEN not set — skipping (this is an inert template until configured)."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ -z "$CLUSTER" ] || [ -z "$EXPECTED_CONTEXT" ]; then
+            echo "::error::set the DOKS_CLUSTER and DOKS_CONTEXT repo secrets (no cluster names are hardcoded — public template)."
+            exit 1
+          fi
+
+      # Resolve the immutable tag: merge → sha-<7> of the built commit; manual → input or :latest.
+      - name: Resolve image tag
+        if: steps.gate.outputs.skip != 'true'
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_run" ]; then
+            sha="${{ github.event.workflow_run.head_sha }}"
+            echo "value=sha-${sha:0:7}" >> "$GITHUB_OUTPUT"     # matches worker-image's type=sha tag
+          else
+            echo "value=${{ inputs.tag || 'latest' }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install doctl
+        if: steps.gate.outputs.skip != 'true'
+        uses: digitalocean/action-doctl@v2
+        with:
+          token: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
+
+      - name: Fetch kubeconfig + PIN the context
+        if: steps.gate.outputs.skip != 'true'
+        run: |
+          set -euo pipefail
+          doctl kubernetes cluster kubeconfig save "$CLUSTER"
+          current=$(kubectl config current-context)
+          # Global kubectl-safety rule: refuse to mutate anything but the expected cluster.
+          if [ "$current" != "$EXPECTED_CONTEXT" ]; then
+            echo "::error::refusing — active context '$current' != expected '$EXPECTED_CONTEXT'."
+            exit 1
+          fi
+          echo "pinned context: $current"
+
+      - name: Roll the ops pod to ${{ env.IMAGE }}:${{ steps.tag.outputs.value }}
+        if: steps.gate.outputs.skip != 'true'
+        env:
+          TAG: ${{ steps.tag.outputs.value }}
+        run: |
+          set -euo pipefail
+          # Explicit --context= (equals form) on every mutating call — never rely on ambient context.
+          kubectl --context="$EXPECTED_CONTEXT" -n loopkit-system \
+            set image deployment/loopkit-ops "ops=${IMAGE}:${TAG}"
+          kubectl --context="$EXPECTED_CONTEXT" -n loopkit-system \
+            rollout status deployment/loopkit-ops --timeout=180s
+          echo "deployed ${IMAGE}:${TAG} to loopkit-ops on $EXPECTED_CONTEXT"

@@ -768,17 +768,19 @@ class ScheduleSummary:
     last_run: str | None = None
 
 
-def create_schedule(spec: ScheduleSpec, *, expected=None, kubeconfig=None,
+def create_schedule(spec: ScheduleSpec, *, expected=None, kubeconfig=None, in_cluster: bool = False,
                     applier: Callable[[Sequence[dict]], None] | None = None) -> str:
     """Apply the CronJob — **after** the context guard passes. Returns its name.
 
     Like `create_run`, the guard runs first and unconditionally, so a schedule can never be created
-    on the wrong cluster. `applier` records objects in a test; the default creates via the client.
+    on the wrong cluster. `in_cluster=True` authenticates via the pod's ServiceAccount (the ops pod
+    creating schedules from inside) instead of a kubeconfig. `applier` records objects in a test; the
+    default creates via the client.
     """
-    cloud.check_context(cloud.current_context(kubeconfig), expected)   # guard FIRST — fail-closed
+    cloud.check_context(cloud.current_context(kubeconfig, in_cluster=in_cluster), expected)  # guard FIRST
     from .cloudrun import _client_applier                              # reuse the 409-tolerant applier
 
-    apply = applier or _client_applier(kubeconfig)
+    apply = applier or _client_applier(kubeconfig, in_cluster=in_cluster)
     obj = build_cronjob(spec)
     log.info("schedule.create", name=spec.name, schedule=spec.schedule,
              ns=spec.namespace, fromIssues=spec.from_issues)
@@ -788,29 +790,30 @@ def create_schedule(spec: ScheduleSpec, *, expected=None, kubeconfig=None,
 
 
 def delete_schedule(name: str, *, expected=None, kubeconfig=None, namespace: str = SYSTEM_NAMESPACE,
+                    in_cluster: bool = False,
                     deleter: Callable[[str], None] | None = None) -> str:
     """Delete a CronJob by name — guard first. Returns the (sanitized) name."""
-    cloud.check_context(cloud.current_context(kubeconfig), expected)   # guard FIRST
+    cloud.check_context(cloud.current_context(kubeconfig, in_cluster=in_cluster), expected)  # guard FIRST
     safe = sanitize_run_id(name)
-    remove = deleter or _client_cronjob_deleter(kubeconfig, namespace)
+    remove = deleter or _client_cronjob_deleter(kubeconfig, namespace, in_cluster=in_cluster)
     log.info("schedule.delete", name=safe, ns=namespace)
     remove(safe)
     log.info("schedule.deleted", name=safe)
     return safe
 
 
-def list_schedules(*, kubeconfig=None, namespace: str = SYSTEM_NAMESPACE,
+def list_schedules(*, kubeconfig=None, namespace: str = SYSTEM_NAMESPACE, in_cluster: bool = False,
                    lister: Callable[[], list[ScheduleSummary]] | None = None) -> list[ScheduleSummary]:
     """List loopkit CronJobs in `loopkit-system` (read-only — no guard needed)."""
-    fetch = lister or _client_cronjob_lister(kubeconfig, namespace)
+    fetch = lister or _client_cronjob_lister(kubeconfig, namespace, in_cluster=in_cluster)
     return fetch()
 
 
-def _client_cronjob_deleter(kubeconfig, namespace: str) -> Callable[[str], None]:
+def _client_cronjob_deleter(kubeconfig, namespace: str, *, in_cluster: bool = False) -> Callable[[str], None]:
     from kubernetes import client
     from kubernetes.client.exceptions import ApiException
 
-    batch = client.BatchV1Api(cloud.api_client(kubeconfig))
+    batch = client.BatchV1Api(cloud.api_client(kubeconfig, in_cluster=in_cluster))
 
     def remove(name: str) -> None:
         try:
@@ -822,10 +825,10 @@ def _client_cronjob_deleter(kubeconfig, namespace: str) -> Callable[[str], None]
     return remove
 
 
-def _client_cronjob_lister(kubeconfig, namespace: str) -> Callable[[], list[ScheduleSummary]]:
+def _client_cronjob_lister(kubeconfig, namespace: str, *, in_cluster: bool = False) -> Callable[[], list[ScheduleSummary]]:
     from kubernetes import client
 
-    batch = client.BatchV1Api(cloud.api_client(kubeconfig))
+    batch = client.BatchV1Api(cloud.api_client(kubeconfig, in_cluster=in_cluster))
 
     def fetch() -> list[ScheduleSummary]:
         cjs = batch.list_namespaced_cron_job(

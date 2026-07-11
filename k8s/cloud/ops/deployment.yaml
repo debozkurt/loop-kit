@@ -1,0 +1,84 @@
+# The ops pod — an always-on loopkit control surface inside the cluster (Part III; see 02-cloud-architecture.md).
+#
+# Unlike the webhook listener (event-driven, behind a paid LoadBalancer), this is a long-lived pod you
+# EXEC INTO to drive loopkit from *inside* the cluster: launch fleets, sweep issues, create CronJobs,
+# tail logs — no laptop kubeconfig and no public endpoint in the loop. It runs as `loopkit-control`
+# (the only SA that may create run namespaces/Jobs/Secrets/CronJobs, 20-rbac.yaml) and submits
+# in-cluster, so every `loopkit cloud ... --in-cluster` it runs authenticates via its ServiceAccount.
+#
+# This manifest lives in k8s/cloud/ops/ (a subdirectory) ON PURPOSE: `loopkit cloud bootstrap` globs
+# k8s/cloud/*.yaml non-recursively, so it does NOT auto-apply this. Deploy it deliberately, after the
+# loopkit-ops Secret exists (agent + git creds the pod's --from-env runs spend):
+#
+#   kubectl apply -f k8s/cloud/ops/deployment.yaml --context=<your-doks-context>
+#
+# Then drive it:
+#   kubectl -n loopkit-system exec -it deploy/loopkit-ops -- \
+#     loopkit cloud run --in-cluster --from-issues --label loopkit --adapter claude-code --from-env -w 4
+#   kubectl -n loopkit-system exec -it deploy/loopkit-ops -- bash        # interactive shell
+#
+# Requires (set in the loopkit-ops Secret, see secret.example.yaml):
+#   CLAUDE_CODE_OAUTH_TOKEN   the Claude Code subscription token the pod's runs spend (or ANTHROPIC_API_KEY)
+#   GITHUB_TOKEN              clone the target + open PRs
+#   LOOPKIT_WORKER_IMAGE      ghcr.io/<owner>/loopkit-worker:<tag> the fleets it launches use (also below)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: loopkit-ops
+  namespace: loopkit-system
+  labels:
+    app.kubernetes.io/part-of: loopkit
+    app.kubernetes.io/component: ops
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: ops
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/part-of: loopkit
+        app.kubernetes.io/component: ops
+    spec:
+      serviceAccountName: loopkit-control      # may create run namespaces/Jobs/Secrets/CronJobs (20-rbac.yaml)
+      imagePullSecrets:
+        - name: ghcr-pull                       # drop this line if the GHCR package is public
+      # Pin the ops pod to a specific DOKS node pool (optional). Uncomment + set YOUR pool name — keep
+      # the real name OUT of git (patch it in, or use a private overlay), same masking posture as the
+      # cluster/context names. With a single node pool this is a no-op (the pod lands there anyway).
+      # nodeSelector:
+      #   doks.digitalocean.com/node-pool: <your-node-pool>
+      # Hardening: same non-root uid the image bakes (Dockerfile USER 1000); no privilege escalation.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: ops
+          image: ghcr.io/OWNER/loopkit-worker:latest   # replace OWNER (or set via your overlay)
+          # Keep the pod alive as an exec target; loopkit is invoked per `kubectl exec`, not as PID 1.
+          command: ["sleep"]
+          args: ["infinity"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          env:
+            # Pin the in-cluster identity so `--in-cluster` runs pass the context guard (fail-closed).
+            - name: LOOPKIT_CLOUD_CONTEXT
+              value: in-cluster
+            # Default worker image for the fleets this pod launches (so `cloud run` needs no --image).
+            - name: LOOPKIT_WORKER_IMAGE
+              value: ghcr.io/OWNER/loopkit-worker:latest   # replace OWNER — keep in sync with image above
+          envFrom:
+            - secretRef:
+                name: loopkit-ops                # agent + git creds the pod's --from-env runs spend
+          resources:
+            requests:
+              cpu: 25m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi

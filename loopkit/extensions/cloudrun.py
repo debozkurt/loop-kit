@@ -152,6 +152,7 @@ class RunSpec:
     mem_request: str = "512Mi"
     cpu_limit: str = "2"
     mem_limit: str = "2Gi"
+    node_pool: str | None = None                 # pin pods to a DOKS node pool (nodeSelector); None = any node
     namespace_prefix: str = "run"
     fqdn_egress: bool = True                      # stamp a per-run Cilium FQDN egress allowlist (DOKS)
     egress_fqdns: list[str] = field(default_factory=lambda: list(DEFAULT_EGRESS_FQDNS))
@@ -421,6 +422,11 @@ def _pod_spec(spec: RunSpec, *, command: list[str], scratch: bool, creds_secret:
         "volumes": [{"name": "home", "emptyDir": {}},
                     {"name": "tmp", "emptyDir": {}}],
     }
+    if spec.node_pool:
+        # Pin to a DOKS node pool (e.g. an autoscaling worker pool). DOKS labels every node
+        # `doks.digitalocean.com/node-pool: <name>`; the pool name is operator config (passed at run
+        # time / via $LOOPKIT_NODE_POOL), never hardcoded — same masking posture as cluster/context.
+        pod["nodeSelector"] = {"doks.digitalocean.com/node-pool": spec.node_pool}
     if spec.image_pull_secret:
         pod["imagePullSecrets"] = [{"name": spec.image_pull_secret}]
     if scratch:
