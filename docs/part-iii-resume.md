@@ -44,6 +44,21 @@ Each phase is built + unit-tested token-free; the live column is what still need
 
 ## Recent work (newest first — priming only; full history in `git log`)
 
+- **2026-07-11 — subscription path unblocked for the cloud fleet (first DOKS deploy prep).** Two seams
+  stood between the Claude Code **subscription** and a `--adapter claude-code` cloud run, both fixed:
+  (1) the worker `Dockerfile` now ships the `claude` CLI (Node + `@anthropic-ai/claude-code`) — the
+  default adapter shells out to `claude`, so a live image without it fails `claude: not found` in the
+  pod (a CI smoke step now asserts `claude --version` on the built image); (2) `creds.creds_from_env`
+  (the `--from-env` escape hatch) hand-kept a literal allow-list that had drifted from `ADAPTER_KEYS`,
+  silently dropping `CLAUDE_CODE_OAUTH_TOKEN` (and `GITLAB_TOKEN`) — now **derived** from the registry
+  (`⋃ ADAPTER_KEYS ∪ GIT_ENV`) so it can't drift again; `project()` still narrows per-adapter downstream.
+  +2 regression tests (`test_creds.py`). The OAuth token still arrives only at run time via the per-run
+  Secret (`envFrom`), never baked into the image. **Next: the actual first DOKS apply** — `cloud
+  bootstrap` → `cloud run --from-issues --adapter claude-code --from-env` against
+  `do-nyc1-metallabs-k8s/default` (context pinned via `LOOPKIT_CLOUD_CONTEXT`), image built by the
+  `worker-image` workflow on a `v*` tag. This is the first live cluster apply — expect to debug
+  image-pull (make the GHCR package public or seed a `ghcr-pull` secret per run-ns) and the egress
+  NetworkPolicy on the first run. Security E (Redis AUTH) remains the tracked no-cluster code task.
 - **2026-07-10 — Part IV kicked off (molding loopkit to a repo), Layer 1 built.** A parallel product
   direction — a `loopkit-mold` skill + verified building blocks so a copilot molds loopkit per repo/issue
   (config + gates + a fail-first oracle + which features fit), rather than an auto-configurator monolith.

@@ -101,6 +101,23 @@ def test_creds_from_env_keeps_only_the_cred_vars():
     assert creds.creds_from_env(env) == {"ANTHROPIC_API_KEY": "a", "GH_TOKEN": "g"}
 
 
+def test_creds_from_env_carries_the_subscription_oauth_and_gitlab_tokens():
+    # Regression: the allow-list is derived from the adapter-key registry, so newly-added credentials
+    # (CLAUDE_CODE_OAUTH_TOKEN for the subscription path; GITLAB_TOKEN) are forwarded, not dropped by a
+    # stale literal. Without this, --from-env on the cloud fleet silently strips the subscription token.
+    env = {"CLAUDE_CODE_OAUTH_TOKEN": "sk-oauth", "GITLAB_TOKEN": "glpat", "PATH": "/bin"}
+    assert creds.creds_from_env(env) == {"CLAUDE_CODE_OAUTH_TOKEN": "sk-oauth", "GITLAB_TOKEN": "glpat"}
+
+
+def test_decide_from_env_carries_the_subscription_token_for_claude_code():
+    # The real subscription shell: an OAuth token + a git token, NO metered key. Both must survive
+    # --from-env for the claude-code CLI adapter so the cloud pod can run on the Claude Code sub.
+    env = {"CLAUDE_CODE_OAUTH_TOKEN": "sk-oauth", "GITHUB_TOKEN": "ghp_x"}
+    d = creds.decide_run_creds("claude-code", "alice", "prod", from_env=True, env=env)
+    assert d.outcome == "resolved" and d.source == "from-env"
+    assert d.data == {"CLAUDE_CODE_OAUTH_TOKEN": "sk-oauth", "GITHUB_TOKEN": "ghp_x"}
+
+
 def test_decide_mock_needs_no_creds():
     d = creds.decide_run_creds("mock", "alice", "prod", from_env=False, env={})
     assert d.outcome == "resolved" and d.source == "mock" and d.data == {}

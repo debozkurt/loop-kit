@@ -16,6 +16,19 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends git \
  && rm -rf /var/lib/apt/lists/*
 
+# The DEFAULT agent adapter (`claude-code`, see RunSpec.adapter) shells out to the `claude` CLI, so a
+# live worker image must ship it — otherwise `--adapter claude-code` fails with `claude: not found`
+# inside the pod. Node is its runtime; the distro package is ≥18 (claude-code's floor) and builds on
+# both amd64/arm64 without NodeSource. This is what makes the subscription/OAuth path runnable on the
+# cloud fleet (docs/part-iii-ecosystem.md). Mock/claude-api runs don't invoke `claude`, but baking it
+# in keeps the one image valid for every adapter. The OAuth token itself arrives at RUN TIME via the
+# per-run Secret (envFrom CLAUDE_CODE_OAUTH_TOKEN) — never baked into the image.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends nodejs npm \
+ && npm install -g @anthropic-ai/claude-code \
+ && npm cache clean --force \
+ && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /opt/loopkit
 COPY pyproject.toml README.md ./
 COPY loopkit ./loopkit
