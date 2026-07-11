@@ -33,19 +33,28 @@ Work these steps in order. Each cites the kit block that does the deterministic/
 
 ### 1. Detect the repo (deterministic)
 
-Inspect the repo and decide the *mechanical, safety-critical* config — never guess these:
+Decide the *mechanical, safety-critical* config — never guess these. **Run `loopkit detect` first**
+(Part IV Layer 3 — the verified primitive; don't hand-roll this): it reads the markers below off the
+filesystem + git, at zero tokens, and prints a **proposed** `loopkit.toml` with every fact backed by its
+evidence.
 
-| Signal | Read from | Becomes |
+```bash
+loopkit detect <repo>                 # print the proposal (decide nothing)
+loopkit detect <repo> --out profile.json   # + the JSON audit record (for the unattended tier)
+```
+
+| Signal | `detect` reads from | Becomes |
 |---|---|---|
-| Test runner | `pyproject.toml`/`tox.ini` → pytest · `package.json` `scripts.test` → that · `go.mod` → `go test ./...` · `Makefile` → a `test`/`verify` target | `[gate].iteration` |
-| Protected paths | CI files (`.github/`, `.gitlab-ci.yml`), `chart/`/`helm/`, `migrations/`, lockfiles, and **the gate files themselves** | `[safety].protected_paths` |
-| Default branch | `git symbolic-ref refs/remotes/origin/HEAD` (or `git branch`) | `[safety].forbid_branches` includes it; run branch is `loopkit/*` |
+| Test runner | `pyproject.toml`/`pytest.ini`/`tox.ini` → pytest · a real `package.json` `scripts.test` → `<pm> test` · `go.mod` → `go test ./...` · `Cargo.toml` → `cargo test` · a `Makefile` `test:` target → `make test` | `[gate].iteration` |
+| Protected paths | the test dir, CI files (`.github/`, `.gitlab-ci.yml`), `charts/`/`helm/`, `migrations/`, lockfiles — existing candidates only | `[safety].protected_paths` |
+| Default branch | `git symbolic-ref refs/remotes/origin/HEAD` → local `main`/`master` → HEAD | `[safety].forbid_branches` includes it; run branch stays `loopkit/*` |
 | Agent on PATH | `which claude` / `which codex` | `[agent].adapter` |
-| House rules | `CLAUDE.md` / `AGENTS.md` if present | `[prompt].anchors` (else you write a `PROMPT.md`) |
 
-Start from [`../gates/loopkit.example.toml`](../gates/loopkit.example.toml) (every knob, commented) and
-keep what fits. (When `loopkit detect` lands — Part IV Layer 3 — it prints this proposal for you; until
-then, do it by inspection.)
+`detect` **proposes, it does not decide** — you refine what it prints. It deliberately leaves the two
+things no marker can read — the **goal** and the **held-out acceptance oracle** (steps 2–3) — as
+placeholders; those are your judgment, not a detection. For house rules, add `CLAUDE.md`/`AGENTS.md` to
+`[prompt].anchors` if present (else write a `PROMPT.md`). Every knob, annotated, lives in
+[`../gates/loopkit.example.toml`](../gates/loopkit.example.toml) if you need to reach past the proposal.
 
 ### 2. Frame the goal + a typed Definition of Done
 

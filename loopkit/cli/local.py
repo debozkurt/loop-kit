@@ -1,7 +1,9 @@
-"""Local single-loop + course commands: init, doctor, run, measure, demo, learn, executor.
+"""Local single-loop + course commands: init, doctor, run, measure, synth-gate, detect, demo, learn, executor.
 
 The CI deployment tier rides `run` (--from-event/--from-issue/--open-pr); `executor` is the keyless
-agent-isolation sidecar. Extension imports stay function-local so importing the CLI pulls no optional dep.
+agent-isolation sidecar; `synth-gate` + `detect` are the Part IV molding primitives (verify a proposed
+oracle · introspect a repo → a proposed loopkit.toml). Extension imports stay function-local so importing
+the CLI pulls no optional dep.
 """
 from __future__ import annotations
 
@@ -671,6 +673,77 @@ def _oracle_verdict_table(verdict) -> Table:
     for check in verdict.checks:
         got = "[green]met[/]" if check.ok else "[red]did not[/]"
         table.add_row(check.name, f"must {check.expected}", got)
+    return table
+
+
+@app.command()
+def detect(repo: Path = typer.Argument(Path("."), help="Repository to introspect."),
+           write: bool = typer.Option(False, "--write",
+                    help="Write the proposed loopkit.toml into REPO (default: print it, decide "
+                         "nothing). Never overwrites an existing config without --force."),
+           force: bool = typer.Option(False, "--force",
+                    help="With --write, overwrite an existing loopkit.toml."),
+           out: Path | None = typer.Option(None, "--out",
+                    help="Write the JSON RepoProfile here — the auditable detection record (for the "
+                         "unattended tier or a copilot to consume).")) -> None:
+    """Deterministically read a repo's mechanical, safety-critical config → a proposed loopkit.toml.
+
+    Molding is a copilot's judgment job — *except* the parts where a guess is dangerous: the test
+    command (a wrong one wastes a run) and which paths are protected (a wrong one lets the loop weaken
+    its own held-out gate or churn a migration). Those are readable off file markers, at zero tokens,
+    so `detect` reads them: the test runner (pytest/npm/go/cargo/make) → `[gate].iteration`, the
+    protected-path candidates (test dir, CI, charts, migrations, lockfiles) → `[safety]`, the default
+    branch → `forbid_branches`, and the agent on PATH → `[agent].adapter`. Each fact carries its
+    evidence, so the proposal is auditable.
+
+    It **proposes, it does not decide.** By default it prints the config for the molder (copilot or
+    human) to refine; `--write` is the quick no-copilot path. It deliberately leaves the two things no
+    marker can tell it — the goal and the held-out acceptance oracle (author + `synth-gate` it) — as
+    annotated placeholders. The load-bearing determinism of Part IV Layer 3; the judgment stays yours.
+    """
+    from ..extensions.detect import detect_repo
+
+    target = repo.expanduser().resolve()
+    if not target.exists():
+        fail("detect", f"no such path: {escape(str(target))}")
+    profile = detect_repo(target)
+
+    console.print(Panel.fit(f"[bold]{escape(str(target))}[/]\n"
+                            f"test runner {escape(profile.test_command or '— none found')} · adapter "
+                            f"{profile.adapter} · default branch {profile.default_branch or '—'} · "
+                            f"{len(profile.protected_paths)} protected path(s)",
+                            title="loopkit detect"))
+    console.print(_detect_table(profile))
+    toml = profile.to_toml()
+    console.print(Panel(escape(toml), title="proposed loopkit.toml", border_style="dim"))
+
+    if write:
+        dest = target / "loopkit.toml"
+        if dest.exists() and not force:
+            fail("detect", f"{escape(str(dest))} already exists — pass [bold]--force[/] to overwrite, "
+                           "or drop --write to just print the proposal.")
+        dest.write_text(toml)
+        console.print(f"[green]wrote[/] {escape(str(dest))} — refine the goal + acceptance oracle, then "
+                      "[bold]loopkit doctor[/].")
+    else:
+        console.print("[dim]proposal only — refine it, or re-run with [bold]--write[/] to save it.[/]")
+    if out is not None:
+        out.write_text(profile.to_json())
+        console.print(f"[green]wrote[/] {escape(str(out))}")
+    raise typer.Exit(0)
+
+
+def _detect_table(profile) -> Table:
+    """The audit trail: every detected fact, its value, the evidence that decided it, and confidence."""
+    colors = {"high": "green", "medium": "yellow", "low": "yellow", "none": "red"}
+    table = Table(title="detected", show_header=True, header_style="bold")
+    table.add_column("fact")
+    table.add_column("value", overflow="fold")
+    table.add_column("confidence")
+    table.add_column("evidence", overflow="fold")
+    for d in profile.detections:
+        color = colors.get(d.confidence, "dim")
+        table.add_row(d.key, escape(d.value or "—"), f"[{color}]{d.confidence}[/]", escape(d.evidence))
     return table
 
 

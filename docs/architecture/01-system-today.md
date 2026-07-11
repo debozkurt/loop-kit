@@ -51,6 +51,7 @@ Architecture mirrors the agentic-loops curriculum — **one module per concern**
 | `creds.py` | per-submitter creds: identity → Secret + the typer-free run-creds decision policy | III · P5a |
 | `measure.py` | reliability — `pass^k` over N trials → `loopkit measure` | III |
 | `synth_gate.py` | fail-first (and, with `--fix`, fail→pass) oracle verification → `loopkit synth-gate` | IV · molding L2 |
+| `detect.py` | deterministic repo introspection → a proposed `loopkit.toml` → `loopkit detect` | IV · molding L3 |
 
 ## The tick spine
 
@@ -262,6 +263,22 @@ token-free tests. Blessed iff every check holds; the `OracleVerdict` is an audit
 (oracle + fix + short signature + version + timestamp), exit **0 = blessed / 3 = not real**. It generalizes
 the `run --validate` pre-loop seam into a first-class "is this oracle real?" check — never generating a
 test, only certifying one. `demo 25` is the runnable lab.
+
+**Repo introspection (`detect`).** `extensions/detect.py` + `loopkit detect` read a repo's *mechanical,
+safety-critical* config off file markers and **print a proposed `loopkit.toml`** — the deterministic
+half of the [molding kit](../part-iv-molding-kit.md) (Part IV, Layer 3). Molding is a copilot's judgment
+job *except* where a guess is dangerous: a hallucinated test command wastes a run; a hallucinated
+protected path lets the loop weaken its own held-out gate or churn a migration. `detect_repo` reads
+those deterministically, at zero tokens — the **test runner** → `[gate].iteration` (pytest / `<pm> test`
+/ `go test` / `cargo test` / `make test`, first present in a fixed priority; the rest recorded as
+alternatives), the **protected-path candidates** → `[safety]` (the test dir + CI/chart/migration/
+lockfile paths, *existing only* — evidence, not a guess), the **default branch** → `forbid_branches`,
+and the **adapter** on `PATH` — each as a `Detection(key, value, evidence, confidence)` so the proposal
+is auditable. It holds the Part IV line: it fills only the scaffold and leaves the two fields no marker
+can read — the `goal` and the held-out `acceptance` oracle (author + `synth-gate` it) — as annotated
+placeholders. It **proposes, it does not decide** (print by default; `--write` never clobbers an existing
+config without `--force`). Stdlib-only, no core/executor/fleet coupling — the most standalone primitive.
+`demo 26` is the runnable lab.
 
 ## The fleet — queue-driven across containers (Ch 12) 🟢
 
