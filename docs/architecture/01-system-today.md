@@ -52,6 +52,7 @@ Architecture mirrors the agentic-loops curriculum — **one module per concern**
 | `measure.py` | reliability — `pass^k` over N trials → `loopkit measure` | III |
 | `synth_gate.py` | fail-first (and, with `--fix`, fail→pass) oracle verification → `loopkit synth-gate` | IV · molding L2 |
 | `detect.py` | deterministic repo introspection → a proposed `loopkit.toml` → `loopkit detect` | IV · molding L3 |
+| `route.py` | `measure` pass^k → a single-run-vs-`evolve` decision → `loopkit route` | IV · molding L4 |
 
 ## The tick spine
 
@@ -279,6 +280,20 @@ can read — the `goal` and the held-out `acceptance` oracle (author + `synth-ga
 placeholders. It **proposes, it does not decide** (print by default; `--write` never clobbers an existing
 config without `--force`). Stdlib-only, no core/executor/fleet coupling — the most standalone primitive.
 `demo 26` is the runnable lab.
+
+**Reliability-gated routing (`route`).** `extensions/route.py` + `loopkit route` close the loop between
+`measure` and `evolve` — the mechanical half of feature-routing (Part IV, Layer 4). Given how *reliably*
+the loop solves a goal (pass^k), the rule is deterministic: **pass^k ≥ threshold ⇒ a single run; below ⇒
+escalate to `evolve`**, with the population sized from the single-shot rate p so the discovery odds
+`1 − (1 − p)^N` clear a target (capped, so a hard task can't request an unbounded fan-out). The default
+bar is `k = 1` (the base rate `c/n`, graded) — deliberately *not* `k = trials`, where pass^k degenerates
+to "1.0 iff every trial passed". A `pass^1` of 0 escalates to the cap but is **flagged honestly**:
+escalation can't manufacture a capability the loop has never shown (fix the goal/gates/oracle or the
+model). `decide_route` is a pure function over the counts (reusing `measure`'s estimators — one source of
+truth for the math); the CLI calibrates inline (reusing `measure`) or decides over a saved report for
+free (`--from-report`). It is **advisory** — it emits the strategy + the exact `fleet evolve` command,
+never launching an evolve — and the `RouteDecision` carries the measurement's harness signature so the
+choice is auditable. `demo 27` is the runnable lab.
 
 ## The fleet — queue-driven across containers (Ch 12) 🟢
 

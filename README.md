@@ -64,6 +64,7 @@ loopkit run                    # loops to the goal (use --dry-run to rehearse th
 loopkit measure -n 10          # reliability: run the goal 10× → pass^k / pass@k (harness-stamped)
 loopkit synth-gate <cmd>       # is this held-out oracle real? fail-first verify it (--fix ⇒ fail→pass)
 loopkit detect                 # read the stack off file markers → a proposed loopkit.toml (--write to save)
+loopkit route --from-report r.json   # measured pass^k → run once, or escalate to evolve (best-of-N)
 ```
 
 Or let a coding-agent copilot mold loopkit *for* your repo — detect the stack, wire the gates + a

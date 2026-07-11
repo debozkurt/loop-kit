@@ -41,6 +41,7 @@ The registry (`__init__.py` → `_registry()`) is the source of truth; this tabl
 | 24 | `ch24_reliability.py` | Reliability: `pass^k` falls with k while `pass@k` rises | |
 | 25 | `ch25_synth_gate.py` | synth-gate: proving a held-out oracle is real (fail-first / fail→pass) | |
 | 26 | `ch26_detect.py` | detect: reading a repo's mechanical config deterministically → a proposed `loopkit.toml` | |
+| 27 | `ch27_route.py` | route: a measured pass^k → a single-run-vs-`evolve` decision | |
 
 ## About the numbering gaps
 
@@ -50,8 +51,9 @@ formalism, durability, anti-patterns, the horizon). The jump from 17 to 20 is de
 loopkit's Part III labs were renumbered from an earlier 18/19 to **20/21** so they mirror the
 course's Part VIII chapters (the course's own Ch 18/19 are anti-patterns / where-this-goes-next —
 the old numbering collided). 22–24 are loopkit-specific extensions of the Part III material
-(isolation, the skills repo, the reliability metric); **25–26** are the Part IV (molding) labs —
-`synth-gate` (fail-first oracle verification) and `detect` (deterministic repo introspection).
+(isolation, the skills repo, the reliability metric); **25–27** are the Part IV (molding) labs —
+`synth-gate` (fail-first oracle verification), `detect` (deterministic repo introspection), and `route`
+(reliability-gated `measure`→`evolve` routing).
 
 ## Adding a scenario
 

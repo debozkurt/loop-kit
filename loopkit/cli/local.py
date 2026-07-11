@@ -1,9 +1,9 @@
-"""Local single-loop + course commands: init, doctor, run, measure, synth-gate, detect, demo, learn, executor.
+"""Local commands: init, doctor, run, measure, synth-gate, detect, route, demo, learn, executor.
 
 The CI deployment tier rides `run` (--from-event/--from-issue/--open-pr); `executor` is the keyless
-agent-isolation sidecar; `synth-gate` + `detect` are the Part IV molding primitives (verify a proposed
-oracle · introspect a repo → a proposed loopkit.toml). Extension imports stay function-local so importing
-the CLI pulls no optional dep.
+agent-isolation sidecar; `synth-gate` + `detect` + `route` are the Part IV molding primitives (verify a
+proposed oracle · introspect a repo → a proposed loopkit.toml · measure pass^k → single-vs-evolve).
+Extension imports stay function-local so importing the CLI pulls no optional dep.
 """
 from __future__ import annotations
 
@@ -745,6 +745,120 @@ def _detect_table(profile) -> Table:
         color = colors.get(d.confidence, "dim")
         table.add_row(d.key, escape(d.value or "—"), f"[{color}]{d.confidence}[/]", escape(d.evidence))
     return table
+
+
+@app.command()
+def route(config: Path = typer.Option(DEFAULT_CONFIG, "--config", "-c"),
+          repo: str | None = typer.Option(None, "--repo", help="Override the target repo (config `repo`)."),
+          adapter: str | None = typer.Option(None, "--adapter", help="Override the configured agent adapter."),
+          trials: int = typer.Option(5, "--trials", "-n", min=1,
+                                     help="Trials to calibrate with (ignored with --from-report)."),
+          k: int | None = typer.Option(None, "--k",
+                                       help="Reliability bar: pass^k. Default 1 = the single-run success "
+                                            "rate c/n (graded). Raise it to demand k independent runs all "
+                                            "pass (the production bar); k = trials is degenerate (all-or-none)."),
+          threshold: float = typer.Option(0.9, "--threshold", min=0.0, max=1.0,
+                                          help="Route single iff pass^k ≥ this; below it, escalate to evolve."),
+          mode: str = typer.Option("clone", "--mode", help="How each trial materialises the repo: clone | copy."),
+          max_iter: int | None = typer.Option(None, "--max-iter", help="Override stops.max_iter per trial."),
+          from_issue: int | None = typer.Option(None, "--from-issue",
+                                                help="Calibrate against a forge issue's goal (gh/glab), as `measure`."),
+          provider: str = typer.Option("auto", "--provider", help="Forge for --from-issue: auto | github | gitlab."),
+          from_report: Path | None = typer.Option(None, "--from-report",
+                                                  help="Decide over a saved `measure --out` JSON report "
+                                                       "instead of calibrating — the free, no-run path "
+                                                       "(re-route under a new --threshold for nothing)."),
+          out: Path | None = typer.Option(None, "--out",
+                                          help="Write the full JSON RouteDecision here (the provenance record).")) -> None:
+    """Turn a reliability measurement into a run strategy: single run, or escalate to evolve.
+
+    The mechanical half of feature-routing (Part IV, Layer 4). It reads how *reliably* the loop solves a
+    goal (`pass^k`, via `measure`) and applies the rule the `loopkit-mold` skill routes through: **at or
+    above the threshold, run once**; **below it, escalate to `evolve`** (best-of-N + held-out
+    re-validation), with the population sized from the single-shot rate so a fan-out is only as big as the
+    task needs. A `pass^1` of 0 is flagged honestly — escalation can't manufacture a capability the loop
+    has never once shown; fix the goal/gates/oracle or the model instead.
+
+    Calibrating runs `--trials` real trials (it costs what `measure` costs); pass `--from-report` to decide
+    over a report you already have for free. **Advisory** — it prints the strategy and the exact command,
+    never launching an (expensive) evolve itself. Emits an auditable `RouteDecision` tied to the
+    measurement's harness signature.
+    """
+    secrets.install(secrets.CredentialStore.load(os.environ.get("LOOPKIT_CREDS_DIR")))
+    from ..extensions.route import decide_route, route_from_report
+
+    ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    if from_report is not None:
+        # The free path: decide over an existing measurement, no runs.
+        try:
+            report = json.loads(from_report.read_text())
+        except (OSError, json.JSONDecodeError) as exc:
+            fail("route", f"could not read --from-report {from_report}: {escape(str(exc))}")
+        try:
+            decision = route_from_report(report, timestamp=ts, threshold=threshold, k=k)
+        except ValueError as exc:
+            fail("route", escape(str(exc)))
+        goal = report.get("goal", "")
+        console.print(Panel.fit(f"[bold]{escape(_pr_title(goal).removeprefix('loopkit: '))}[/]\n"
+                                f"from report {escape(str(from_report))} · {report.get('trials', '?')} "
+                                f"trials · threshold {threshold}", title="loopkit route"))
+    else:
+        # Calibrate inline, then decide — the turnkey path (reuses the `measure` machinery exactly).
+        cfg = _load(config)
+        if repo is not None:
+            cfg.repo = repo
+        if adapter is not None:
+            cfg.agent.adapter = adapter
+        if max_iter is not None:
+            cfg.stops.max_iter = max_iter
+        if from_issue is not None:
+            cfg.goal, _ = _goal_from_issue(cfg.repo_path(), from_issue, provider)
+        if not cfg.gate.acceptance:
+            fail("route", "needs a held-out [bold]gate.acceptance[/] to calibrate against — pass^k is "
+                          "the rate at which that gate certifies the goal. Set it, or pass --from-report.")
+        trace.configure(cfg.trace)
+        report = _calibrate_report(cfg, trials=trials, mode=mode, k=k, timestamp=ts)
+        console.print(_reliability_table(report))
+        decision = route_from_report(report.to_dict(), timestamp=ts, threshold=threshold, k=k)
+
+    console.print(_route_panel(decision))
+    if out is not None:
+        out.write_text(decision.to_json())
+        console.print(f"[green]wrote[/] {escape(str(out))}")
+    # Exit 0 either way — a decision is not a failure; the strategy is the signal. (Mirrors `detect`.)
+    raise typer.Exit(0)
+
+
+def _calibrate_report(cfg: Config, *, trials: int, mode: str, k: int | None, timestamp: str):
+    """Run `trials` isolated trials of the goal → a ReliabilityReport (the same setup `measure` uses)."""
+    from ..extensions.fleet import make_repo_runner
+    from ..extensions.measure import measure_reliability
+    repo_src = str(cfg.repo_path())                       # absolute — each trial clones into its own scratch
+    runner = make_repo_runner(
+        repo_src, mode=mode, adapter=cfg.agent.adapter, max_iter=cfg.stops.max_iter,
+        gate_iteration=cfg.gate.iteration, gate_acceptance=cfg.gate.acceptance,
+        protected_paths=tuple(cfg.safety.protected_paths))
+    harness_params = {"adapter": cfg.agent.adapter, "model": cfg.agent.model,
+                      "gate_iteration": cfg.gate.iteration, "gate_acceptance": cfg.gate.acceptance,
+                      "gate_regression": cfg.gate.regression, "max_iter": cfg.stops.max_iter,
+                      "protected_paths": sorted(cfg.safety.protected_paths)}
+    return measure_reliability(runner, {"id": "route", "goal": cfg.goal}, trials=trials, k_max=k,
+                               timestamp=timestamp, adapter=cfg.agent.adapter, model=cfg.agent.model,
+                               target=cfg.repo, harness_params=harness_params)
+
+
+def _route_panel(decision) -> Panel:
+    """The routing verdict: the strategy, the reason, and the exact command to run."""
+    color = "yellow" if decision.escalated else "green"
+    head = "[yellow]escalate → evolve[/]" if decision.escalated else "[green]single run[/]"
+    body = [f"strategy: {head}",
+            f"pass^{decision.k} = {decision.pass_hat_k:.2f}  (threshold {decision.threshold:.2f}) · "
+            f"{decision.successes}/{decision.trials} trials passed",
+            "",
+            decision.reason,
+            "",
+            f"run: [bold]{escape(decision.command)}[/]"]
+    return Panel("\n".join(body), title=f"loopkit route — {decision.strategy}", border_style=color)
 
 
 @app.command()

@@ -53,6 +53,21 @@ the judgment can't self-supply.**
     writes your X" belongs in the skill, not in code — detect writes no prose and fakes no oracle.
   - Generalizes step 1 of the `loopkit-mold` recipe (SKILL.md now runs `detect` first instead of
     hand-inspecting the markers).
+- **Layer 4 BUILT** (committed): **`loopkit route`** — reliability-gated routing (`measure` pass^k → a
+  single-run-vs-`evolve` decision). New `extensions/route.py` (`decide_route` → `RouteDecision` +
+  `size_population` + `route_from_report`; **stdlib, reuses `measure`'s pass^k/pass@k estimators**, no
+  core/fleet coupling) + the lazy-imported `route` CLI (`--from-report` = the free no-run path, else
+  calibrate inline via `measure`; `--threshold`/`--k`/measure-parity flags; `--out` provenance; always
+  exit 0) + `demo 27` (`ch27_route.py`) + `tests/test_route.py` (21 tests, no tokens) + surface entry.
+  - **The rule:** `pass^k ≥ threshold` ⇒ **single** run; below ⇒ **evolve**, population sized so
+    `1−(1−p)^N` (discovery at base rate p) clears a target, capped at 8. **Default k=1** (the base rate
+    `c/n`, graded) — NOT `k=trials`, which is degenerate (pass^k at k=n is 1.0 iff every trial passed).
+    `pass^1 == 0` ⇒ evolve-at-cap but **flagged honestly** (escalation can't manufacture a capability the
+    loop never once showed — the sharp edge: fix the goal/gates/oracle or the model instead).
+  - **Advisory** (prints the strategy + the turnkey `loopkit fleet evolve -g N -p N -k N` command, never
+    launches an evolve) — matching the kit's proposes-not-decides posture. The `RouteDecision` carries
+    the measurement's harness signature + a decision signature, so a routing choice is tied to the exact
+    numbers it came from. SKILL.md step 5 (feature-routing table) now cites the command.
   - **What it checks:** *fail-first* (mandatory) — the oracle must FAIL on the current (buggy) tree, so
     passing it later is real evidence; and, given a reference `--fix`, *pass-on-fix* (gold) — apply the
     fix to an isolated copy and the oracle must PASS (SWE-bench FAIL_TO_PASS validation), proving it
@@ -82,15 +97,17 @@ the judgment can't self-supply.**
 
 ## Next step
 
-**Layer 4 — reliability-gated routing.** Wire the `measure` → `evolve` escalation into the playbook as a
-thin helper: run `measure` on a cheap representative task to get `pass^k`; if it's below a threshold, the
-task is unreliable single-shot, so route it through `evolve` (best-of-N + re-validation) instead of a
-single run. Keep the roadmap invariant — this is a *mechanical feedback loop* (calibrate → decide →
-route), which is why it earns code; a judgment-y "is this task hard?" call stays in the `loopkit-mold`
-skill. Both halves already exist (`extensions/measure.py`, `extensions/evolve`/`orchestrate.py`); Layer 4
-is the thin connector + the routing rule, following the same extension + lazy-CLI shape as
-`detect`/`synth-gate`. Then Layer 5 — the unattended molding step (generalize the spacer
-`sequencer.py`/`ledger2issues.py`) so a triggered CI/fleet run molds itself.
+**Layer 5 — the unattended molding step (the last layer).** Bake the kit into a CI/fleet pre-run so a
+*triggered* run molds itself end to end: on an incoming issue, run `detect` → assemble the config,
+classify the goal into a coverage tier → propose the held-out oracle, `synth-gate` it (fail-first
+**mandatory** for the attacker-shaped goal), `measure` a representative task → `route` single-vs-evolve,
+then run — all with no human in the loop, bounded by the standing guardrails (protected-path guard, never
+`main`, budget ceiling, keyless executor). This is where Parts III and IV meet: it makes the CI/fleet
+tiers self-configuring. Generalize the spacer `sequencer.py` + `ledger2issues.py` (the hand-built proof).
+The security boundary is load-bearing here — a synthesized oracle/config/checklist derived from an
+untrusted issue body must never be auto-trusted (same discipline as the flywheel's poisoning guards).
+Build it as the connective tissue over the four primitives now in place (L1 skill, L2 synth-gate, L3
+detect, L4 route), not a new monolith.
 
 ## Sharp edges to carry
 

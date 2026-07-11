@@ -26,4 +26,5 @@ Part IV — the molding kit (configure loopkit for a repo; the copilot molds wit
 
     synth_gate.py   fail-first (and, with a fix, fail->pass) oracle verification -> `loopkit synth-gate`
     detect.py       deterministic repo introspection -> a proposed loopkit.toml -> `loopkit detect`
+    route.py        measure pass^k -> a single-run-vs-evolve decision            -> `loopkit route`
 """

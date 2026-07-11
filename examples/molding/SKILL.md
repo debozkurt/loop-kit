@@ -110,12 +110,21 @@ it is real evidence — but only if it actually fails on the current (buggy) tre
 
 ### 5. Choose features by the routing table
 
-Reach for a feature only when its trigger holds — defaults are single-run:
+Reach for a feature only when its trigger holds — defaults are single-run. For the reliability →
+single-vs-evolve call, **let `loopkit route` decide** (Part IV Layer 4 — the mechanical rule, don't
+eyeball it): it reads `measure`'s pass^k and either says "run once" or "escalate to evolve" with a sized
+population + the exact command.
+
+```bash
+loopkit measure -n 10 --out report.json      # calibrate a cheap representative task
+loopkit route --from-report report.json      # → single run, or `fleet evolve -g N -p N -k N`
+```
 
 | Feature | Reach for it when | Block |
 |---|---|---|
-| `evolve` (best-of-N + re-validation) | the task is ambiguous/hard with several plausible fixes, or calibrated `pass^k` is low | [`../evolve/`](../evolve/) |
-| `measure` (pass^k calibration) | a gate might be flaky, or before trusting a whole batch — calibrate a cheap representative task first, then route | [`../skills/`](../skills/) |
+| `route` (reliability-gated routing) | you've measured a representative task and want the single-vs-evolve call made mechanically (not by feel) | `loopkit route` (Part IV L4) |
+| `evolve` (best-of-N + re-validation) | `route` escalated — the task is unreliable single-shot (low `pass^k`) with several plausible fixes | [`../evolve/`](../evolve/) |
+| `measure` (pass^k calibration) | a gate might be flaky, or before trusting a whole batch — calibrate a cheap representative task first, then `route` | [`../skills/`](../skills/) |
 | skills flywheel (per-repo/lang dir) | same-class tasks recur (a sweep) — lessons compound | [`../skills/`](../skills/) |
 | plan mode (`--plan`) | one coherent multi-step feature — a sequential backlog, bounded by plan-stall | [`../../docs/CONTROL-FILES.md`](../../docs/CONTROL-FILES.md) `[plan]` |
 | worktree isolation / fleet | independent tasks in parallel (a bug/finding queue) | [`templates/worktree.sh`](templates/worktree.sh) |

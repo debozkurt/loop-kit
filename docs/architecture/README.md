@@ -39,10 +39,12 @@ key-holder, and the tracked follow-ups) and [`../part-iii-prior-art.md`](../part
 
 For **Part IV — molding loopkit to a repo** (the copilot molds *with* a verified kit, not a monolith):
 [`../part-iv-molding-kit.md`](../part-iv-molding-kit.md) (design) · [`../part-iv-resume.md`](../part-iv-resume.md)
-(resume). Layers 1–3 built: the `loopkit-mold` skill (`examples/molding/`), `loopkit synth-gate` —
-fail-first oracle verification (`extensions/synth_gate.py`) — and `loopkit detect` — deterministic repo
-introspection → a proposed `loopkit.toml` (`extensions/detect.py`); both described under *Oracle
-synthesis* / *Repo introspection* in [`01-system-today.md`](01-system-today.md).
+(resume). Layers 1–4 built: the `loopkit-mold` skill (`examples/molding/`), `loopkit synth-gate` —
+fail-first oracle verification (`extensions/synth_gate.py`) — `loopkit detect` — deterministic repo
+introspection → a proposed `loopkit.toml` (`extensions/detect.py`) — and `loopkit route` —
+reliability-gated `measure`→`evolve` routing (`extensions/route.py`); all described under *Oracle
+synthesis* / *Repo introspection* / *Reliability-gated routing* in
+[`01-system-today.md`](01-system-today.md).
 
 ## Deployment tiers
 

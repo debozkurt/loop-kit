@@ -1,11 +1,13 @@
 # Part IV — Molding loopkit to a repo (the molding kit)
 
-> **Status:** 2026-07-10. **Layers 1–3 BUILT** — Layer 1 = `examples/molding/` (the `loopkit-mold`
+> **Status:** 2026-07-10. **Layers 1–4 BUILT** — Layer 1 = `examples/molding/` (the `loopkit-mold`
 > skill + templates, zero new code paths); Layer 2 = `loopkit synth-gate` (fail-first oracle
 > verification — `extensions/synth_gate.py` + the CLI command + demo 25 + tests); Layer 3 =
 > `loopkit detect` (deterministic repo introspection → a proposed `loopkit.toml` —
-> `extensions/detect.py` + the CLI command + demo 26 + tests). Layers 4–5 are design. This doc argues
-> *what to build, why, and in what order*.
+> `extensions/detect.py` + the CLI command + demo 26 + tests); Layer 4 = `loopkit route`
+> (reliability-gated routing — `measure` pass^k → single-run vs `evolve`; `extensions/route.py` + the
+> CLI command + demo 27 + tests). Layer 5 is design. This doc argues *what to build, why, and in what
+> order*.
 > It deliberately **supersedes** the broad "auto-molding harness / self-configuring monolith" sketch that
 > preceded it — see [Why not a monolith](#why-not-a-monolith-the-design-boundary). The design decisions
 > below were dialled in with the maintainer; the open questions at the end are the ones still live.
@@ -175,6 +177,18 @@ The skill's content:
   is the verification loop, so it must be code, not a prompt. Lives in `extensions/synth_gate.py`
   (self-contained, stdlib + the core executor's `run_gate`, no fleet coupling); `loopkit demo 25` is the
   runnable lab.
+- **`loopkit route`** ✅ **BUILT** — reliability-gated routing: read how *reliably* the loop solves a goal
+  (`measure`'s pass^k) and apply the mechanical rule that connects it to `evolve` — **at/above a
+  threshold, run once; below it, escalate to `evolve`** (best-of-N + held-out re-validation), sizing the
+  population from the single-shot rate so a fan-out is only as big as the task needs. A pass^1 of 0 is
+  flagged honestly (escalation can't manufacture a capability the loop never showed — fix the
+  goal/gates/oracle or the model). `decide_route` is a pure function over the measurement; the CLI
+  calibrates inline (reusing `measure`) or decides over a saved report for free (`--from-report`).
+  **Advisory** — it emits the strategy + the exact command, never launching an evolve itself — and the
+  `RouteDecision` carries the measurement's harness signature so the choice is auditable. This is the
+  *mechanical feedback loop* (calibrate → decide → route) the skill routes through, which is why it earns
+  code; the judgment-y "is this task hard?" call stays in the skill. Lives in `extensions/route.py`
+  (stdlib, reuses `measure`'s estimators, no core/fleet coupling); `loopkit demo 27` is the runnable lab.
 
 ## The security boundary (non-negotiable)
 
@@ -210,7 +224,11 @@ Each layer is independently shippable and review-gated. Build in order; do not f
    + `demo 26` + `tests/test_detect.py` (30 tests, no tokens). Reads the test runner, protected-path
    candidates, default branch, and adapter off file markers → a proposed `loopkit.toml`; leaves the goal
    + held-out oracle as placeholders (the judgment stays the molder's).
-4. **Reliability-gated routing** — wire `measure` → `evolve` escalation into the playbook + a thin helper.
+4. **✅ BUILT — `loopkit route`** — reliability-gated routing: `measure` pass^k → a single-run-vs-`evolve`
+   decision (population sized from the base rate; a never-solved task flagged honestly). The mechanical
+   feedback loop the skill routes through — `extensions/route.py` (stdlib, reuses `measure`'s estimators)
+   + the CLI command (`--from-report` for the free path) + `demo 27` + `tests/test_route.py` (21 tests,
+   no tokens). Advisory: it prints the strategy + exact command, never launching an evolve itself.
 5. **(later) the unattended molding step** — bake the kit into a CI/fleet pre-run so a triggered run
    molds itself: the spacer `sequencer.py` + `ledger2issues.py`, generalized. This is the no-human tier
    closing the configuration gap end to end.
