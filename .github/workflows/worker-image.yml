@@ -71,6 +71,9 @@ jobs:
           docker run --rm loopkit-worker:smoke --help
           # The worker subcommand the k8s pod runs (`loopkit fleet worker …`) is wired.
           docker run --rm loopkit-worker:smoke fleet worker --help
+          # The default adapter (`claude-code`) shells out to `claude`, so the CLI must be on PATH in
+          # the image (no token needed for --version). This guards the subscription/OAuth cloud path.
+          docker run --rm --entrypoint claude loopkit-worker:smoke --version
           # doctor exercises config/agent/budget/tracing readouts (no network, no tokens).
           docker run --rm loopkit-worker:smoke doctor || true
           # A real loop end-to-end with the mock adapter — zero tokens, no Redis, proves the

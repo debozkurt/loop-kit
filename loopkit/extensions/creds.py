@@ -158,9 +158,16 @@ def resolve_for_run(identity: Identity, *, allow_fleet_fallback: bool = False,
 # it (no CLI dependency here, so the whole decision tree is unit-testable with an injected reader).
 # --------------------------------------------------------------------------------------------
 def creds_from_env(env: Mapping[str, str]) -> dict[str, str]:
-    """The agent + git credentials present in a process environment (the `--from-env` escape hatch)."""
-    return {var: env[var] for var in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GITHUB_TOKEN", "GH_TOKEN")
-            if env.get(var)}
+    """The agent + git credentials present in a process environment (the `--from-env` escape hatch).
+
+    The allow-list is *derived* from the canonical registry — every adapter key (`ADAPTER_KEYS`) ∪ the
+    git tokens (`GIT_ENV`) — rather than a hand-kept literal, so a newly-added credential is forwarded
+    automatically instead of being silently dropped here. That drift is exactly what stranded
+    `CLAUDE_CODE_OAUTH_TOKEN` (the subscription path) and `GITLAB_TOKEN` before. `project()` still
+    narrows the result to the specific run's adapter downstream, so widening the intake is safe.
+    """
+    known = {key for keys in secrets.ADAPTER_KEYS.values() for key in keys} | set(secrets.GIT_ENV)
+    return {var: env[var] for var in known if env.get(var)}
 
 
 def resolve_submitter(explicit: str | None, env: Mapping[str, str]) -> str:
