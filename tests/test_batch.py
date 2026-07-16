@@ -317,6 +317,55 @@ def test_worker_outcome_to_run_result_none_for_batch_reasons():
 # --------------------------------------------------------------------------------------------
 # CLI contract
 # --------------------------------------------------------------------------------------------
+def test_journal_records_outcomes_and_resume_skips_done(tmp_path):
+    from loopkit.extensions.batch import load_journal
+
+    calls: list[str] = []
+
+    def runner(task: dict) -> WorkerOutcome:
+        calls.append(task["id"])
+        return _ok(task["id"]) if task["id"] == "a" else _fail(task["id"])
+
+    progress: list[tuple[str, int, int]] = []
+    journal = tmp_path / "batch.journal.jsonl"
+    result = run_batch([_spec("a"), _spec("b")], runner, jobs=2, journal=journal,
+                       on_finish=lambda o, n, total: progress.append((o.task_id, n, total)))
+    assert len(result.rows) == 2
+    assert len(journal.read_text().splitlines()) == 2     # appended as each outcome landed
+    assert len(progress) == 2 and progress[-1][1:] == (2, 2)
+    entries = load_journal(journal)
+    assert entries["a"].done and not entries["b"].done
+
+    # Resume: preload the journal's DONE entries — 'a' never re-runs, 'b' (failed) retries.
+    calls.clear()
+    result = run_batch([_spec("a"), _spec("b")], runner, jobs=2,
+                       preloaded={"a": entries["a"]})
+    assert calls == ["b"]
+    assert {r.spec.id for r in result.rows} == {"a", "b"}  # preloaded still in the accounting
+
+
+def test_journal_survives_torn_last_line(tmp_path):
+    from loopkit.extensions.batch import load_journal
+
+    journal = tmp_path / "j.jsonl"
+    journal.write_text('{"task_id": "a", "branch": "b", "reason": "done"}\n{"task_id": "b", "bra')
+    entries = load_journal(journal)                       # the crash-torn line is skipped, not fatal
+    assert list(entries) == ["a"] and entries["a"].done
+
+
+def test_preloaded_dependency_unblocks_dependent():
+    calls: list[str] = []
+
+    def runner(task: dict) -> WorkerOutcome:
+        calls.append(task["id"])
+        return _ok(task["id"])
+
+    result = run_batch([_spec("a"), _spec("b", after=["a"])], runner,
+                       preloaded={"a": _ok("a")})
+    assert calls == ["b"]                                 # 'a' satisfied its dependents from the journal
+    assert all(r.done for r in result.rows)
+
+
 def _invoke(monkeypatch, tmp_path: Path, *args: str):
     from loopkit.cli import app
     nocreds = tmp_path / "nocreds"

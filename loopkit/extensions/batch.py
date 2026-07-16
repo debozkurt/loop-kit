@@ -25,11 +25,12 @@ clone → `run_loop` → grade → push/PR), and the per-task hooks are the `run
 """
 from __future__ import annotations
 
+import json
 import shutil
 import subprocess
 import tempfile
 import time
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Callable
 
@@ -259,6 +260,29 @@ class BatchResult:
         return [r for r in self.rows if r.outcome.reason == SKIPPED]
 
 
+def load_journal(path: str | Path) -> dict[str, WorkerOutcome]:
+    """The last recorded outcome per task from a batch journal (one JSON line per finished task).
+
+    The journal is the batch's durable checklist: `run_batch` appends each outcome the moment it
+    lands, so a crash loses nothing already finished. Resume = load this, keep the DONE entries,
+    and hand them to `run_batch(preloaded=...)` — successes skip, failures re-run (mold's own
+    resume semantics). A torn last line from a crash is skipped, not fatal.
+    """
+    p = Path(path)
+    if not p.exists():
+        return {}
+    out: dict[str, WorkerOutcome] = {}
+    for line in p.read_text().splitlines():
+        if not line.strip():
+            continue
+        try:
+            data = json.loads(line)
+            out[data["task_id"]] = WorkerOutcome(**data)
+        except (ValueError, TypeError, KeyError):
+            continue                                      # torn/foreign line — ignore honestly
+    return out
+
+
 def branch_for(spec: TaskSpec) -> str:
     """The task's run branch: explicit, else `loopkit/issue-<n>` (issue-sourced) or `loopkit/<id>`."""
     if spec.branch:
@@ -282,7 +306,9 @@ def spec_to_task(spec: TaskSpec, defaults: BatchDefaults) -> dict:
 def run_batch(specs: list[TaskSpec], runner: TaskRunner, *, jobs: int = 3,
               defaults: BatchDefaults | None = None, queue: Queue | None = None,
               poll: float = 0.05, timeout: float | None = None,
-              run_id: str = "batch") -> BatchResult:
+              run_id: str = "batch", journal: Path | None = None,
+              preloaded: dict[str, WorkerOutcome] | None = None,
+              on_finish: Callable[[WorkerOutcome, int, int], None] | None = None) -> BatchResult:
     """Drive the whole batch to completion: N worker threads, conflict-aware dispatch, every task
     accounted for.
 
@@ -293,15 +319,29 @@ def run_batch(specs: list[TaskSpec], runner: TaskRunner, *, jobs: int = 3,
 
     `timeout` (wall-clock seconds) is the stall guard: on expiry, still-unfinished tasks get an
     `error` outcome and the batch returns — a wedged agent can't hold the batch open forever.
+
+    `journal` (append-only, one JSON line per outcome as it lands) is the durable checklist a
+    crash can't erase; `preloaded` seeds already-finished outcomes (resume: pass the journal's
+    DONE entries — they skip, count as satisfied deps, and appear in the result). `on_finish`
+    fires once per newly-finished task with (outcome, finished_count, total) — progress reporting
+    without coupling the driver to a console.
     """
     queue = queue or InMemoryQueue()
     log = get_logger("batch", run_id)
     workers, threads = run_workers(queue, runner, count=max(1, jobs), run_id=run_id)
-    finished: dict[str, WorkerOutcome] = {}
-    pushed: set[str] = set()
+    finished: dict[str, WorkerOutcome] = dict(preloaded or {})
+    pushed: set[str] = set(finished)                      # preloaded = accounted for, never queued
     defaults = defaults or BatchDefaults()
     deadline = time.monotonic() + timeout if timeout else None
-    log.info("batch.start", tasks=len(specs), jobs=max(1, jobs))
+
+    def record(outcome: WorkerOutcome) -> None:
+        if journal is not None:
+            with journal.open("a") as handle:
+                handle.write(json.dumps(asdict(outcome)) + "\n")
+        if on_finish is not None:
+            on_finish(outcome, len(finished), len(specs))
+
+    log.info("batch.start", tasks=len(specs), jobs=max(1, jobs), resumed=len(pushed))
     try:
         while len(finished) < len(specs):
             moved = False                                 # any skip, push, or collected result
@@ -312,6 +352,7 @@ def run_batch(specs: list[TaskSpec], runner: TaskRunner, *, jobs: int = 3,
                 pushed.add(spec.id)                       # accounted for; never enqueued
                 moved = True
                 log.info("task.skip", task=spec.id, dep=failed_dep)
+                record(outcome)
             for spec in ready_tasks(specs, finished, pushed):
                 queue.push_task(spec_to_task(spec, defaults))
                 pushed.add(spec.id)
@@ -324,6 +365,7 @@ def run_batch(specs: list[TaskSpec], runner: TaskRunner, *, jobs: int = 3,
                     moved = True
                     log.info("task.finish", task=task_id, reason=outcome.reason,
                              done=outcome.done, iters=outcome.iterations)
+                    record(outcome)
             if len(finished) == len(specs):
                 break
             if deadline and time.monotonic() > deadline:
@@ -332,6 +374,7 @@ def run_batch(specs: list[TaskSpec], runner: TaskRunner, *, jobs: int = 3,
                         finished[spec.id] = WorkerOutcome(
                             task_id=spec.id, branch=branch_for(spec),
                             reason="error", error=f"batch timeout after {timeout}s")
+                        record(finished[spec.id])
                 log.warn("batch.timeout", timeout=timeout)
                 break
             in_flight = len(pushed) - len(finished)

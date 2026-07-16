@@ -46,6 +46,9 @@ def batch(tasks_file: Path = typer.Option(..., "--tasks", "-t",
                                             "config's [remote]), exactly like `run --open-pr`."),
           dry_run: bool = typer.Option(False, "--dry-run",
                                        help="Resolve configs + goals and print the schedule; run nothing."),
+          resume: bool = typer.Option(False, "--resume",
+                                      help="Skip tasks the journal records as DONE from a prior "
+                                           "run; failures and skips re-run."),
           timeout: float | None = typer.Option(None, "--timeout",
                                                help="Wall-clock stall guard in seconds: unfinished "
                                                     "tasks error out when it expires."),
@@ -61,7 +64,8 @@ def batch(tasks_file: Path = typer.Option(..., "--tasks", "-t",
     # FIRST: load creds into memory + scrub them out of os.environ, before any subprocess (git, the
     # forge CLI, the agents) can inherit them — same discipline as every other entrypoint.
     secrets.install(secrets.CredentialStore.load(os.environ.get("LOOPKIT_CREDS_DIR")))
-    from ..extensions.batch import BatchResult, load_manifest, make_batch_runner, plan_waves, run_batch
+    from ..extensions.batch import (BatchResult, load_journal, load_manifest, make_batch_runner,
+                                    plan_waves, run_batch)
     try:
         manifest = load_manifest(tasks_file)
     except FileNotFoundError:
@@ -99,9 +103,26 @@ def batch(tasks_file: Path = typer.Option(..., "--tasks", "-t",
         console.print("[dim]dry run — nothing executed[/]")
         raise typer.Exit(0)
 
+    # The journal is the batch's durable checklist: every outcome appends the moment it lands, so
+    # a crashed batch resumes with --resume (DONE entries skip; failures/skips re-run).
+    journal = tasks_file.expanduser().resolve().with_name(tasks_file.name + ".journal.jsonl")
+    preloaded = None
+    if resume:
+        known = {s.id for s in specs}
+        preloaded = {tid: o for tid, o in load_journal(journal).items()
+                     if o.done and tid in known}
+        console.print(f"[dim]resume:[/] {len(preloaded)} task(s) already done per {journal.name}")
+
+    def progress(outcome, finished_count: int, total: int) -> None:
+        color = _REASON_COLORS.get(outcome.reason, "yellow")
+        console.print(f"[{color}]{outcome.reason:>8}[/] {outcome.task_id}"
+                      f" · {outcome.iterations} iters · ${outcome.cost_usd:.2f}"
+                      f" · {finished_count}/{total} finished")
+
     runner = make_batch_runner(base_config=base_cfg, open_pr=open_pr)
     result: BatchResult = run_batch(specs, runner, jobs=jobs, defaults=manifest.defaults,
-                                    timeout=timeout)
+                                    timeout=timeout, journal=journal, preloaded=preloaded,
+                                    on_finish=progress)
     console.print(_result_table(result))
     console.print(f"done [green]{len(result.done)}[/] · failed [yellow]{len(result.failed)}[/]"
                   f" · skipped [dim]{len(result.skipped)}[/] of {len(result.rows)}")
