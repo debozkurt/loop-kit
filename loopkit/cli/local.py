@@ -213,8 +213,11 @@ def _doctor_budget(table: Table, cfg: Config) -> None:
 
 # Output signatures that mean the gate COMMAND is broken (a typo, a missing tool/path) rather than a
 # legitimate test failure — the most common beginner gate mistake. Heuristic, so the row is hedged.
-_GATE_BROKEN_HINTS = ("command not found", "no such file or directory", "not recognized",
-                      "can't open file", "cannot find", "no tests ran")
+# ": not found" (with the colon) covers dash/ash/busybox `sh: 1: <cmd>: not found` — the default
+# /bin/sh on Debian/Ubuntu (and thus most CI) — where bash says the fuller "command not found"; the
+# colon keeps it from matching prose like "element not found" in a real test failure.
+_GATE_BROKEN_HINTS = ("command not found", ": not found", "no such file or directory",
+                      "not recognized", "can't open file", "cannot find", "no tests ran")
 
 
 def _doctor_gate_verdict(table: Table, cfg: Config) -> None:
