@@ -270,6 +270,42 @@ against the molded goal and tier assertion, not just the raw diff. And when a ta
 FAILS on the buggy tree, so an oracle that *passes* pre-run means "already fixed" — the loop aborts
 before spending a token. Set `validate = ""` to opt a task out.
 
+#### The pipeline at a glance
+
+Solid = the mechanical path every task takes. Dotted = optional or advisory: the proposer (skip it
+and FILL the skeletons by hand), the reliability report (skip it and route says "uncalibrated"),
+overlap (analysis, never a gate), the judge (add one when the diff deserves adversarial review),
+and the journal (always written; consulted only by `--resume`). The honest stops are first-class:
+a task the kit can't verify goes to `state.json` and retries next run — it never fakes judgment.
+
+```mermaid
+%%{init: {'theme':'base','themeVariables':{'background':'#1b1b1b','primaryColor':'#2b2b2b','primaryTextColor':'#e6e6e6','primaryBorderColor':'#5a5a5a','lineColor':'#8a8a8a','fontSize':'13px'}}}%%
+flowchart LR
+  P["plan.toml<br/>goal | issue · tier"] --> D["detect<br/>repo profile"]
+  D --> S["oracle skeleton<br/>tier-typed DoD"]
+  PROP["proposer<br/>headless agent"] -. "fills the FILLs" .-> S
+  S --> G["synth-gate<br/>isolated · fail-first"]
+  G -- blessed --> O["held-out oracle"]
+  G -. "needs-oracle ·<br/>oracle-rejected<br/>retries next run" .-> ST(["state.json"])
+  RPT["measure report<br/>pass^k"] -.-> RT["route<br/>single | evolve"]
+  RT -.-> C
+  O --> C["per-task config<br/>loopkit.toml"]
+  C --> B["batch.toml<br/>group · after · touches<br/>review · validate"]
+  PROP -. "touches.txt<br/>observed paths" .-> B
+  B -.-> OV["loopkit overlap<br/>conflict suggestions"]
+  B --> RUN["loopkit batch<br/>one governed core loop<br/>per task, isolated clone"]
+  O -- "acceptance gate" --> RUN
+  O -- "pre-loop validate:<br/>passes = fixed, abort" --> RUN
+  JD["judge command<br/>reviews vs {goal_file}"] -. "review hook" .-> RUN
+  RUN --> PR["draft PR per DONE task<br/>closes its issue"]
+  RUN -.-> JL["journal.jsonl<br/>--resume checklist"]
+```
+
+The core loop each task runs is the README's own diagram — prompt → agent → guard → commit →
+review → gates → DONE — unchanged; molding only *supplies* its quality policy: the blessed oracle
+becomes the held-out acceptance gate, the derived `! oracle` check guards entry, and the judge (if
+configured) rides the review hook with the molded goal as its rubric.
+
 ### Which tasks will collide? (`loopkit overlap`)
 
 `group` and `after` are yours to declare — but on a 20-task batch, *knowing* which tasks step on

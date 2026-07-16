@@ -169,6 +169,21 @@ fleet = run_fleet(cfg, tasks=[{"goal": "...", "slug": "a"}, {"goal": "...", "slu
 print(len(fleet.done), "of", len(fleet.workers), "reached done")
 ```
 
+**From findings to PRs — the manifest pipeline (CLI).** For a backlog of related fixes, the
+molding kit builds what each task needs (a fail-first-verified oracle + a per-task config) and
+`loopkit batch` runs one governed core loop per task. Dotted = optional/advisory. Details, knobs,
+and the full pipeline diagram: [`docs/USING-ON-YOUR-REPO.md`](docs/USING-ON-YOUR-REPO.md).
+
+```mermaid
+%%{init: {'theme':'base','themeVariables':{'background':'#1b1b1b','primaryColor':'#2b2b2b','primaryTextColor':'#e6e6e6','primaryBorderColor':'#5a5a5a','lineColor':'#8a8a8a','fontSize':'13px'}}}%%
+flowchart LR
+  F["findings / issues"] --> M["loopkit mold-batch<br/>fail-first oracle +<br/>config per task"]
+  M --> B["batch.toml"]
+  B -.-> OV["loopkit overlap<br/>conflict check"]
+  B --> R["loopkit batch<br/>N isolated core loops"]
+  R --> P["draft PR per task<br/>journal · --resume"]
+```
+
 ## The deployable fleet (Chapter 12)
 
 The same `Supervisor` graduated off the single process: each worker becomes its own **container**
