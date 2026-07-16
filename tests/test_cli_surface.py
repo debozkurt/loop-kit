@@ -43,6 +43,7 @@ EXPECTED: dict[str, list[str]] = {
         "adapter", "allow_fleet_fallback", "as_submitter", "context", "env_name", "host", "image",
         "label", "port", "provider", "redis_url", "secret", "workers",
     ],
+    "batch": ["dry_run", "jobs", "only", "open_pr", "out", "provider", "tasks_file", "timeout"],
     "demo": ["chapter", "live"],
     "detect": ["force", "out", "repo", "write"],
     "doctor": ["config", "gate"],
@@ -58,6 +59,8 @@ EXPECTED: dict[str, list[str]] = {
     ],
     "init": ["ci", "path", "plan"],
     "learn": ["chapter", "live"],
+    "mold-batch": ["dry_run", "force", "level", "limit", "out_dir", "proposer", "provider",
+                   "tasks_file"],
     "measure": ["adapter", "config", "from_issue", "k", "max_iter", "mode", "out", "provider", "repo", "trials"],
     "route": [
         "adapter", "config", "from_issue", "from_report", "k", "max_iter", "mode", "out",

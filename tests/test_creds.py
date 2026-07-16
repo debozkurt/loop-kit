@@ -262,7 +262,8 @@ def test_cli_creds_set_refuses_wrong_context(tmp_path, monkeypatch):
 
 
 def test_cli_creds_set_needs_keys_in_the_environment(monkeypatch):
-    for var in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GITHUB_TOKEN", "GH_TOKEN"):
-        monkeypatch.delenv(var, raising=False)
+    pytest.importorskip("kubernetes")                        # the cloud command needs the [cloud] extra;
+    for var in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GITHUB_TOKEN", "GH_TOKEN"):  # without it, it
+        monkeypatch.delenv(var, raising=False)               # exits early before the env-key check
     result = runner.invoke(app, ["cloud", "creds", "set", "--as", "alice", "--adapter", "claude-api"])
     assert result.exit_code == 1 and "no credentials in the environment" in result.output.lower()

@@ -9,7 +9,7 @@ function-local, so `import loopkit.cli` never pulls [fleet]/[cloud]/an SDK.
 from __future__ import annotations
 
 from ._support import app
-from . import cloud, fleet, local  # noqa: F401 — importing registers each tier's commands on `app`
+from . import batch, cloud, fleet, local, mold  # noqa: F401 — importing registers each tier's commands on `app`
 
 # Re-exported so they stay importable from `loopkit.cli` (tests + the init scaffolder):
 from .._templates import (  # noqa: F401

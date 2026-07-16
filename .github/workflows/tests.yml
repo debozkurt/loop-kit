@@ -1,0 +1,38 @@
+# loopkit test lane — the suite, on every push and PR.
+#
+# Why this exists: `worker-image.yml` only proves the image builds and `loopkit.yml` only fires on
+# labelled issues — so until this lane, the full test suite was a LOCAL-ONLY gate (green CI did not
+# mean the tests ran). The suite is designed for exactly this environment: no tokens, no cluster,
+# no Redis server (fakeredis + InMemoryQueue + MockAgent + injected fakes throughout), so the whole
+# thing runs on a bare runner with the `dev` extra alone.
+name: tests
+
+on:
+  push:
+    branches: ["main"]
+  pull_request: {}
+  workflow_dispatch: {}
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        # The floor (requires-python >=3.11 — tomllib) and a current release.
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: Install (core + dev extra only — the suite injects fakes for everything heavy)
+        run: pip install -e ".[dev]"
+      - name: Git identity (tests create throwaway repos; some commits fall back to global config)
+        run: |
+          git config --global user.email "ci@loopkit"
+          git config --global user.name "loopkit-ci"
+      - name: Run the suite
+        run: python -m pytest tests/ -q

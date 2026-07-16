@@ -95,12 +95,13 @@ green acceptance gate is not enough while items remain.
 |---|---|---|
 | **One task** | `loopkit run` | a single fix or feature |
 | **Sequential backlog** — one loop, ordered | `loopkit init --plan` → `loopkit run` | a coherent feature/refactor with dependent steps |
-| **Parallel batch** — N loops at once | the fleet (`fleet run --from-issues`, §3), git worktrees (below), or the `run_fleet` Python API | a pile of *independent* tasks (a bug queue) |
+| **Parallel batch** — N loops at once | **`loopkit batch --tasks batch.toml`** (below) — or the fleet (`fleet run --from-issues`, §3) / git worktrees / the `run_fleet` Python API | a pile of *independent* tasks (a bug queue) |
 
 The sequential backlog and the parallel batch are different tools, not the same thing: `--plan` is one
-agent grinding an ordered checklist with shared state; the fleet is many agents on unrelated work, one
-branch each. Today a parallel batch on one machine is a worktree loop (below) or the `run_fleet` Python
-API; a one-command **no-infra batch CLI** (`loopkit batch --tasks …`, no Redis) is planned.
+agent grinding an ordered checklist with shared state; a batch is many agents on unrelated work, one
+branch each. On one machine the one-command path is **`loopkit batch`** (no Redis — see below); the
+Redis fleet (§3) is for separately-deployed workers, and the raw worktree loop / `run_fleet` API
+remain the manual versions.
 
 ---
 
@@ -207,13 +208,62 @@ module **[`part-iii-ecosystem.md`](part-iii-ecosystem.md)**; the templates live 
 
 ---
 
-## Parallel on one machine (git worktrees)
+## Parallel on one machine (`loopkit batch`)
 
-The fleet (§3) is the issue-driven, Redis-backed path. For a quick "run N goals at once on this box" —
-no Redis, no issues — give each run its own **git worktree**: a checkout has exactly one branch, so
-parallel runs can't share one. One worktree = one branch = one loop. (From Python, the same thing is
-`run_fleet(tasks=[…], max_workers=N)` — N loops in-process, no Redis; a one-command `loopkit batch`
-wrapper over it is on the Roadmap.)
+The fleet (§3) is the issue-driven, Redis-backed path for separately-deployed workers. On one box,
+the one-command path is **`loopkit batch`**: a TOML manifest of tasks → N concurrent loops, each in
+its own isolated clone on its own branch, each with its own config — no Redis, no worker processes
+to start.
+
+```toml
+# batch.toml — [defaults] + one [[task]] per piece of work
+[defaults]
+config = "base.loopkit.toml"        # tasks without their own config inherit this one
+review = "bash gate/llm-judge.sh"   # optional: a per-tick judge for EVERY task (run --review)
+
+[[task]]
+id = "clamp-limit"
+issue = 42                          # goal from the forge issue (or set `goal = "..."` directly)
+
+[[task]]
+id = "fix-total"
+goal = "return the real result count, not 0"
+config = "configs/fix-total.toml"   # per-task gates / budget / protected-path unlocks
+group = "handlers"                  # serialize with other members (they touch the same files)
+
+[[task]]
+id = "fix-sort"
+goal = "stable sort for tied scores"
+group = "handlers"                  # runs after fix-total, never concurrently with it
+
+[[task]]
+id = "require-key"
+goal = "the consumer requires the service key"
+after = ["clamp-limit"]             # a true dependency: skipped (not run) if it fails
+```
+
+```bash
+loopkit batch --tasks batch.toml --dry-run     # print the resolved schedule, run nothing
+loopkit batch --tasks batch.toml --jobs 3 --open-pr
+```
+
+Two scheduling fields cover the two ways related fixes collide: **`group`** serializes tasks in
+manifest order (predicted file conflicts, a shared test DB — mutual exclusion, not a dependency),
+and **`after`** encodes real dependencies (a task whose dependency misses DONE is **skipped**, and
+skips cascade). Everything else runs concurrently up to `--jobs`. Each task ends with an outcome in
+the summary table (and `--out results.json`); with `[remote]`/`--open-pr`, each DONE task lands its
+own draft PR — one human review pass over the whole batch. `loopkit demo 28` is the runnable lab.
+
+For a batch that doesn't *have* per-task configs and oracles yet, `loopkit mold-batch` builds them
+(detect → tier-typed oracle → fail-first verification → configs → a ready `batch.toml`) — see the
+molding kit ([`part-iv-molding-kit.md`](part-iv-molding-kit.md), `loopkit demo 29`).
+
+### The manual version (git worktrees)
+
+For a quick hand-rolled "run N goals at once" — or to understand what `batch` automates — give each
+run its own **git worktree**: a checkout has exactly one branch, so parallel runs can't share one.
+One worktree = one branch = one loop. (From Python, the same thing is
+`run_fleet(tasks=[…], max_workers=N)` — N loops in-process, no Redis.)
 
 ```bash
 for slug in featA featB featC; do

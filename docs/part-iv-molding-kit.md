@@ -1,13 +1,15 @@
 # Part IV — Molding loopkit to a repo (the molding kit)
 
-> **Status:** 2026-07-10. **Layers 1–4 BUILT** — Layer 1 = `examples/molding/` (the `loopkit-mold`
+> **Status:** 2026-07-16. **ALL FIVE LAYERS BUILT** — Layer 1 = `examples/molding/` (the `loopkit-mold`
 > skill + templates, zero new code paths); Layer 2 = `loopkit synth-gate` (fail-first oracle
 > verification — `extensions/synth_gate.py` + the CLI command + demo 25 + tests); Layer 3 =
 > `loopkit detect` (deterministic repo introspection → a proposed `loopkit.toml` —
 > `extensions/detect.py` + the CLI command + demo 26 + tests); Layer 4 = `loopkit route`
 > (reliability-gated routing — `measure` pass^k → single-run vs `evolve`; `extensions/route.py` + the
-> CLI command + demo 27 + tests). Layer 5 is design. This doc argues *what to build, why, and in what
-> order*.
+> CLI command + demo 27 + tests); Layer 5 = `loopkit mold-batch` (unattended batch molding —
+> `extensions/mold.py` + the CLI command + demo 29 + tests), paired with the no-infra parallel-batch
+> runner `loopkit batch` (`extensions/batch.py` + demo 28). This doc argues *what was built, why, and
+> in what order*.
 > It deliberately **supersedes** the broad "auto-molding harness / self-configuring monolith" sketch that
 > preceded it — see [Why not a monolith](#why-not-a-monolith-the-design-boundary). The design decisions
 > below were dialled in with the maintainer; the open questions at the end are the ones still live.
@@ -230,18 +232,24 @@ Each layer is independently shippable and review-gated. Build in order; do not f
    feedback loop the skill routes through — `extensions/route.py` (stdlib, reuses `measure`'s estimators)
    + the CLI command (`--from-report` for the free path) + `demo 27` + `tests/test_route.py` (21 tests,
    no tokens). Advisory: it prints the strategy + exact command, never launching an evolve itself.
-5. **(later, and gated on need) the unattended molding step** — bake the kit into a CI/fleet pre-run so a
-   triggered run molds itself: the spacer `sequencer.py` + `ledger2issues.py`, generalized. This is the
-   no-human tier closing the configuration gap end to end. **Its value is concentrated, not general:** it
-   pays off for autonomous *batch* remediation (many heterogeneous findings, no copilot per finding);
-   for everyday "one repo, issues → draft PRs" the CI tier (Phase 5c) already suffices with a standing
-   config + the repo's own gate, so the per-issue oracle synthesis is marginal there. **The crux** is that
-   L5 must *propose* the oracle (generation), not just verify it — the judgment part the kit leaves to the
-   molder; fail-first can't tell "fails right" from "fails broken" without a reference `--fix` a novel
-   issue lacks, so the coverage-tier→typed-DoD table must carry the proposal (mechanical), with an LLM
-   proposer only as the *triggering agent's* judgment. Build it **only if batch-remediation is a real
-   target**, and dogfood Layers 1–4 end to end on a real repo first (validate they compose; surface the
-   proposal crux). See [`part-iv-resume.md`](part-iv-resume.md) *Next step* for the full sequencing.
+5. **✅ BUILT — `loopkit mold-batch`, the unattended molding step** (batch remediation became a real
+   target, satisfying the gate this layer was held behind). Connective tissue over the four
+   primitives — `extensions/mold.py` + the CLI command + `demo 29` + `tests/test_mold.py` (18 tests,
+   no tokens) — per task: `detect` → the **coverage-tier → typed-DoD table** instantiates the oracle
+   skeleton (the table carries the *mechanical* half of proposal, promoted into code because it IS a
+   table) → an optional **`ShellProposer` seam** fills what the template can't (the *judgment* half —
+   typically a fresh-context headless agent; mechanical-only stops honestly at an annotated skeleton,
+   `needs-oracle`) → **mandatory isolated `synth-gate` verification** (a goal-derived oracle is
+   untrusted input; nothing unblessed proceeds) → `route` over a supplied reliability report
+   (uncalibrated said honestly, never guessed) → a per-task config wired to the blessed oracle. Two
+   knobs on independent axes control how much is molded at once: `--level`
+   (`detect < oracle < route < full` — the stage ladder) and `--limit` (+ a state file: successes
+   skip, failures retry, so the human loop is "fill the FILLs, re-run"). It **never runs a loop**:
+   the terminal artifact is a reviewable `batch.toml` + per-task provenance (detect profile, oracle
+   verdict, route decision), and the human checkpoint is the seam between `mold-batch` and
+   **`loopkit batch`** (mold-all → one review → run). Companion: `loopkit batch`
+   (`extensions/batch.py` + `demo 28`) executes the emitted manifest — the in-process fleet with
+   conflict-aware scheduling (`group` serialization; `after` dependencies with cascading skips).
 
 ## What this is NOT (scope guards)
 

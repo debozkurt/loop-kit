@@ -138,12 +138,17 @@ can "pass" by weakening its own grader (Ch 9, verifier hacking). Branch stays `l
 unlock only the *minimal* extra path the task needs (a migration task → unlock `migrations/`, nothing
 more). Start from [`templates/issue.loopkit.toml`](templates/issue.loopkit.toml).
 
-### 7. (Multi-issue) package per issue with worktrees
+### 7. (Multi-issue) package per issue and run as a batch
 
-For a queue of independent tasks, give each its own isolated clone/worktree reset to the base branch —
-[`templates/worktree.sh`](templates/worktree.sh) (the `sequencer.py` prep pattern, generalized). One
-molded instance per issue; run them via the fleet (`fleet run --from-issues`) or the in-process
-`run_fleet`. Sequential dependent steps in *one* feature → prefer `--plan` instead.
+For a queue of independent tasks: one molded instance per issue, run via **`loopkit batch --tasks
+batch.toml`** — each task gets its own isolated clone + branch (+ draft PR), with `group` serializing
+tasks that touch the same files and `after` encoding real dependencies (a failed dependency skips its
+dependents). When the batch is large and there is no copilot session per task, **`loopkit mold-batch`**
+runs steps 1–6 per task unattended (tier-typed oracle skeleton → optional proposer → mandatory
+fail-first verification → per-task config) and emits the `batch.toml` for one human review pass.
+The manual building blocks remain: [`templates/worktree.sh`](templates/worktree.sh) (the isolated
+clone/worktree prep) and the in-process `run_fleet`. Sequential dependent steps in *one* feature →
+prefer `--plan` instead.
 
 ### 8. Human review, then run
 

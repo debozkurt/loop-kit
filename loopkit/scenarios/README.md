@@ -42,6 +42,8 @@ The registry (`__init__.py` → `_registry()`) is the source of truth; this tabl
 | 25 | `ch25_synth_gate.py` | synth-gate: proving a held-out oracle is real (fail-first / fail→pass) | |
 | 26 | `ch26_detect.py` | detect: reading a repo's mechanical config deterministically → a proposed `loopkit.toml` | |
 | 27 | `ch27_route.py` | route: a measured pass^k → a single-run-vs-`evolve` decision | |
+| 28 | `ch28_batch.py` | batch: a manifest of tasks → parallel loops, conflict-aware | |
+| 29 | `ch29_mold.py` | mold-batch: many tasks, no copilot per task (Layer 5) | |
 
 ## About the numbering gaps
 
@@ -53,7 +55,9 @@ course's Part VIII chapters (the course's own Ch 18/19 are anti-patterns / where
 the old numbering collided). 22–24 are loopkit-specific extensions of the Part III material
 (isolation, the skills repo, the reliability metric); **25–27** are the Part IV (molding) labs —
 `synth-gate` (fail-first oracle verification), `detect` (deterministic repo introspection), and `route`
-(reliability-gated `measure`→`evolve` routing).
+(reliability-gated `measure`→`evolve` routing); **28–29** are the batch pair — `loopkit batch` (the
+no-infra parallel batch, conflict-aware scheduling) and `loopkit mold-batch` (Layer 5: unattended
+batch molding, mold-all → one review → run).
 
 ## Adding a scenario
 
