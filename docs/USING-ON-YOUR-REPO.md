@@ -269,6 +269,11 @@ tokens (`dir/file.ext`) lifted straight out of the goal text — well-written go
 cite the files they're about, so the zero-config tier usually just works. A task with neither is
 reported **unanalyzed**, never silently assumed conflict-free.
 
+Molding adds a third source for free: the `mold-batch` proposer is already exploring the repo to
+write the oracle, so it may drop the source paths it expects the fix to touch into
+`$MOLD_TOUCHES_FILE` (one per line) — **observed** touch data, no keywords to curate, riding the
+emitted `batch.toml` automatically. A human-declared `touches` always wins over the observation.
+
 ```toml
 [[task]]
 id = "fix-total"

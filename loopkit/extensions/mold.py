@@ -199,10 +199,15 @@ class ShellProposer:
 
     - ``MOLD_TASK_ID`` / ``MOLD_TIER`` / ``MOLD_TIER_ASSERTION`` — what to prove;
     - ``MOLD_GOAL_FILE`` — a file holding the full goal text (env-safe for multi-line goals);
-    - ``MOLD_ORACLE_DIR`` — where to (over)write ``run.sh`` + its hidden test files.
+    - ``MOLD_ORACLE_DIR`` — where to (over)write ``run.sh`` + its hidden test files;
+    - ``MOLD_TOUCHES_FILE`` — *optional byproduct*: the proposer explored the repo anyway, so it
+      may write the repo-relative source paths it expects the FIX to touch, one per line. They
+      fill the task's `touches` (advisory input to `loopkit overlap`) unless the author declared
+      their own — observation over guessing, and never overriding a human declaration.
 
     Exit 0 = proposed (stdout kept as provenance notes); non-zero = no proposal. The proposer's
-    output is *untrusted either way* — only `synth-gate` verification blesses it.
+    output is *untrusted either way* — only `synth-gate` verification blesses it (and `touches`
+    stays advisory by design, so a wrong observation costs at most a wrong warning).
     """
 
     def __init__(self, command: str, *, timeout: float = 900.0) -> None:
@@ -210,11 +215,13 @@ class ShellProposer:
         self._timeout = timeout
 
     def propose(self, spec: MoldSpec, oracle_dir: Path, workspace: Path,
-                goal_file: Path) -> ProposeResult:
+                goal_file: Path, touches_file: Path | None = None) -> ProposeResult:
         env = {**secrets.current().child_env(), "PYTHONDONTWRITEBYTECODE": "1",
                "MOLD_TASK_ID": spec.id, "MOLD_TIER": spec.tier,
                "MOLD_TIER_ASSERTION": TIER_ASSERTIONS[spec.tier],
                "MOLD_GOAL_FILE": str(goal_file), "MOLD_ORACLE_DIR": str(oracle_dir)}
+        if touches_file is not None:
+            env["MOLD_TOUCHES_FILE"] = str(touches_file)
         try:
             proc = subprocess.run(self._command, cwd=workspace, shell=True, env=env,
                                   capture_output=True, text=True, timeout=self._timeout)
@@ -267,6 +274,25 @@ def _has_fill_markers(path: Path) -> bool:
         return True                                       # unreadable = not a real oracle
 
 
+def _read_touches(path: Path, cap: int = 50) -> list[str]:
+    """Observed touch paths from a proposer's `touches.txt`: one per line, blanks/# skipped.
+
+    Untrusted output gets a light cap — `touches` is advisory, but a runaway list shouldn't bloat
+    the emitted manifest. The file itself stays in the task dir as provenance (and as the durable
+    source for `emit_batch_manifest` on resumed runs, where the proposer doesn't re-run).
+    """
+    try:
+        lines = path.read_text().splitlines()
+    except OSError:
+        return []
+    seen: list[str] = []
+    for line in lines:
+        entry = line.strip()
+        if entry and not entry.startswith("#") and entry not in seen:
+            seen.append(entry)
+    return seen[:cap]
+
+
 def mold_task(spec: MoldSpec, defaults: MoldDefaults, out_dir: Path, profile: RepoProfile, *,
               level: str, timestamp: str, proposer: ShellProposer | None = None,
               run_gate=None) -> MoldRow:
@@ -298,9 +324,14 @@ def mold_task(spec: MoldSpec, defaults: MoldDefaults, out_dir: Path, profile: Re
     goal_file.write_text(f"# {spec.title or spec.id}\n\ntier: {spec.tier}\n"
                          f"must assert: {TIER_ASSERTIONS[spec.tier]}\n\n{spec.goal or ''}\n")
     if proposer is not None and _has_fill_markers(run_sh):
-        proposed = proposer.propose(spec, acc_dir, repo, goal_file)
+        proposed = proposer.propose(spec, acc_dir, repo, goal_file,
+                                    touches_file=task_dir / "touches.txt")
         (task_dir / "proposer-notes.md").write_text(proposed.notes + "\n")
         log.info("mold.propose", ok=proposed.ok, notesLen=len(proposed.notes))
+        observed = _read_touches(task_dir / "touches.txt")
+        if observed and not spec.touches:                 # author-declared touches always win
+            spec.touches = observed
+            log.info("mold.touches", observed=len(observed))
     if _has_fill_markers(run_sh):
         # Mechanical-only stops here, honestly: a skeleton is guidance, not an oracle. The human
         # loop is "fill the FILLs (or wire a --proposer), re-run mold-batch" — failures retry.
@@ -490,8 +521,11 @@ def emit_batch_manifest(manifest: MoldManifest, out_dir: Path, state: dict) -> P
             lines.append(f"group = {j(spec.group)}")
         if spec.after:
             lines.append(f"after = {j(spec.after)}")
-        if spec.touches:
-            lines.append(f"touches = {j(spec.touches)}")
+        # Declared touches win; else the proposer's observed touches.txt (durable across resumes,
+        # where a skipped task's proposer never re-ran to refill the in-memory spec).
+        touches = spec.touches or _read_touches(out_dir / spec.id / "touches.txt")
+        if touches:
+            lines.append(f"touches = {j(touches)}")
     if pending:
         lines += ["", "# -- not ready (molding incomplete — see state.json / each task dir) --"]
         lines += [f"#   {spec.id}: {demoted.get(spec.id) or entry.get('status', 'unmolded')}"
