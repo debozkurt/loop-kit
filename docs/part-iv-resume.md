@@ -14,7 +14,24 @@ The spacer remediation harness is the existence proof (a human hand-built exactl
 findings). **The molder is the copilot; loopkit supplies the determinism, verification, and provenance
 the judgment can't self-supply.**
 
-## Current state (2026-07-10)
+## Current state (2026-07-16)
+
+- **Layer 5 BUILT** (branch `feat/batch-cli`): **`loopkit mold-batch`** (`extensions/mold.py` + CLI +
+  `demo 29` + `tests/test_mold.py`, 18 tests no tokens) — unattended batch molding per the design's
+  crux resolution: the coverage-tier→typed-DoD table carries the *mechanical* half of oracle proposal
+  in code (`TIER_ASSERTIONS`), a **`ShellProposer` seam** carries the *judgment* half (mechanical-only
+  stops at an annotated skeleton, `needs-oracle`), `synth-gate` verification is **mandatory +
+  isolated**, and the terminal artifact is a reviewable `batch.toml` — never a run. Knobs: `--level`
+  (detect < oracle < route < full) × `--limit` (+ state.json resume; successes skip, failures retry).
+- **Companion runner BUILT** (same branch): **`loopkit batch`** (`extensions/batch.py` + CLI +
+  `demo 28` + `tests/test_batch.py`, 21 tests no tokens) — the roadmap's no-infra parallel batch:
+  a TOML manifest over the in-process fleet (`InMemoryQueue` + `run_workers`), one isolated clone +
+  branch (+ draft PR) per task, conflict-aware scheduling (`group` serializes, `after` gates +
+  cascading skips), per-task configs + the `--review`/`--validate` seams. `WorkerOutcome` gained an
+  additive `pr_url`; `to_run_result` now tolerates non-terminal reasons.
+- **The pytest CI lane exists** (`.github/workflows/tests.yml`) — the suite is no longer local-only;
+  it runs on every push/PR with the `dev` extra alone (3.11 + 3.12).
+
 
 - **Layer 1 BUILT** (committed `b571d8f`): `examples/molding/` — the `loopkit-mold` Claude Code skill
   (`SKILL.md`), `coverage-tiers.md` (the `ledger2issues.py` typed-DoD brain, generalized), and
@@ -97,43 +114,20 @@ the judgment can't self-supply.**
 
 ## Next step
 
-The four **code primitives are in place** (L1 skill · L2 synth-gate · L3 detect · L4 route). The honest
-question now is *not* "build Layer 5" reflexively — it is **where the remaining value is**, because
-Layer 5's payoff is real but **concentrated**, and two cheaper moves de-risk it.
+**All five layers are built** (L1 skill · L2 synth-gate · L3 detect · L4 route · L5 mold-batch +
+the `loopkit batch` runner), and the pytest CI lane closed the local-only-gate gap. What remains is
+exactly the dogfood the design demanded:
 
-**Do these two first (higher leverage than L5):**
-
-1. **Dogfood Layers 1–4 end to end on a real external repo.** They have unit tests but have never been
-   exercised as an *integrated* flow (`detect` → author the oracle → `synth-gate` → `measure` → `route`)
-   against a repo that isn't the bundled demo. This validates they *compose*, and it surfaces exactly
-   where the oracle-*proposal* step breaks — which is L5's crux (see below). Stacking L5 on unexercised
-   primitives risks compounding a weak link.
-2. **A `pytest` CI lane.** The repo has none — `worker-image.yml` only proves the image builds,
-   `loopkit.yml` only fires on labelled issues, so the ~420-test suite is a **local-only gate** (green CI
-   ≠ tests ran on GitHub). Small, protects everything else, highest immediate ROI.
-
-**Then Layer 5 — the unattended molding step — but only if autonomous *batch* remediation is a real
-target.** Bake the kit into a CI/fleet pre-run so a *triggered* run molds itself end to end (`detect` →
-config, tier-classify → propose the oracle, `synth-gate` it [fail-first **mandatory** for the
-attacker-shaped goal], `measure` → `route`, then run), bounded by the standing guardrails (protected-path
-guard, never `main`, budget ceiling, keyless executor). Where Parts III and IV meet; the spacer
-`sequencer.py`/`ledger2issues.py` is the hand-built proof.
-
-- **Where its value actually is:** the *batch-remediation* case — many heterogeneous findings, **no
-  copilot per finding** — where a per-finding held-out oracle must be synthesized at scale. For everyday
-  "one repo, issues → draft PRs", the **CI tier already does that today** with a standing `loopkit.toml`
-  and the repo's own suite as the gate; the per-issue oracle synthesis is marginal there. So L5 is a
-  *batch* feature, not a general one — build it only if that's the goal.
-- **The crux / risk:** L5 must **propose** the oracle (generation), not just verify it — and that is the
-  judgment part the kit deliberately leaves to the molder. `synth-gate` blesses a fail-first oracle, but
-  fail-first can't tell "fails for the right reason" from "fails because broken" without a reference
-  `--fix`, which a novel issue lacks. So the coverage-tier→typed-DoD table must carry the proposal
-  (mechanical), with an LLM proposer only as the *triggering agent's* judgment (consistent with "the
-  molder is the triggering agent") — never a rule pretending to be judgment.
-- **"No human" is bounded:** unattended ≠ blind trust. It means the mechanical molding runs without a
-  human while the **guardrails do the containing**; L5 should emit a *reviewable* molded instance under
-  the full envelope, not a fire-and-forget run. Build it as connective tissue over the four primitives,
-  **not a new monolith**.
+1. **Run the integrated flow on a real external repo** — a genuine batch (`mold-batch` at each level
+   → review the molded instances → `loopkit batch`) against a repo that isn't the bundled demo. The
+   unit tests prove each stage; only a real batch proves the *proposal* quality (how often does a
+   proposer-filled oracle survive fail-first? how often does the tier table misclassify?). Feed what
+   breaks back into `TIER_ASSERTIONS`, the skeleton, and the `ShellProposer` contract.
+2. **Calibrate before trusting a batch class** — `measure --out` one representative task per class,
+   feed the reports to `mold-batch` via each task's `report` field so `route` decides on real pass^k
+   instead of defaulting to single-uncalibrated.
+3. **Then the deferred niceties** as need proves them: per-item draft PRs for plan mode, a `--proposer`
+   reference implementation in `examples/` (headless-agent oracle author), tree-level evolve reseed.
 
 ## Sharp edges to carry
 
@@ -148,9 +142,12 @@ guard, never `main`, budget ceiling, keyless executor). Where Parts III and IV m
 - **`examples/ci/` is drift-guarded** (`test_ci` byte-equality) — don't edit those templates casually.
 - **Keep it killer, not bloated** (the roadmap invariant): resist growing a general config-generation
   framework. The kit is a skill + templates + three small extensions (`synth_gate`, `detect`, `route`).
-- **Layer 5 is a *batch* feature, gated on need.** Its value concentrates in autonomous batch remediation
-  (no copilot per finding); for everyday issue→PR the CI tier already suffices. Don't build it on faith —
-  dogfood L1–4 end to end first, and only build L5 if batch-remediation is a real target (see Next step).
+- **Layer 5 stays a *batch* feature — don't generalize it.** It was built because batch remediation
+  became a real target; for everyday issue→PR the CI tier still suffices. Its boundaries are the
+  design's: mechanical-only never fakes an oracle (skeletons stop at `needs-oracle`), the proposer is
+  a seam (never bundled judgment), verification is mandatory + isolated, and `mold-batch` never runs
+  a loop — the human checkpoint is the seam into `loopkit batch`. Resist collapsing the two commands
+  into one "mold-and-run": that seam IS the trust surface.
 
 ## Relationship to Part III
 

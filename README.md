@@ -438,18 +438,22 @@ shared volume); finer fleet scoring (`_grade` → held-out pass fraction).
 
 **Multi-task shapes — the backlog + batch work.** loopkit points at work three ways: **one task**
 (`loopkit run`), a **sequential backlog** in one loop (`loopkit init --plan` — one checklist, one item
-per tick, bounded by a plan-stall stop), and a **parallel batch** of independent tasks (the fleet —
-`run_fleet` in-process, `fleet run` on Redis, `fleet run --from-issues`, or git worktrees). Tracked next:
+per tick, bounded by a plan-stall stop), and a **parallel batch** of independent tasks. Status:
 
 - **Plan mode → GA:** ✅ plan-stall detection (halts when the *done-count* stalls, not just the git
   diff — the guard `no_progress` is blind to in plan mode; groundwork for a `NEEDS_HUMAN` terminal).
   Still to do: incremental / per-item draft PRs (v1 lands one PR at the end); an optional **planner**
-  (decompose a one-line goal → the checklist); per-item held-out checks (oracle synthesis). See
+  (decompose a one-line goal → the checklist). See
   [`docs/USING-ON-YOUR-REPO.md`](docs/USING-ON-YOUR-REPO.md) and the resume doc.
-- **A no-infra batch CLI** — `loopkit batch --tasks tasks.yaml` (or `run --tasks`) surfacing the
-  in-process `run_fleet` (bounded by `max_workers`, no Redis), so a parallel batch of N tasks needs
-  neither a cluster nor a hand-rolled worktree loop. The *capability* exists today (`run_fleet` /
-  worktrees); this is the ergonomic one-command wrapper.
+- **The no-infra batch CLI:** ✅ **`loopkit batch --tasks tasks.toml`** — a TOML manifest drives the
+  in-process fleet (no Redis, no separately-started workers): one isolated clone + branch (+ draft
+  PR) per task, with **conflict-aware scheduling** (`group` serializes predicted collisions; `after`
+  encodes dependencies, and a failed dependency skips its dependents). Per-task configs and the
+  `--review`/`--validate` seams ride along. `loopkit demo 28` is the runnable lab.
+- **Unattended batch molding (Part IV, Layer 5):** ✅ **`loopkit mold-batch --tasks plan.toml`** —
+  for a batch with no copilot per task: detect → tier-typed oracle proposal (mechanical skeleton +
+  an optional proposer seam) → mandatory isolated fail-first verification → route → per-task
+  configs, ending in a reviewable `batch.toml` for `loopkit batch`. `loopkit demo 29` is the lab.
 
 ## License
 

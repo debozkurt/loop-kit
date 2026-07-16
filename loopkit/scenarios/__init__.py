@@ -159,7 +159,8 @@ def _registry() -> dict[int, Scenario]:
     from . import (ch05_context, ch07_feedback, ch08_review, ch09_held_out, ch10_orchestration,
                    ch11_evolution, ch12_fleet, ch13_hard_stops, ch14_economics, ch16_safety,
                    ch17_skills, ch20_triggers, ch21_ci, ch22_isolation, ch23_skills_repo,
-                   ch24_reliability, ch25_synth_gate, ch26_detect, ch27_route)
+                   ch24_reliability, ch25_synth_gate, ch26_detect, ch27_route, ch28_batch,
+                   ch29_mold)
     items = [ch05_context.SCENARIO, ch07_feedback.SCENARIO, ch08_review.SCENARIO,
              ch09_held_out.SCENARIO, ch10_orchestration.SCENARIO, ch11_evolution.SCENARIO,
              ch12_fleet.SCENARIO, ch13_hard_stops.SCENARIO, ch14_economics.SCENARIO,
@@ -172,7 +173,10 @@ def _registry() -> dict[int, Scenario]:
              # Part IV — molding loopkit to a repo: synth-gate (fail-first oracle verification), detect
              # (deterministic repo introspection → a proposed loopkit.toml), and route (measure pass^k
              # → a single-run-vs-evolve decision).
-             ch25_synth_gate.SCENARIO, ch26_detect.SCENARIO, ch27_route.SCENARIO]
+             ch25_synth_gate.SCENARIO, ch26_detect.SCENARIO, ch27_route.SCENARIO,
+             # ...plus the batch pair: the no-infra parallel batch (the third shape as one command)
+             # and Layer 5 (unattended batch molding — many tasks, no copilot per task).
+             ch28_batch.SCENARIO, ch29_mold.SCENARIO]
     return {s.chapter: s for s in items}
 
 

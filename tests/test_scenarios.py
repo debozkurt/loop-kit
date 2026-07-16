@@ -29,6 +29,17 @@ def test_registry_has_part_iii_ecosystem_chapters():
     assert isolation.live_supported is False    # the isolation lab is scripted plumbing (no model)
 
 
+def test_registry_has_batch_chapters():
+    # The batch pair: the no-infra parallel batch (28, the third shape as one command) and
+    # unattended batch molding (29, Part IV Layer 5). Both scripted-only — they teach the
+    # scheduler and the molding pipeline, not an agent run.
+    chapters = {s.chapter for s in scenarios.available()}
+    assert {28, 29}.issubset(chapters)
+    for chapter in (28, 29):
+        scenario = next(s for s in scenarios.available() if s.chapter == chapter)
+        assert scenario.live_supported is False
+
+
 def test_all_scenarios_play_in_scripted_mode():
     for scenario in scenarios.available():
         console = Console(file=StringIO(), width=100)
