@@ -196,6 +196,88 @@ group = "handlers"
     assert task.config == "a/loopkit.toml"                # relative — the dir travels as one unit
 
 
+def _touches_proposer(tmp_path: Path, lines: str) -> str:
+    """A proposer that also emits the observed-touches byproduct ($MOLD_TOUCHES_FILE)."""
+    script = tmp_path / "touches-proposer.sh"
+    script.write_text(
+        "#!/usr/bin/env bash\n"
+        "printf '#!/usr/bin/env bash\\nexit 1\\n' > \"$MOLD_ORACLE_DIR/run.sh\"\n"
+        f"printf '{lines}' > \"$MOLD_TOUCHES_FILE\"\n")
+    script.chmod(0o755)
+    return f"bash {script}"
+
+
+def test_proposer_touches_byproduct_rides_to_emitted_manifest(tmp_path):
+    repo = _seed_repo(tmp_path / "repo")
+    m = load_mold_manifest(_mold_manifest(tmp_path, '[[task]]\nid = "a"\ngoal = "fix it"\n', repo))
+    out = tmp_path / "molded"
+    proposer = ShellProposer(_touches_proposer(
+        tmp_path, "src/handlers/search.go\\n# comment skipped\\nsrc/db/db.go\\nsrc/handlers/search.go\\n"))
+    result = mold_batch(m, out, level="full", timestamp=TS, proposer=proposer)
+    assert result.rows[0].status == READY
+    emitted = load_batch_manifest(out / "batch.toml")
+    # comments skipped, duplicates dropped, order preserved — observed, not guessed
+    assert emitted.task[0].touches == ["src/handlers/search.go", "src/db/db.go"]
+
+
+def test_author_declared_touches_beat_observed(tmp_path):
+    repo = _seed_repo(tmp_path / "repo")
+    m = load_mold_manifest(_mold_manifest(
+        tmp_path, '[[task]]\nid = "a"\ngoal = "fix it"\ntouches = ["declared.py"]\n', repo))
+    out = tmp_path / "molded"
+    proposer = ShellProposer(_touches_proposer(tmp_path, "observed.py\\n"))
+    mold_batch(m, out, level="full", timestamp=TS, proposer=proposer)
+    emitted = load_batch_manifest(out / "batch.toml")
+    assert emitted.task[0].touches == ["declared.py"]     # a human declaration is never diluted
+
+
+def test_emit_reads_touches_artifact_on_resumed_run(tmp_path):
+    repo = _seed_repo(tmp_path / "repo")
+    mf = _mold_manifest(tmp_path, '[[task]]\nid = "a"\ngoal = "fix it"\n', repo)
+    out = tmp_path / "molded"
+    proposer = ShellProposer(_touches_proposer(tmp_path, "src/db/db.go\\n"))
+    mold_batch(load_mold_manifest(mf), out, level="full", timestamp=TS, proposer=proposer)
+    # Resume with a FRESH manifest object: the task skips (state says ready), the proposer never
+    # re-runs, and the emitted manifest must still carry the observed touches — from the artifact.
+    result = mold_batch(load_mold_manifest(mf), out, level="full", timestamp=TS, proposer=proposer)
+    assert result.skipped == ["a"]
+    emitted = load_batch_manifest(out / "batch.toml")
+    assert emitted.task[0].touches == ["src/db/db.go"]
+
+
+def test_emit_fills_review_placeholders_and_auto_wires_validate(tmp_path):
+    repo = _seed_repo(tmp_path / "repo")
+    m = load_mold_manifest(_mold_manifest(
+        tmp_path,
+        'review = "bash judge.sh --goal {goal_file} --task {task_id}"\n\n'
+        '[[task]]\nid = "a"\ngoal = "fix it"\n', repo))
+    out = tmp_path / "molded"
+    mold_batch(m, out, level="full", timestamp=TS,
+               proposer=ShellProposer(_proposer_script(tmp_path)))
+    emitted = load_batch_manifest(out / "batch.toml")
+    task = emitted.task[0]
+    # placeholders resolved to the molded artifacts (absolute — commands run in the scratch clone)
+    assert task.review == f'bash judge.sh --goal {(out / "a" / "GOAL.md").resolve()} --task a'
+    # no validate declared → auto-wired reproduce check from the blessed oracle
+    assert task.validate_cmd.startswith("! ( ")
+    assert str((out / "a" / "acceptance").resolve() / "run.sh") in task.validate_cmd
+
+
+def test_explicit_validate_wins_and_empty_string_disables(tmp_path):
+    repo = _seed_repo(tmp_path / "repo")
+    m = load_mold_manifest(_mold_manifest(
+        tmp_path,
+        '[[task]]\nid = "a"\ngoal = "fix a"\nvalidate = "bash repro.sh {task_id}"\n\n'
+        '[[task]]\nid = "b"\ngoal = "fix b"\nvalidate = ""\n', repo))
+    out = tmp_path / "molded"
+    mold_batch(m, out, level="full", timestamp=TS,
+               proposer=ShellProposer(_proposer_script(tmp_path)))
+    emitted = load_batch_manifest(out / "batch.toml")
+    by_id = {t.id: t for t in emitted.task}
+    assert by_id["a"].validate_cmd == "bash repro.sh a"   # explicit command, placeholder filled
+    assert by_id["b"].validate_cmd is None                # "" = opt out, auto-wire suppressed
+
+
 def test_route_stage_uses_report_or_says_uncalibrated(tmp_path):
     repo = _seed_repo(tmp_path / "repo")
     report = tmp_path / "report.json"

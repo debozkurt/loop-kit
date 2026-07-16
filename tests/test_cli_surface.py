@@ -43,7 +43,8 @@ EXPECTED: dict[str, list[str]] = {
         "adapter", "allow_fleet_fallback", "as_submitter", "context", "env_name", "host", "image",
         "label", "port", "provider", "redis_url", "secret", "workers",
     ],
-    "batch": ["dry_run", "jobs", "only", "open_pr", "out", "provider", "tasks_file", "timeout"],
+    "batch": ["dry_run", "jobs", "only", "open_pr", "out", "provider", "resume", "tasks_file",
+              "timeout"],
     "demo": ["chapter", "live"],
     "detect": ["force", "out", "repo", "write"],
     "doctor": ["config", "gate"],
@@ -62,6 +63,7 @@ EXPECTED: dict[str, list[str]] = {
     "mold-batch": ["dry_run", "force", "level", "limit", "out_dir", "proposer", "provider",
                    "tasks_file"],
     "measure": ["adapter", "config", "from_issue", "k", "max_iter", "mode", "out", "provider", "repo", "trials"],
+    "overlap": ["tasks_file"],
     "route": [
         "adapter", "config", "from_issue", "from_report", "k", "max_iter", "mode", "out",
         "provider", "repo", "threshold", "trials",

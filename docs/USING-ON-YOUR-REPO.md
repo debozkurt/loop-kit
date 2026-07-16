@@ -254,9 +254,106 @@ skips cascade). Everything else runs concurrently up to `--jobs`. Each task ends
 the summary table (and `--out results.json`); with `[remote]`/`--open-pr`, each DONE task lands its
 own draft PR — one human review pass over the whole batch. `loopkit demo 28` is the runnable lab.
 
+Long batches are supervisable and restartable: every outcome prints a one-line progress entry as
+it lands (`done fix-total · 3 iters · $2.10 · 5/20 finished`) **and** appends to a journal next to
+the manifest (`batch.toml.journal.jsonl`) the moment it finishes — a crash-proof checklist. If the
+batch dies at task 14 of 20, `--resume` reads the journal and skips everything already DONE;
+failures and skips re-run (the same successes-skip/failures-retry semantics as `mold-batch`).
+
 For a batch that doesn't *have* per-task configs and oracles yet, `loopkit mold-batch` builds them
 (detect → tier-typed oracle → fail-first verification → configs → a ready `batch.toml`) — see the
-molding kit ([`part-iv-molding-kit.md`](part-iv-molding-kit.md), `loopkit demo 29`).
+molding kit ([`part-iv-molding-kit.md`](part-iv-molding-kit.md), `loopkit demo 29`). The plan's
+`review`/`validate` commands ride through to the emitted manifest with **mold-context placeholders**
+filled per task — `{task_id}`, `{goal_file}`, `{oracle_dir}` — so a judge can review each change
+against the molded goal and tier assertion, not just the raw diff. And when a task declares no
+`validate`, mold auto-wires one from its own blessed oracle (`! <oracle>`): the oracle proved it
+FAILS on the buggy tree, so an oracle that *passes* pre-run means "already fixed" — the loop aborts
+before spending a token. Set `validate = ""` to opt a task out.
+
+#### The pipeline at a glance
+
+Solid = the mechanical path every task takes. Dotted = optional or advisory: the proposer (skip it
+and FILL the skeletons by hand), the reliability report (skip it and route says "uncalibrated"),
+overlap (analysis, never a gate), the judge (add one when the diff deserves adversarial review),
+and the journal (always written; consulted only by `--resume`). The honest stops are first-class:
+a task the kit can't verify goes to `state.json` and retries next run — it never fakes judgment.
+
+```mermaid
+%%{init: {'theme':'base','themeVariables':{'background':'#1b1b1b','primaryColor':'#2b2b2b','primaryTextColor':'#e6e6e6','primaryBorderColor':'#5a5a5a','lineColor':'#8a8a8a','fontSize':'13px'}}}%%
+flowchart LR
+  P["plan.toml<br/>goal | issue · tier"] --> D["detect<br/>repo profile"]
+  D --> S["oracle skeleton<br/>tier-typed DoD"]
+  PROP["proposer<br/>headless agent"] -. "fills the FILLs" .-> S
+  S --> G["synth-gate<br/>isolated · fail-first"]
+  G -- blessed --> O["held-out oracle"]
+  G -. "needs-oracle ·<br/>oracle-rejected<br/>retries next run" .-> ST(["state.json"])
+  RPT["measure report<br/>pass^k"] -.-> RT["route<br/>single | evolve"]
+  RT -.-> C
+  O --> C["per-task config<br/>loopkit.toml"]
+  C --> B["batch.toml<br/>group · after · touches<br/>review · validate"]
+  PROP -. "touches.txt<br/>observed paths" .-> B
+  B -.-> OV["loopkit overlap<br/>conflict suggestions"]
+  B --> RUN["loopkit batch<br/>one governed core loop<br/>per task, isolated clone"]
+  O -- "acceptance gate" --> RUN
+  O -- "pre-loop validate:<br/>passes = fixed, abort" --> RUN
+  JD["judge command<br/>reviews vs {goal_file}"] -. "review hook" .-> RUN
+  RUN --> PR["draft PR per DONE task<br/>closes its issue"]
+  RUN -.-> JL["journal.jsonl<br/>--resume checklist"]
+```
+
+The core loop each task runs is the README's own diagram — prompt → agent → guard → commit →
+review → gates → DONE — unchanged; molding only *supplies* its quality policy: the blessed oracle
+becomes the held-out acceptance gate, the derived `! oracle` check guards entry, and the judge (if
+configured) rides the review hook with the molded goal as its rubric.
+
+### Which tasks will collide? (`loopkit overlap`)
+
+`group` and `after` are yours to declare — but on a 20-task batch, *knowing* which tasks step on
+the same files is the hard part. **`loopkit overlap`** derives it: each task's **predicted-touch
+set** is intersected pairwise, and the pairs the manifest doesn't already cover get suggestions.
+
+Touch data comes cheapest-first: an explicit `touches` field on the task, else repo-relative path
+tokens (`dir/file.ext`) lifted straight out of the goal text — well-written goals and forge issues
+cite the files they're about, so the zero-config tier usually just works. A task with neither is
+reported **unanalyzed**, never silently assumed conflict-free.
+
+Molding adds a third source for free: the `mold-batch` proposer is already exploring the repo to
+write the oracle, so it may drop the source paths it expects the fix to touch into
+`$MOLD_TOUCHES_FILE` (one per line) — **observed** touch data, no keywords to curate, riding the
+emitted `batch.toml` automatically. A human-declared `touches` always wins over the observation.
+
+```toml
+[[task]]
+id = "fix-total"
+goal = "return the real result count, not 0 (src/handlers/search.go)"   # paths lift from text
+
+[[task]]
+id = "clamp-limit"
+goal = "cap the page size"
+touches = ["src/handlers/search.go"]   # or declare them explicitly — highest trust
+```
+
+```bash
+loopkit overlap --tasks batch.toml     # works on a mold plan.toml too (extra keys ignored)
+```
+
+```text
+predicted overlaps
+  fix-total ↔ clamp-limit   src/handlers/search.go   declared? no
+
+suggestions (copy into the manifest — advisory, edit freely):
+  [[task]] id = "fix-total"    →  add: group = "search"
+  [[task]] id = "clamp-limit"  →  add: group = "search"
+merge-order hint (manifest order): fix-total → clamp-limit
+```
+
+Three things it deliberately is **not**: it never blocks (a missed conflict costs one rebase at
+merge time; a false serialization would tax every future batch — so exit 0, always); it never
+edits your manifest (suggestions are copy-paste lines, the declaration stays yours); and it isn't
+only about scheduling — tasks run in **isolated clones**, so overlapping tasks collide at **merge
+time**, which is why every overlap cluster also gets a merge-order hint. `batch` itself re-runs the
+analysis after fetching issue-sourced goals and prints a one-line warning per undeclared overlap —
+so even a manifest that never met `overlap` gets the advisory for free at `--dry-run`.
 
 ### The manual version (git worktrees)
 
