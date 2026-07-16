@@ -59,6 +59,8 @@ EXPECTED: dict[str, list[str]] = {
     ],
     "init": ["ci", "path", "plan"],
     "learn": ["chapter", "live"],
+    "mold-batch": ["dry_run", "force", "level", "limit", "out_dir", "proposer", "provider",
+                   "tasks_file"],
     "measure": ["adapter", "config", "from_issue", "k", "max_iter", "mode", "out", "provider", "repo", "trials"],
     "route": [
         "adapter", "config", "from_issue", "from_report", "k", "max_iter", "mode", "out",
