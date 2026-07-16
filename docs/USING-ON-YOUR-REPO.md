@@ -258,6 +258,50 @@ For a batch that doesn't *have* per-task configs and oracles yet, `loopkit mold-
 (detect → tier-typed oracle → fail-first verification → configs → a ready `batch.toml`) — see the
 molding kit ([`part-iv-molding-kit.md`](part-iv-molding-kit.md), `loopkit demo 29`).
 
+### Which tasks will collide? (`loopkit overlap`)
+
+`group` and `after` are yours to declare — but on a 20-task batch, *knowing* which tasks step on
+the same files is the hard part. **`loopkit overlap`** derives it: each task's **predicted-touch
+set** is intersected pairwise, and the pairs the manifest doesn't already cover get suggestions.
+
+Touch data comes cheapest-first: an explicit `touches` field on the task, else repo-relative path
+tokens (`dir/file.ext`) lifted straight out of the goal text — well-written goals and forge issues
+cite the files they're about, so the zero-config tier usually just works. A task with neither is
+reported **unanalyzed**, never silently assumed conflict-free.
+
+```toml
+[[task]]
+id = "fix-total"
+goal = "return the real result count, not 0 (src/handlers/search.go)"   # paths lift from text
+
+[[task]]
+id = "clamp-limit"
+goal = "cap the page size"
+touches = ["src/handlers/search.go"]   # or declare them explicitly — highest trust
+```
+
+```bash
+loopkit overlap --tasks batch.toml     # works on a mold plan.toml too (extra keys ignored)
+```
+
+```text
+predicted overlaps
+  fix-total ↔ clamp-limit   src/handlers/search.go   declared? no
+
+suggestions (copy into the manifest — advisory, edit freely):
+  [[task]] id = "fix-total"    →  add: group = "search"
+  [[task]] id = "clamp-limit"  →  add: group = "search"
+merge-order hint (manifest order): fix-total → clamp-limit
+```
+
+Three things it deliberately is **not**: it never blocks (a missed conflict costs one rebase at
+merge time; a false serialization would tax every future batch — so exit 0, always); it never
+edits your manifest (suggestions are copy-paste lines, the declaration stays yours); and it isn't
+only about scheduling — tasks run in **isolated clones**, so overlapping tasks collide at **merge
+time**, which is why every overlap cluster also gets a merge-order hint. `batch` itself re-runs the
+analysis after fetching issue-sourced goals and prints a one-line warning per undeclared overlap —
+so even a manifest that never met `overlap` gets the advisory for free at `--dry-run`.
+
 ### The manual version (git worktrees)
 
 For a quick hand-rolled "run N goals at once" — or to understand what `batch` automates — give each
