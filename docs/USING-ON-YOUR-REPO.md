@@ -254,9 +254,21 @@ skips cascade). Everything else runs concurrently up to `--jobs`. Each task ends
 the summary table (and `--out results.json`); with `[remote]`/`--open-pr`, each DONE task lands its
 own draft PR — one human review pass over the whole batch. `loopkit demo 28` is the runnable lab.
 
+Long batches are supervisable and restartable: every outcome prints a one-line progress entry as
+it lands (`done fix-total · 3 iters · $2.10 · 5/20 finished`) **and** appends to a journal next to
+the manifest (`batch.toml.journal.jsonl`) the moment it finishes — a crash-proof checklist. If the
+batch dies at task 14 of 20, `--resume` reads the journal and skips everything already DONE;
+failures and skips re-run (the same successes-skip/failures-retry semantics as `mold-batch`).
+
 For a batch that doesn't *have* per-task configs and oracles yet, `loopkit mold-batch` builds them
 (detect → tier-typed oracle → fail-first verification → configs → a ready `batch.toml`) — see the
-molding kit ([`part-iv-molding-kit.md`](part-iv-molding-kit.md), `loopkit demo 29`).
+molding kit ([`part-iv-molding-kit.md`](part-iv-molding-kit.md), `loopkit demo 29`). The plan's
+`review`/`validate` commands ride through to the emitted manifest with **mold-context placeholders**
+filled per task — `{task_id}`, `{goal_file}`, `{oracle_dir}` — so a judge can review each change
+against the molded goal and tier assertion, not just the raw diff. And when a task declares no
+`validate`, mold auto-wires one from its own blessed oracle (`! <oracle>`): the oracle proved it
+FAILS on the buggy tree, so an oracle that *passes* pre-run means "already fixed" — the loop aborts
+before spending a token. Set `validate = ""` to opt a task out.
 
 ### Which tasks will collide? (`loopkit overlap`)
 
