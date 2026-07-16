@@ -43,6 +43,7 @@ EXPECTED: dict[str, list[str]] = {
         "adapter", "allow_fleet_fallback", "as_submitter", "context", "env_name", "host", "image",
         "label", "port", "provider", "redis_url", "secret", "workers",
     ],
+    "batch": ["dry_run", "jobs", "only", "open_pr", "out", "provider", "tasks_file", "timeout"],
     "demo": ["chapter", "live"],
     "detect": ["force", "out", "repo", "write"],
     "doctor": ["config", "gate"],

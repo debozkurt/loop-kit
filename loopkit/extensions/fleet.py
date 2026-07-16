@@ -112,6 +112,7 @@ class WorkerOutcome:
     score: float | None = None           # evolve: in-worker selection score (higher = fitter)
     revalidated: bool | None = None      # evolve: in-worker held-out verdict (the Ch 9 guard)
     error: str | None = None
+    pr_url: str | None = None            # the opened PR/MR, when [remote] synced a DONE run
 
     @property
     def done(self) -> bool:
@@ -125,18 +126,21 @@ class WorkerOutcome:
         data = json.loads(payload)
         fields = {k: data.get(k) for k in (
             "task_id", "branch", "reason", "iterations", "cost_usd", "overfit",
-            "score", "revalidated", "error")}
+            "score", "revalidated", "error", "pr_url")}
         return cls(**fields)
 
     def to_run_result(self) -> RunResult | None:
         """Rebuild a `RunResult` so the reused result shapes read identically on the coordinator.
 
-        None for a crash (`reason == "error"`) — exactly as an in-process worker that raised before
-        reaching a terminal has `WorkerResult.result is None`.
+        None for any reason that isn't a loop terminal — "error" (the worker raised), and the batch
+        scheduler's "skipped"/"validate_abort" (the loop never ran) — exactly as an in-process worker
+        that raised before reaching a terminal has `WorkerResult.result is None`.
         """
-        if self.reason == "error":
+        try:
+            reason = StopReason(self.reason)
+        except ValueError:
             return None
-        return RunResult(StopReason(self.reason), self.iterations, self.cost_usd,
+        return RunResult(reason, self.iterations, self.cost_usd,
                          overfit=self.overfit)
 
 
