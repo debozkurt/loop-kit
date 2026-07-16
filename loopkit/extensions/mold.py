@@ -119,6 +119,14 @@ class MoldDefaults(BaseModel):
     adapter: str | None = None            # emitted configs' agent (default: detect's pick)
     iteration: str | None = None          # emitted configs' iteration gate (default: detect's pick)
     max_cost_usd: float = 8.0             # per-task budget in emitted configs
+    # Ride through to the emitted batch manifest (per task, with mold-context placeholders filled:
+    # {task_id} / {goal_file} / {oracle_dir} — so a judge can review against the molded artifacts).
+    review: str | None = None             # per-tick review command, see `batch` [defaults] review
+    validate_cmd: str | None = Field(default=None, alias="validate")  # pre-loop reproduce check;
+                                          # unset → auto-wired to "! <oracle>" (the blessed oracle
+                                          # must still FAIL pre-run); set "" to disable entirely
+
+    model_config = {"populate_by_name": True}
 
 
 class MoldSpec(BaseModel):
@@ -137,6 +145,10 @@ class MoldSpec(BaseModel):
     after: list[str] = Field(default_factory=list)
     touches: list[str] = Field(default_factory=list)  # predicted-touch paths — passes through for
                                           # `loopkit overlap` (advisory; never affects molding)
+    review: str | None = None             # per-task override of [defaults] review (placeholders ok)
+    validate_cmd: str | None = Field(default=None, alias="validate")  # per-task override; "" disables
+
+    model_config = {"populate_by_name": True}
 
     @model_validator(mode="after")
     def _coherent(self) -> "MoldSpec":
@@ -479,6 +491,19 @@ def mold_batch(manifest: MoldManifest, out_dir: Path, *, level: str, timestamp: 
     return result
 
 
+def _fill_placeholders(cmd: str, spec: MoldSpec, out_dir: Path) -> str:
+    """Substitute mold-context placeholders in a review/validate command.
+
+    Absolute paths on purpose: these commands run with CWD = the task's scratch clone at batch
+    time, so manifest-relative paths would dangle (the rendered config's oracle wiring makes the
+    same call). Supported: {task_id}, {goal_file} (GOAL.md), {oracle_dir} (acceptance/).
+    """
+    task_dir = (out_dir / spec.id).resolve()
+    return (cmd.replace("{task_id}", spec.id)
+               .replace("{goal_file}", str(task_dir / "GOAL.md"))
+               .replace("{oracle_dir}", str(task_dir / "acceptance")))
+
+
 def emit_batch_manifest(manifest: MoldManifest, out_dir: Path, state: dict) -> Path:
     """Write the ready-to-run `loopkit batch` manifest from every READY task (past or present run).
 
@@ -526,6 +551,19 @@ def emit_batch_manifest(manifest: MoldManifest, out_dir: Path, state: dict) -> P
         touches = spec.touches or _read_touches(out_dir / spec.id / "touches.txt")
         if touches:
             lines.append(f"touches = {j(touches)}")
+        # review/validate ride through per task, mold-context placeholders filled so a judge can
+        # review against the molded artifacts ({goal_file}, {oracle_dir}, {task_id}).
+        review = spec.review if spec.review is not None else manifest.defaults.review
+        if review:
+            lines.append(f"review = {j(_fill_placeholders(review, spec, out_dir))}")
+        validate = (spec.validate_cmd if spec.validate_cmd is not None
+                    else manifest.defaults.validate_cmd)
+        if validate is None:
+            # Auto-wired reproduce check, derived from the blessed oracle: mold proved it FAILS on
+            # the buggy tree, so "oracle passes pre-run" = already fixed = abort before spending.
+            validate = f"! ( {oracle_command((out_dir / spec.id / 'acceptance').resolve())} )"
+        if validate:                                      # explicit "" disables the check entirely
+            lines.append(f"validate = {j(_fill_placeholders(validate, spec, out_dir))}")
     if pending:
         lines += ["", "# -- not ready (molding incomplete — see state.json / each task dir) --"]
         lines += [f"#   {spec.id}: {demoted.get(spec.id) or entry.get('status', 'unmolded')}"

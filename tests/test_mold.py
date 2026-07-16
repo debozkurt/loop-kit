@@ -245,6 +245,39 @@ def test_emit_reads_touches_artifact_on_resumed_run(tmp_path):
     assert emitted.task[0].touches == ["src/db/db.go"]
 
 
+def test_emit_fills_review_placeholders_and_auto_wires_validate(tmp_path):
+    repo = _seed_repo(tmp_path / "repo")
+    m = load_mold_manifest(_mold_manifest(
+        tmp_path,
+        'review = "bash judge.sh --goal {goal_file} --task {task_id}"\n\n'
+        '[[task]]\nid = "a"\ngoal = "fix it"\n', repo))
+    out = tmp_path / "molded"
+    mold_batch(m, out, level="full", timestamp=TS,
+               proposer=ShellProposer(_proposer_script(tmp_path)))
+    emitted = load_batch_manifest(out / "batch.toml")
+    task = emitted.task[0]
+    # placeholders resolved to the molded artifacts (absolute — commands run in the scratch clone)
+    assert task.review == f'bash judge.sh --goal {(out / "a" / "GOAL.md").resolve()} --task a'
+    # no validate declared → auto-wired reproduce check from the blessed oracle
+    assert task.validate_cmd.startswith("! ( ")
+    assert str((out / "a" / "acceptance").resolve() / "run.sh") in task.validate_cmd
+
+
+def test_explicit_validate_wins_and_empty_string_disables(tmp_path):
+    repo = _seed_repo(tmp_path / "repo")
+    m = load_mold_manifest(_mold_manifest(
+        tmp_path,
+        '[[task]]\nid = "a"\ngoal = "fix a"\nvalidate = "bash repro.sh {task_id}"\n\n'
+        '[[task]]\nid = "b"\ngoal = "fix b"\nvalidate = ""\n', repo))
+    out = tmp_path / "molded"
+    mold_batch(m, out, level="full", timestamp=TS,
+               proposer=ShellProposer(_proposer_script(tmp_path)))
+    emitted = load_batch_manifest(out / "batch.toml")
+    by_id = {t.id: t for t in emitted.task}
+    assert by_id["a"].validate_cmd == "bash repro.sh a"   # explicit command, placeholder filled
+    assert by_id["b"].validate_cmd is None                # "" = opt out, auto-wire suppressed
+
+
 def test_route_stage_uses_report_or_says_uncalibrated(tmp_path):
     repo = _seed_repo(tmp_path / "repo")
     report = tmp_path / "report.json"
