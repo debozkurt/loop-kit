@@ -94,6 +94,7 @@ def batch(tasks_file: Path = typer.Option(..., "--tasks", "-t",
         f"[bold]{len(specs)}[/] task(s) · jobs {jobs} · waves {max(waves.values())}"
         f" · manifest {tasks_file}", title="loopkit batch"))
     console.print(_schedule_table(specs, waves))
+    _print_overlap_warnings(specs)
     if dry_run:
         console.print("[dim]dry run — nothing executed[/]")
         raise typer.Exit(0)
@@ -109,6 +110,77 @@ def batch(tasks_file: Path = typer.Option(..., "--tasks", "-t",
         out.write_text(json.dumps(payload, indent=2) + "\n")
         console.print(f"[dim]wrote[/] {out}")
     raise typer.Exit(0 if result.rows and not result.failed else 2)
+
+
+@app.command("overlap")
+def overlap(tasks_file: Path = typer.Option(..., "--tasks", "-t",
+                                            help="A batch manifest (batch.toml) or mold plan "
+                                                 "(plan.toml) — mold-only keys are ignored.")) -> None:
+    """Predict which tasks will collide — advisory similarity analysis, never a gate.
+
+    Reads each task's predicted-touch set (the explicit `touches` field, else repo-relative path
+    tokens in its goal text), intersects them pairwise, and suggests the scheduling levers the
+    manifest doesn't already declare: a shared `group` per overlap cluster, plus a merge-order hint
+    (tasks run in isolated clones, so overlapping PRs collide at merge time, not run time). Tasks
+    with no touch data are listed as unanalyzed — never silently assumed conflict-free. Offline:
+    issue-sourced goals are not fetched here; `batch` re-checks after fetching and warns there.
+    """
+    from ..extensions.batch import load_manifest
+    from ..extensions.overlap import EXPLICIT, analyze
+    try:
+        manifest = load_manifest(tasks_file)
+    except FileNotFoundError:
+        fail("overlap", f"no manifest at {tasks_file}")
+    except Exception as exc:                              # noqa: BLE001 — surface validation cleanly
+        fail("overlap", f"invalid manifest: {escape(str(exc))}")
+    specs = manifest.task
+    report = analyze(specs)
+    analyzed = len(specs) - len(report.unanalyzed)
+    console.print(Panel.fit(
+        f"[bold]{len(specs)}[/] task(s) · {analyzed} analyzed · "
+        f"{len(report.collisions)} overlap(s) · manifest {tasks_file}", title="loopkit overlap"))
+
+    if report.collisions:
+        table = Table(title="predicted overlaps", header_style="bold")
+        table.add_column("tasks")
+        table.add_column("shared paths")
+        table.add_column("declared?")
+        for c in report.collisions:
+            status = "[green]yes[/] (group/after)" if c.covered else "[yellow]no[/]"
+            table.add_row(f"{c.a} ↔ {c.b}", "\n".join(c.paths), status)
+        console.print(table)
+    elif analyzed:
+        console.print("[green]no predicted overlaps[/] among the analyzed tasks — "
+                      "safe to run fully parallel")
+
+    if report.suggestions:
+        console.print("\n[bold]suggestions[/] (copy into the manifest — advisory, edit freely):")
+        for tid, name in report.suggestions.items():
+            # escape(): `[[task]]` is literal TOML here, not rich markup
+            console.print(escape(f'  [[task]] id = "{tid}"  →  add: group = "{name}"'))
+    for members in report.components:
+        console.print(f"[dim]merge-order hint (manifest order):[/] {' → '.join(members)}")
+    if report.unanalyzed:
+        console.print(f"\n[dim]unanalyzed (no touches field, no paths in goal text):[/] "
+                      f"{', '.join(report.unanalyzed)}")
+    explicit = sum(1 for t in report.touches if t.source == EXPLICIT)
+    console.print(f"[dim]touch data: {explicit} explicit · {analyzed - explicit} from goal text · "
+                  f"{len(report.unanalyzed)} none — advisory only, nothing is blocked[/]")
+    raise typer.Exit(0)
+
+
+def _print_overlap_warnings(specs) -> None:
+    """Advisory overlap warnings on the resolved batch (goals fetched, so issue text analyzes too).
+
+    Prints only the *undeclared* collisions — pairs the manifest doesn't already cover with a
+    shared group or an `after` path. Never blocks: a missed conflict costs one rebase at merge
+    time; a false serialization would tax every batch.
+    """
+    from ..extensions.overlap import analyze
+    for c in analyze(specs).uncovered:
+        console.print(f"[yellow]predicted overlap:[/] {c.a} ↔ {c.b} share "
+                      f"{', '.join(c.paths)} — no shared group/after "
+                      f"[dim](advisory; see `loopkit overlap`)[/]")
 
 
 def _resolve_configs(specs, defaults, manifest_dir: Path) -> Config | None:

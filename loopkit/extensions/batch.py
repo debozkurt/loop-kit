@@ -84,6 +84,8 @@ class TaskSpec(BaseModel):
     branch: str | None = None             # default: loopkit/issue-<n> when issue-sourced, else loopkit/<id>
     group: str | None = None              # serialize with other members, manifest order
     after: list[str] = Field(default_factory=list)  # dependency edges (skip if a dep fails)
+    touches: list[str] = Field(default_factory=list)  # predicted-touch paths (advisory input to
+                                          # `loopkit overlap`; never affects scheduling by itself)
     review: str | None = None             # per-task override of [defaults] review
     validate_cmd: str | None = Field(default=None, alias="validate")
 

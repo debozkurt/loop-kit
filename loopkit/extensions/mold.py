@@ -135,6 +135,8 @@ class MoldSpec(BaseModel):
     report: str | None = None             # a `measure --out` ReliabilityReport for the route stage
     group: str | None = None              # passes through to the emitted batch manifest
     after: list[str] = Field(default_factory=list)
+    touches: list[str] = Field(default_factory=list)  # predicted-touch paths — passes through for
+                                          # `loopkit overlap` (advisory; never affects molding)
 
     @model_validator(mode="after")
     def _coherent(self) -> "MoldSpec":
@@ -488,6 +490,8 @@ def emit_batch_manifest(manifest: MoldManifest, out_dir: Path, state: dict) -> P
             lines.append(f"group = {j(spec.group)}")
         if spec.after:
             lines.append(f"after = {j(spec.after)}")
+        if spec.touches:
+            lines.append(f"touches = {j(spec.touches)}")
     if pending:
         lines += ["", "# -- not ready (molding incomplete — see state.json / each task dir) --"]
         lines += [f"#   {spec.id}: {demoted.get(spec.id) or entry.get('status', 'unmolded')}"

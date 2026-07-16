@@ -62,6 +62,7 @@ EXPECTED: dict[str, list[str]] = {
     "mold-batch": ["dry_run", "force", "level", "limit", "out_dir", "proposer", "provider",
                    "tasks_file"],
     "measure": ["adapter", "config", "from_issue", "k", "max_iter", "mode", "out", "provider", "repo", "trials"],
+    "overlap": ["tasks_file"],
     "route": [
         "adapter", "config", "from_issue", "from_report", "k", "max_iter", "mode", "out",
         "provider", "repo", "threshold", "trials",
