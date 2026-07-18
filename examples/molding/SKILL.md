@@ -156,6 +156,60 @@ Present the full proposed instance (config + gates + oracle + routing + budget) 
 `loopkit doctor` (preflight) → `loopkit run` (add `--open-pr` / a `[remote]` block to land a draft PR a
 human merges). The loop opens the PR; a human is always the merge authority.
 
+## Gotchas — pitfalls that silently break a molded instance
+
+Hard-won, mostly from unattended `mold-batch` runs. A *broken oracle* rejects every fix forever; a
+*divergent config* passes molding and then fails at run time. loopkit now auto-catches several of these
+(noted **[auto]**), but author to avoid them — the guardrail is the backstop, not the plan.
+
+**Oracle authoring**
+
+- **`bash -n` your oracle before you bless it. [auto]** An unbalanced quote — classically an apostrophe
+  inside `${VAR:?word}` (e.g. `${DIR:?point at the oracle's dir}`), which opens a single-quote bash
+  never closes *even inside double quotes* → `unexpected EOF`, exit 2 — makes the oracle "fail" for the
+  wrong reason. `synth-gate` now parse-checks and exit-class-checks (127 `command not found`, 126
+  non-exec) and refuses to bless a broken oracle, but a clean script never trips it.
+- **Use the repo's real interpreter, not a bare `python`. [auto]** `python -m pytest` where the repo
+  ships `python3`/`uv`/a venv → exit 127. Use the exact runner the iteration gate uses (`uv run pytest`,
+  `python3 -m pytest`, …).
+- **Delegate to the iteration gate's runner; don't hand-roll the environment.** If the iteration gate
+  wraps the test runner with setup — a docker override, a trust-auth flag, a venv, service deps — the
+  oracle must reuse that *same* wrapper (invoke the gate with the held-out test scoped in), not reinvent
+  `docker compose run` / a fresh venv. Otherwise it fails on an env mismatch (a DB auth/connection error,
+  a missing service) that has nothing to do with the fix. **The oracle should differ from the iteration
+  gate only in *which* test it runs, never in *how* it runs it.** This is the single highest-leverage
+  habit — it eliminates a whole class of broken oracles by construction.
+- **Prove the pass-side, not just fail-first.** fail-first only shows the oracle FAILS on the bug; a
+  runner that can *never* pass "fails" too. With any reference fix, pass `--fix` to `synth-gate` for the
+  gold fail→pass check — it catches an unsatisfiable oracle that fail-first alone would bless.
+
+**Config emit (a molded config that diverges from a hand-tuned one fails only at run time)**
+
+- **Headless agents need the permission bypass. [auto]** A headless `claude -p` has no human to approve
+  tool use, so without `--dangerously-skip-permissions` in `[agent].args` every Write/Edit is DENIED —
+  the agent burns budget and lands **zero** changes. The tell is a false "overfit": iteration passes (on
+  the untouched baseline), acceptance fails, nothing commits, reflog HEAD never moves. `mold-batch`
+  defaults it for the claude-code adapter; a hand-written config must set it.
+- **Never protect the whole test tree. [auto]** `[safety].protected_paths = ["tests/"]` collides with
+  the DoD's "ship a test" — the agent's own new test file trips the guard (`safety_halt` on tick 1). The
+  held-out oracle is protected by *invisibility* (copied in only at gate time), so protect only its
+  specific subdir + infra (CI/charts/migrations/lockfiles), never the bare `tests/` root.
+- **`pr_base` = the repo's default branch, not `main`. [auto]** On a `develop`/`trunk` repo an unset
+  `[remote].pr_base` opens every MR against `main`. `mold-batch` now defaults it to the detected default
+  branch; a hand-written config must set it.
+- **Scope the iteration gate to the touched module** (repeat of step 4, because it bites hard): an
+  unscoped full-suite gate is hostage to unrelated pre-existing test rot — one broken module elsewhere
+  makes the gate unpassable no matter how correct the fix. Scope it (`pytest tests/<module>`,
+  `manage.py test <app>`).
+
+**Run invocation**
+
+- **`--open-pr` needs a forge token in the env. [auto]** loopkit's git push authenticates from
+  `GITLAB_TOKEN` / `GITHUB_TOKEN` in the environment. Issue *fetch* uses the CLI's own stored token, but
+  *push* needs the env var — so without it a whole batch runs and then fails **every** push with
+  `HTTP Basic: Access denied`. `batch --open-pr` now warns up front; export it first
+  (`export GITLAB_TOKEN=$(glab config get token)`).
+
 ## Which kit block owns what
 
 | Need | Block |

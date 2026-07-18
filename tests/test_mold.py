@@ -18,6 +18,7 @@ import pytest
 from typer.testing import CliRunner
 
 from loopkit.extensions.batch import load_manifest as load_batch_manifest
+from loopkit.extensions.detect import RepoProfile
 from loopkit.extensions.mold import (
     DETECTED,
     NEEDS_ORACLE,
@@ -25,9 +26,11 @@ from loopkit.extensions.mold import (
     READY,
     VERIFIED,
     MoldDefaults,
+    MoldSpec,
     ShellProposer,
     _has_fill_markers,
     _ORACLE_SKELETON,
+    _render_task_config,
     load_mold_manifest,
     mold_batch,
     oracle_command,
@@ -480,3 +483,52 @@ def test_cli_rejects_bad_level_and_missing_repo(monkeypatch, tmp_path):
     ghost = tmp_path / "ghost.toml"
     ghost.write_text('[defaults]\nrepo = "does/not/exist"\n\n[[task]]\nid = "a"\ngoal = "x"\n')
     assert _invoke(monkeypatch, tmp_path, "--tasks", str(ghost), "--dry-run").exit_code == 1
+
+
+# --------------------------------------------------------------------------------------------
+# Emitted-config parity: the knobs a hand-tuned config carries, that mold-batch must not drop.
+# (Regression coverage for the six divergences the Batch-3 pilot surfaced.)
+# --------------------------------------------------------------------------------------------
+def _profile(**over) -> RepoProfile:
+    base = dict(root="/x", test_command="uv run pytest -q", protected_paths=["tests/"],
+                default_branch="develop", adapter="claude-code", detections=[])
+    base.update(over)
+    return RepoProfile(**base)
+
+
+def _render(spec: MoldSpec, defaults: MoldDefaults | None = None, **profile_over) -> str:
+    return _render_task_config(spec, defaults or MoldDefaults(), _profile(**profile_over),
+                               repo=Path("/x"), iteration="uv run pytest -q", acceptance="bash o.sh")
+
+
+def test_emit_defaults_headless_perms_flag_for_claude_code():
+    # A headless `claude -p` denies every edit without the bypass → the agent lands zero changes.
+    cfg = _render(MoldSpec(id="F-1", goal="g"))
+    assert 'args         = ["--dangerously-skip-permissions"]' in cfg
+    # Non-claude adapters have their own permission model → don't inject it.
+    assert "dangerously-skip-permissions" not in _render(MoldSpec(id="F-1", goal="g"), adapter="codex")
+    # Author override (incl. clearing it) wins.
+    assert 'args         = ["--foo"]' in _render(MoldSpec(id="F-1", goal="g", agent_args=["--foo"]))
+    assert "args         =" not in _render(MoldSpec(id="F-1", goal="g", agent_args=[]))
+
+
+def test_emit_pr_base_is_default_branch_never_silently_main():
+    cfg = _render(MoldSpec(id="F-1", goal="g"))
+    assert '[remote]\npr_base = "develop"' in cfg          # detect's default branch, not "main"
+    assert 'pr_base = "release/x"' in _render(MoldSpec(id="F-1", goal="g", pr_base="release/x"))
+    # No detectable default branch and no override → no [remote] section (batch falls back to its default).
+    assert "[remote]" not in _render(MoldSpec(id="F-1", goal="g"), default_branch=None)
+
+
+def test_emit_drops_bare_test_root_from_protected_paths():
+    # The whole test tree must NOT be protected — the agent has to write tests, and the held-out oracle
+    # is protected by invisibility, not by path.
+    assert "protected_paths    = []" in _render(MoldSpec(id="F-1", goal="g"),
+                                                protected_paths=["tests/"])
+    # A specific subdir is kept (a real held-out location); infra is kept.
+    kept = _render(MoldSpec(id="F-1", goal="g"),
+                   protected_paths=["tests/regression", ".gitlab-ci.yml", "migrations"])
+    assert '"tests/regression"' in kept and '".gitlab-ci.yml"' in kept and '"migrations"' in kept
+    # Author override wins verbatim.
+    assert 'protected_paths    = ["only/this"]' in _render(
+        MoldSpec(id="F-1", goal="g", protected_paths=["only/this"]))
