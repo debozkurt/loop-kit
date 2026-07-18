@@ -204,3 +204,40 @@ def test_cli_errors_when_no_oracle_and_no_config(tmp_path: Path, monkeypatch):
     empty.mkdir()
     result = _run_cli([], empty, monkeypatch, tmp_path)                # no arg, no loopkit.toml
     assert result.exit_code == 1 and "no oracle" in result.output
+
+
+# --- broken-oracle detection: a non-zero exit for the WRONG reason is not a genuine fail-first ------
+def test_broken_oracle_command_not_found_is_not_blessed(tmp_path: Path):
+    # A bare `python` where only python3/uv exist → 127. fail-first must NOT bless this.
+    runner = lambda c, w: GateResult(False, "bash: line 1: python: command not found")
+    verdict = verify_oracle("run oracle", tmp_path, timestamp=TS, run_gate=runner)
+    assert verdict.blessed is False
+    assert verdict.checks[0].broken is True and verdict.checks[0].ok is False
+
+
+def test_broken_oracle_shell_parse_error_output_is_not_blessed(tmp_path: Path):
+    runner = lambda c, w: GateResult(False, "run.sh: line 16: unexpected EOF while looking for `''")
+    verdict = verify_oracle("run oracle", tmp_path, timestamp=TS, run_gate=runner)
+    assert verdict.blessed is False and verdict.checks[0].broken is True
+
+
+def test_genuine_assertion_failure_is_blessed_not_flagged_broken(tmp_path: Path):
+    # A REAL failing test (the fail-first ideal) must not be mistaken for a broken oracle.
+    runner = lambda c, w: GateResult(False, "E   assert 20.0 == 18.0  (boundary not discounted)")
+    verdict = verify_oracle("run oracle", tmp_path, timestamp=TS, run_gate=runner)
+    assert verdict.blessed is True and verdict.checks[0].broken is False
+
+
+def test_parse_check_rejects_shell_syntax_error_before_any_gate_run(tmp_path: Path):
+    # An apostrophe in ${VAR:?word} opens an unbalanced quote → `bash -n` catches it up front, so the
+    # gate runner is never even consulted (short-circuit) and the oracle is flagged broken, not blessed.
+    oracle_sh = tmp_path / "run.sh"
+    oracle_sh.write_text('#!/usr/bin/env bash\n: "${ACCEPTANCE_DIR:?point at the oracle\'s dir}"\n'
+                         'echo ok\n')
+    consulted: list[int] = []
+    def runner(c, w):
+        consulted.append(1)
+        return GateResult(False, "should not be reached")
+    verdict = verify_oracle(f"bash {oracle_sh}", tmp_path, timestamp=TS, run_gate=runner)
+    assert verdict.blessed is False and verdict.checks[0].broken is True
+    assert not consulted            # short-circuited before running the gate

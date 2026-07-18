@@ -47,6 +47,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import shutil
 import subprocess
 import tempfile
@@ -68,6 +69,58 @@ GateRunner = Callable[[str, Path], GateResult]
 FAIL_FIRST = "fail-first"        # the oracle must FAIL on the current (buggy) tree
 PASS_ON_FIX = "pass-on-fix"      # given a reference fix, the oracle must PASS on the fixed tree
 
+# Shell-level breakage signatures. An oracle that exits non-zero for one of THESE reasons did not
+# "reproduce the bug" — it is a broken script (a parse error from an unbalanced quote, a missing
+# interpreter, a non-executable file). fail-first treats any non-zero exit as met, so without this it
+# would BLESS a broken oracle that then rejects every fix forever. (Real observed cases: an apostrophe
+# in `${VAR:?…oracle's dir}` → `unexpected EOF`; a bare `python -m pytest` where only `python3`/`uv`
+# exist → `command not found`.)
+_BROKEN_ORACLE_PATTERNS: tuple[tuple[str, "re.Pattern[str]"], ...] = (
+    ("shell parse error", re.compile(r"syntax error|unexpected EOF|unexpected end of file", re.I)),
+    ("command not found", re.compile(r"command not found|:\s*not found", re.I)),
+    ("interpreter/script missing or not executable",
+     re.compile(r"Permission denied|No such file or directory", re.I)),
+)
+
+# Tokens in an oracle command that look like a shell script we can parse-check up front.
+_SH_TOKEN_RE = re.compile(r"(?:^|\s)(/?[\w.@/+-]+\.sh)\b")
+
+
+def broken_oracle_reason(output: str | None) -> str | None:
+    """If the oracle's output shows shell-level breakage, return a short reason, else None.
+
+    Distinguishes "the oracle FAILED because it is broken" (a parse error / missing command) from "the
+    oracle FAILED because the bug reproduces" — only the latter is a genuine fail-first.
+    """
+    if not output:
+        return None
+    for reason, pat in _BROKEN_ORACLE_PATTERNS:
+        if pat.search(output):
+            return reason
+    return None
+
+
+def parse_check_oracle_scripts(oracle: str, *, which=shutil.which) -> str | None:
+    """Proactively `bash -n` any shell script the oracle command invokes.
+
+    Returns a short error string if a referenced `.sh` file has a syntax error (catching e.g. an
+    unbalanced quote BEFORE a wasted gate run, with a precise message), else None. Best-effort: if
+    `bash` isn't available or no script path resolves, it simply finds nothing and the runtime
+    output-pattern check (`broken_oracle_reason`) remains the safety net.
+    """
+    bash = which("bash")
+    if not bash:
+        return None
+    for m in _SH_TOKEN_RE.finditer(oracle):
+        path = Path(m.group(1))
+        if not path.is_file():
+            continue
+        proc = subprocess.run([bash, "-n", str(path)], capture_output=True, text=True)
+        if proc.returncode != 0:
+            lines = (proc.stderr or proc.stdout or "").strip().splitlines()
+            return f"`bash -n {path.name}` failed: {lines[-1] if lines else 'syntax error'}"
+    return None
+
 
 @dataclass
 class OracleCheck:
@@ -85,6 +138,8 @@ class OracleCheck:
     ok: bool                             # did the outcome match `expected`?
     detail: str                          # one-line human summary of the outcome
     evidence: str | None = None          # shaped oracle output (bounded), for the molder to inspect
+    broken: bool = False                 # the oracle FAILED for a BROKEN reason (parse error / missing
+                                         # command / non-exec) — a non-genuine reproduction, never blessed
 
 
 @dataclass
@@ -172,10 +227,19 @@ def _run_oracle(run_gate: GateRunner, oracle: str, workspace: Path, *, expect_pa
     # gate passed we have no captured output, so synthesize a short note.
     evidence = result.feedback if result.feedback else ("(oracle exited 0 — no output captured)"
                                                         if passed else None)
+    # A fail-first "failure" that is really shell-level breakage (a parse error, a missing command) is
+    # NOT a genuine reproduction — flag it so it can't be blessed, with a distinct, actionable detail.
+    broken = False
+    if name == FAIL_FIRST and not passed:
+        reason = broken_oracle_reason(result.feedback)
+        if reason:
+            broken, ok = True, False
+            detail = (f"the oracle FAILED but for a BROKEN reason ({reason}) — not a genuine "
+                      "reproduction of the goal; fix the oracle script, then re-verify")
     if evidence:
         evidence = shape_failure_output(evidence, budget=tail)
     return OracleCheck(name=name, expected=expected, passed_gate=passed, ok=ok, detail=detail,
-                       evidence=evidence)
+                       evidence=evidence, broken=broken)
 
 
 def verify_oracle(oracle: str, workspace: Path, *, timestamp: str, fix: str | None = None,
@@ -201,6 +265,23 @@ def verify_oracle(oracle: str, workspace: Path, *, timestamp: str, fix: str | No
     workspace = Path(workspace).resolve()
     runner = run_gate or _default_runner()
     sig = oracle_signature(oracle, fix, mode)
+    from .. import __version__ as _v
+    version = loopkit_version or _v
+
+    # Validity precheck (cheap, before any gate run): a broken oracle script "fails" for the wrong
+    # reason and fail-first would bless it. `bash -n` the scripts it invokes and short-circuit with a
+    # distinct BROKEN verdict — a precise "fix the oracle" signal, not a bogus blessing.
+    parse_err = parse_check_oracle_scripts(oracle)
+    if parse_err:
+        log.warn("verify.oracle_broken", stage="parse", reason=parse_err)
+        check = OracleCheck(
+            name=FAIL_FIRST, expected="fail", passed_gate=False, ok=False, broken=True,
+            detail=f"the oracle is BROKEN, not failing-for-the-right-reason — {parse_err}. "
+                   "Fix the oracle script, then re-verify.",
+            evidence=parse_err)
+        return OracleVerdict(oracle=oracle, target=str(workspace), blessed=False, checks=[check],
+                             signature=sig, loopkit_version=version, timestamp=timestamp, fix=fix,
+                             isolated=False)
 
     # A fix forces isolation (we're about to mutate a tree); `isolate` opts fail-first into a copy too.
     isolated = isolate or fix is not None
@@ -242,8 +323,6 @@ def verify_oracle(oracle: str, workspace: Path, *, timestamp: str, fix: str | No
                                               name=PASS_ON_FIX, tail=tail))
 
     blessed = all(c.ok for c in checks)
-    from .. import __version__ as _v
-    version = loopkit_version or _v
     log.info("verify.done", blessed=blessed, checks=len(checks),
              failed=[c.name for c in checks if not c.ok], sig=sig)
     return OracleVerdict(

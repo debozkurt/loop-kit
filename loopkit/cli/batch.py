@@ -27,6 +27,28 @@ from ._support import app, console, err, fail
 # dim = never ran (skipped / validate-aborted — not failures, but not successes either).
 _REASON_COLORS = {"done": "green", "skipped": "dim", "validate_abort": "dim"}
 
+# --open-pr authenticates the push/MR from a forge token in the environment (loopkit's env-fed git
+# credential helper). Which env var by provider — gitlab reads GITLAB_TOKEN, github GITHUB_TOKEN/GH_TOKEN.
+_FORGE_TOKENS = {"gitlab": ("GITLAB_TOKEN",), "github": ("GITHUB_TOKEN", "GH_TOKEN")}
+
+
+def _warn_if_missing_forge_token(open_pr: bool, provider: str | None) -> None:
+    """Pre-flight, advisory (never blocks): warn when `--open-pr` is set but no forge token is in the
+    environment. Without it, loopkit runs the whole batch and then fails EVERY push with
+    'HTTP Basic: Access denied' — the work is done but no MR opens. Fires on --dry-run too (the right
+    moment to catch it). Issue *fetch* uses the CLI's own stored token, so only *push* needs this.
+    """
+    if not open_pr:
+        return
+    keys = _FORGE_TOKENS.get((provider or "").lower(), ("GITLAB_TOKEN", "GITHUB_TOKEN", "GH_TOKEN"))
+    if any(os.environ.get(k) for k in keys):
+        return
+    console.print(
+        f"[yellow]![/] [bold]--open-pr[/] is set but no forge token is in the environment "
+        f"({' / '.join(keys)}). loopkit's git push authenticates from the env, so every push will "
+        f"fail [italic]HTTP Basic: Access denied[/] after the work is done. Export it first — e.g. "
+        f"[dim]export GITLAB_TOKEN=$(glab config get token)[/].")
+
 
 @app.command("batch")
 def batch(tasks_file: Path = typer.Option(..., "--tasks", "-t",
@@ -99,6 +121,7 @@ def batch(tasks_file: Path = typer.Option(..., "--tasks", "-t",
         f" · manifest {tasks_file}", title="loopkit batch"))
     console.print(_schedule_table(specs, waves))
     _print_overlap_warnings(specs)
+    _warn_if_missing_forge_token(open_pr, provider or manifest.defaults.provider)
     if dry_run:
         console.print("[dim]dry run — nothing executed[/]")
         raise typer.Exit(0)
