@@ -32,6 +32,7 @@ Two knobs govern "how much is molded at once", on independent axes:
 from __future__ import annotations
 
 import json
+import re
 import shlex
 import subprocess
 from dataclasses import dataclass, field
@@ -82,8 +83,11 @@ TIER_ASSERTIONS: dict[str, str] = {
 }
 
 # The held-out oracle skeleton (the skill's `templates/acceptance-oracle.sh`, embedded so molding
-# works from an installed package). FILL markers are the "judgment still owed" signal: a run.sh
-# that still contains one is never verified, let alone blessed.
+# works from an installed package). The FILL placeholders are the "judgment still owed" signal: a
+# run.sh whose code still contains one is never verified, let alone blessed. The fill TARGETS are
+# code-position tokens (`FILL_token` / `FILL/path`); the `# FILL 1/2/3 —` lines are just human step
+# labels pointing at them. The detector keys on the code tokens only, so a proposer may keep (or
+# drop) the labels and prose freely — see `_FILL_MARKER_RE` / `_has_fill_markers`.
 _ORACLE_SKELETON = """\
 #!/usr/bin/env bash
 # Held-out acceptance oracle for task '{task_id}' (tier: {tier}).
@@ -92,7 +96,7 @@ _ORACLE_SKELETON = """\
 # Contract: CWD is the workspace clone; $ACCEPTANCE_DIR points at this directory.
 # Exit 0 = the fix is correct, non-zero = not yet (feedback on stdout).
 # CRITICAL: it must FAIL on the current (buggy) tree — `loopkit mold-batch` verifies exactly that
-# (fail-first) before this oracle is trusted; a FILL marker below blocks verification entirely.
+# (fail-first) before this oracle is trusted; any unfilled placeholder below blocks verification.
 set -uo pipefail
 
 # FILL 1 — where the hidden test lands in the repo (a path the agent is NOT told about):
@@ -291,9 +295,22 @@ def oracle_command(oracle_dir: Path) -> str:
             f"bash {shlex.quote(str(oracle_dir / 'run.sh'))}")
 
 
+# An UNFILLED placeholder — not prose, not a step label. The skeleton's fill TARGETS are all
+# code-position tokens: `FILL/path/in/repo/...`, `FILL_test_holdout`, `FILL_test_command` — i.e.
+# `FILL` immediately followed by `_` or `/`. That is the only reliable "still owed" signal.
+# Deliberately does NOT match either kind of harmless leftover, both of which are `FILL` + space:
+#   - the `# FILL 1/2/3 —` STEP LABELS a proposer may keep above the line it just filled,
+#   - PROSE like "a FILL marker below" / "FILL markers".
+# A bare `"FILL" in text` substring test — or an over-eager `FILL \d` — false-positives on those
+# and stalls a fully-filled oracle at needs-oracle (observed on real molding runs: one oracle kept
+# the prose comment, another kept the numbered step labels; both were complete and blessed by
+# synth-gate once run directly).
+_FILL_MARKER_RE = re.compile(r"FILL[_/]")
+
+
 def _has_fill_markers(path: Path) -> bool:
     try:
-        return "FILL" in path.read_text()
+        return _FILL_MARKER_RE.search(path.read_text()) is not None
     except OSError:
         return True                                       # unreadable = not a real oracle
 

@@ -28,6 +28,8 @@ from loopkit.extensions.mold import (
     MoldDefaults,
     MoldSpec,
     ShellProposer,
+    _has_fill_markers,
+    _ORACLE_SKELETON,
     _render_task_config,
     load_mold_manifest,
     mold_batch,
@@ -173,6 +175,82 @@ def test_oracle_that_passes_on_buggy_tree_is_rejected(tmp_path):
     row = result.rows[0]
     assert row.status == ORACLE_REJECTED and not row.verdict.blessed
     assert "fail-first" in row.note
+
+
+# --------------------------------------------------------------------------------------------
+# FILL-marker detection: real markers vs. prose that merely says the word. Regression — a proposer
+# that fills every marker but keeps the skeleton's explanatory comment ships a COMPLETE oracle; a
+# bare `"FILL" in text` substring test wrongly re-read it as unfilled and stalled it at
+# needs-oracle (observed on a real molding run). Only the marker grammar counts.
+# --------------------------------------------------------------------------------------------
+def test_has_fill_markers_flags_the_unfilled_skeleton(tmp_path):
+    run_sh = tmp_path / "run.sh"
+    run_sh.write_text(_ORACLE_SKELETON.format(task_id="a", tier="authz", assertion="x"))
+    assert _has_fill_markers(run_sh)          # FILL 1/2/3 + FILL_/FILL_ token + FILL/ path present
+
+
+def test_has_fill_markers_ignores_prose_mentions_of_the_word(tmp_path):
+    run_sh = tmp_path / "run.sh"
+    run_sh.write_text(
+        "#!/usr/bin/env bash\n"
+        "# any unfilled placeholder below blocks verification — a FILL marker would.\n"
+        "# FILL markers are the judgment-still-owed signal, but this oracle has none.\n"
+        "pytest tests/zz_holdout_test.py\n")
+    assert not _has_fill_markers(run_sh)      # a complete oracle; the word only appears in prose
+
+
+def test_has_fill_markers_ignores_kept_step_labels(tmp_path):
+    """A proposer may fill the code line yet KEEP the `# FILL N —` step label above it. The label is
+    not a fill target, so a filled oracle that keeps the labels must read as complete (the
+    `FILL \\d`-style over-match this guards against was the second false positive found in the wild)."""
+    run_sh = tmp_path / "run.sh"
+    run_sh.write_text(
+        "#!/usr/bin/env bash\n"
+        "# FILL 1 — where the hidden test lands:\n"
+        "HOLDOUT=\"tests/regression/zz_holdout_test.py\"\n"
+        "# FILL 2 — copy the hidden test into the tree:\n"
+        "cp \"$ACCEPTANCE_DIR/holdout.py\" \"$HOLDOUT\"\n"
+        "# FILL 3 — run it through the repo's real runner:\n"
+        "pytest \"$HOLDOUT\"\n")
+    assert not _has_fill_markers(run_sh)      # labels kept, code filled — nothing actually owed
+
+
+def test_has_fill_markers_flags_unfilled_code_placeholders(tmp_path):
+    run_sh = tmp_path / "run.sh"
+    run_sh.write_text(                        # the skeleton's code tokens, still unfilled
+        "#!/usr/bin/env bash\n"
+        "HOLDOUT=\"FILL/path/in/repo/test_holdout\"\n"
+        "cp \"$ACCEPTANCE_DIR/FILL_test_holdout\" \"$HOLDOUT\"\n"
+        "FILL_test_command \"$HOLDOUT\"\n")
+    assert _has_fill_markers(run_sh)          # FILL/ + FILL_ code placeholders → still owed
+
+
+def test_filled_oracle_that_keeps_labels_and_prose_still_verifies(tmp_path):
+    """End-to-end guard for the false positive: the proposer fills every code placeholder but
+    preserves BOTH the skeleton's prose comment and its `# FILL N —` step labels. The oracle is
+    complete and fails-first, so it must be VERIFIED — not demoted to needs-oracle."""
+    repo = _seed_repo(tmp_path / "repo")
+    m = load_mold_manifest(_mold_manifest(tmp_path, '[[task]]\nid = "a"\ngoal = "x"\n', repo))
+    out = tmp_path / "molded"
+    script = tmp_path / "proposer_keeps_leftovers.sh"
+    script.write_text(                        # marker-free CODE, but keeps the label + prose leftovers
+        "#!/usr/bin/env bash\n"
+        "cat > \"$MOLD_ORACLE_DIR/run.sh\" <<'ORACLE'\n"
+        "#!/usr/bin/env bash\n"
+        "# any unfilled placeholder below blocks verification — a FILL marker would.\n"
+        "# FILL 1 — the held-out test path (filled below):\n"
+        "echo 'not fixed yet'\n"
+        "exit 1\n"
+        "ORACLE\n"
+        "echo proposed\n")
+    script.chmod(0o755)
+    result = mold_batch(m, out, level="oracle", timestamp=TS,
+                        proposer=ShellProposer(f"bash {script}"))
+    row = result.rows[0]
+    assert row.status == VERIFIED             # was NEEDS_ORACLE under the substring / FILL \d bug
+    assert row.verdict is not None and row.verdict.blessed
+    kept = (out / "a" / "acceptance" / "run.sh").read_text()
+    assert "a FILL marker would" in kept and "# FILL 1 —" in kept   # both leftovers survived, harmless
 
 
 def test_level_full_emits_config_and_batch_manifest(tmp_path):
