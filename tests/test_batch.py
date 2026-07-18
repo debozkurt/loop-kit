@@ -446,3 +446,36 @@ after = ["a"]
                    "--dry-run").exit_code == 1
     assert _invoke(monkeypatch, tmp_path, "--tasks", str(ok), "--only", "a",
                    "--dry-run").exit_code == 0
+
+
+# --- --open-pr forge-token pre-flight warning (advisory; never blocks) ------------------------
+def _gitlab_manifest(tmp_path: Path) -> Path:
+    _config_toml(tmp_path / "base.toml", _seed_repo(tmp_path / "src"))
+    return _manifest(tmp_path, '[defaults]\nconfig = "base.toml"\nprovider = "gitlab"\n\n'
+                               '[[task]]\nid = "a"\ngoal = "fix a"\n')
+
+
+def test_open_pr_without_forge_token_warns(monkeypatch, tmp_path):
+    mf = _gitlab_manifest(tmp_path)
+    for k in ("GITLAB_TOKEN", "GITHUB_TOKEN", "GH_TOKEN"):
+        monkeypatch.delenv(k, raising=False)
+    res = _invoke(monkeypatch, tmp_path, "--tasks", str(mf), "--open-pr", "--dry-run")
+    assert res.exit_code == 0, res.output
+    out = "".join(res.output.split())              # defeat rich line-wrapping
+    assert "noforgetoken" in out and "GITLAB_TOKEN" in out
+
+
+def test_open_pr_with_forge_token_is_quiet(monkeypatch, tmp_path):
+    mf = _gitlab_manifest(tmp_path)
+    monkeypatch.setenv("GITLAB_TOKEN", "x-token")
+    res = _invoke(monkeypatch, tmp_path, "--tasks", str(mf), "--open-pr", "--dry-run")
+    assert res.exit_code == 0, res.output
+    assert "noforgetoken" not in "".join(res.output.split())
+
+
+def test_no_open_pr_never_warns_about_token(monkeypatch, tmp_path):
+    mf = _gitlab_manifest(tmp_path)
+    for k in ("GITLAB_TOKEN", "GITHUB_TOKEN", "GH_TOKEN"):
+        monkeypatch.delenv(k, raising=False)
+    res = _invoke(monkeypatch, tmp_path, "--tasks", str(mf), "--dry-run")   # no --open-pr
+    assert res.exit_code == 0 and "noforgetoken" not in "".join(res.output.split())
