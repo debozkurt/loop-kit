@@ -13,9 +13,12 @@ want *right now* rather than reading all of them:
 | [`ci/`](ci/) | *How do I deploy it to my forge?* The CI workflow templates (GitHub/GitLab × API-key/claude-code) — a labelled issue becomes a draft PR. The middle of loopkit's three tiers (*local · **CI** · cloud fleet*). | ✓ (in CI) | **on** — `--open-pr` opens a real draft PR |
 | [`molding/`](molding/) | *How do I set loopkit up for MY repo/issue?* The **`loopkit-mold` skill** — point a copilot at your repo and it molds loopkit (config + gates + a fail-first oracle + which features fit), using the blocks above. Composes the others; doesn't duplicate them. (Part IV.) | ✗ (a skill a copilot runs) | via the per-issue config |
 
-**Start here:** new to loopkit → [`walkthrough/`](walkthrough/). Setting up your own repo →
-[`molding/`](molding/) (let a copilot mold it) or copy [`gates/loopkit.example.toml`](gates/loopkit.example.toml)
-and keep what fits (or run `loopkit init`). Wiring it into CI → [`ci/`](ci/).
+**Start here:** the [README Quickstart](../README.md#quickstart--from-zero-to-a-merged-fix) is the
+canonical path; these folders are what each step reaches for. New to loopkit →
+[`walkthrough/`](walkthrough/) (Quickstart step 1, annotated). Setting up your own repo →
+[`molding/`](molding/) (let a copilot mold it — the recommended step 2) or copy
+[`gates/loopkit.example.toml`](gates/loopkit.example.toml) and keep what fits (the by-hand fallback).
+Wiring it into CI → [`ci/`](ci/).
 
 ## On the two config files (a common point of confusion)
 

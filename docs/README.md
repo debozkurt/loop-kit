@@ -1,7 +1,9 @@
 # loopkit docs — index
 
-Start with the **operator guides**; drop into the **architecture wiki** for how it's built; the
-**phase references** are the design records + the current-phase resume doc.
+**New here? Start with the [README Quickstart](../README.md#quickstart--from-zero-to-a-merged-fix)** —
+five steps from install to a merged fix. This index is everything past that: the **operator guides**
+for going deeper on your repo, the **architecture wiki** for how it's built, and the **phase
+references** (design records + current-phase resume doc).
 
 > These are loopkit's **operator + design** docs. The *concepts* live in the paired
 > [*Agentic Loops* manual](https://github.com/debozkurt/loop-guide) — loopkit is its reference

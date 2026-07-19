@@ -1,56 +1,29 @@
 # Using loopkit on your own repo
 
-The demo-repo teaches the mechanics; this is how you point loopkit at **your** project, sync the
-result to GitHub/GitLab, and let issues drive a fleet. Everything outward-facing is **opt-in and
-off by default** — nothing leaves your machine until you set `[remote] enabled = true`.
+This is the **deep reference** behind the README's Quickstart. Do the
+[Quickstart](../README.md#quickstart--from-zero-to-a-merged-fix) first — it gets one goal to `DONE`
+on your repo in five steps. This doc picks up where it ends: choosing good gates, working a whole
+backlog, syncing to a forge, driving a fleet from issues, running in CI, and the parallel batch.
+Everything outward-facing is **opt-in and off by default** — nothing leaves your machine until you
+set `[remote] enabled = true`.
 
 The mental model never changes: **a run is `goal` + two gates + a repo.** Everything else (the tick
 lifecycle, durability, safety, stops) is fixed. So "use it on a new project" is really "write a
-good goal and two honest gates."
+good goal and two honest gates" — which is why the rest of this section is mostly about the gates.
 
 ---
 
-## 1. Target any repo on your machine
+## 1. Target any repo, and choose the two gates
 
-The single loop runs against whatever the config's `repo` points at.
+The Quickstart scaffolded `loopkit.toml` and set the four fields (`goal`, `gate.iteration`,
+`gate.acceptance`, `safety.protected_paths`). Two things worth knowing beyond that:
 
-```bash
-cd ~/code/my-project
-loopkit init .                 # scaffolds loopkit.toml + PROMPT.md (never overwrites)
-```
-
-Edit `loopkit.toml` — the four fields that define the run:
-
-```toml
-goal   = "Make the CSV exporter handle quoted fields with embedded newlines, per PROMPT.md."
-repo   = "."
-branch = "loopkit/run"         # never main/master
-
-[agent]
-adapter = "claude-code"        # mock | claude-code | codex
-
-[gate]
-iteration  = "pytest tests/unit -q -k exporter"     # FAST, in-sample — runs every tick
-acceptance = "pytest tests/integration/exporter"    # HELD-OUT — runs once before DONE
-
-[safety]
-protected_paths = ["tests/"]   # the loop may not edit its own gates (Ch 9 + 16)
-```
-
-Then:
-
-```bash
-loopkit doctor                 # preflight: branch safe? agent on PATH? gates set?
-loopkit run --dry-run          # rehearse the control flow — no agent, no tokens
-loopkit run                    # real run; commits every tick to loopkit/run, drives to DONE
-loopkit run --sandbox          # same, inside the Docker image (OS-level blast-radius containment)
-```
-
-Two ways to point at a repo without editing the toml's `repo`:
+**Point at a repo without editing the toml's `repo`:**
 
 ```bash
 loopkit run -c ~/code/my-project/loopkit.toml --repo ~/code/my-project   # --repo overrides
 cd ~/code/my-project && loopkit run                                      # or just run from inside
+loopkit run --sandbox                                                    # inside the Docker image (OS-level containment)
 ```
 
 **Choosing the two gates is the whole craft.** The iteration gate is what the loop optimizes every

@@ -30,17 +30,6 @@ evolutionary select-and-reseed), **continuous review** that gates done on a clea
 **skill write-back flywheel** so solved runs teach future ones. Each is `None`-safe: leave it
 out and the core behaves exactly as above. See *Beyond one loop* below.
 
-## Where to go
-
-| You want to… | Go to |
-|---|---|
-| **Run it now** — watch a loop reach `DONE` | [`examples/walkthrough/`](examples/walkthrough/) |
-| **Use it on your repo** | [`docs/USING-ON-YOUR-REPO.md`](docs/USING-ON-YOUR-REPO.md) |
-| **Learn the concepts** — the written manual | [the *Agentic Loops* manual](https://github.com/debozkurt/loop-guide) |
-| **Run the concepts** — the manual's labs, in code | `loopkit demo` · [`loopkit/scenarios/`](loopkit/scenarios/) |
-| **Understand how it's built** | [`docs/architecture/`](docs/architecture/README.md) |
-| **All docs · all examples** | [`docs/README.md`](docs/README.md) · [`examples/`](examples/) |
-
 ## Install
 
 ```bash
@@ -52,48 +41,102 @@ The core is just `typer + rich + pydantic`. Everything heavy is an optional extr
 `[claude]`/`[openai]` (the API-adapter SDKs), `[trace]` (LangSmith tracing), `[fleet]` (Redis).
 `pip install loopkit` pulls none of them; `[agents]` = both API SDKs, `[all]` = everything.
 
-## Quickstart
+## Quickstart — from zero to a merged fix
 
-Point it at a repository:
+Five steps, real commands, in order. Do step 1 first (2 minutes, no config, no API key); it proves
+the install works and shows you what a run looks like before you point it at anything you care about.
 
-```bash
-cd your-repo
-loopkit init                   # scaffolds loopkit.toml + PROMPT.md
-loopkit init --plan            # OR: plan-driven backlog mode — a checklist the loop works through
-loopkit doctor                 # preflight: safe to run here? gates set? agent on PATH?
-loopkit run                    # loops to the goal (use --dry-run to rehearse the control flow)
-loopkit measure -n 10          # reliability: run the goal 10× → pass^k / pass@k (harness-stamped)
-loopkit synth-gate <cmd>       # is this held-out oracle real? fail-first verify it (--fix ⇒ fail→pass)
-loopkit detect                 # read the stack off file markers → a proposed loopkit.toml (--write to save)
-loopkit route --from-report r.json   # measured pass^k → run once, or escalate to evolve (best-of-N)
-```
+### 1 · See a loop reach `DONE` (2 min, zero setup)
 
-Or let a coding-agent copilot mold loopkit *for* your repo — detect the stack, wire the gates + a
-fail-first oracle, pick the features that fit — with the [`loopkit-mold` skill](examples/molding/)
-(Part IV; [design](docs/part-iv-molding-kit.md)). Its two load-bearing primitives are code, not a prompt:
-`loopkit detect` reads the mechanical, safety-critical config (test runner, protected paths, default
-branch, adapter) off file markers so nothing is guessed, and `loopkit synth-gate` proves a proposed
-acceptance oracle actually reproduces the goal (fails on the buggy tree) before you trust it — the
-determinism and verification a copilot can't self-supply.
-
-Or learn the concepts from the runnable course:
+Run it against the bundled demo repo — a tiny Python project with a planted bug its *visible* tests
+miss and its *held-out* tests catch:
 
 ```bash
-loopkit demo                   # list the scenarios
-loopkit demo 9                 # Ch 9  — the held-out acceptance gate (overfitting)
-loopkit demo 8                 # Ch 8  — continuous review gates done
-loopkit demo 10                # Ch 10 — fan-out over isolated workers
-loopkit demo 11                # Ch 11 — evolutionary search, validated
-loopkit demo 17                # Ch 17 — the skill write-back flywheel
-loopkit demo 20                # Ch 20 — triggers as infrastructure (a signed webhook → one run)
-loopkit demo 21                # Ch 21 — the CI deployment tier (an issue → a draft PR, no cluster)
-loopkit demo 24                # Ch 24 — reliability: pass^k falls while pass@k rises
-loopkit learn 9                # any scenario, narrated, with pauses
-loopkit demo 9 --live          # use the real claude-code agent (where a scenario supports it)
+cp -r "$(python -c 'import loopkit,pathlib as p;print(p.Path(loopkit.__file__).parent.parent/"examples"/"demo-repo")')" /tmp/lk-demo
+cd /tmp/lk-demo && git init -q . && git add -A && git -c user.email=you@x.com -c user.name=you commit -qm init
+loopkit doctor                 # preflight: branch safe? agent on PATH? gates set?
+loopkit run                    # drives the bug to DONE, committing each tick to loopkit/run
 ```
 
-Chapters 20–21 are the **Part III** ecosystem labs — running the loop inside GitHub/GitLab. The
-companion teaching module is [`docs/part-iii-ecosystem.md`](docs/part-iii-ecosystem.md).
+You should end on a `reason: done` panel; `git diff main..loopkit/run` shows the fix.
+[`examples/walkthrough/`](examples/walkthrough/) is this same run annotated line by line (including a
+token-free `--adapter mock` dry-run first) — read it if you want to understand each log line.
+
+### 2 · Set loopkit up on *your* repo
+
+**Recommended — let a coding agent mold it.** The [`loopkit-mold` skill](examples/molding/) points a
+copilot at your repo to detect the stack, wire the two gates + a fail-first-verified acceptance
+oracle, and pick the features that fit. Install the skill once, then ask your agent to use it:
+
+```bash
+ln -s "$(pwd)/examples/molding" ~/.claude/skills/loopkit-mold     # once, from the loopkit checkout
+# then, inside your repo:  "use loopkit-mold to set up loopkit for this repo"
+```
+
+**Fallback — do it by hand** (no copilot needed). Scaffold the config, let `detect` fill the
+mechanical fields off your stack markers, then edit the four fields that define any run:
+
+```bash
+cd ~/code/my-project
+loopkit init .                 # writes loopkit.toml + PROMPT.md (never overwrites)
+loopkit detect --write         # fills test runner / protected paths / branch / adapter from file markers
+```
+
+```toml
+# loopkit.toml — the four fields that define a run:
+goal   = "Describe exactly what 'done' means, in one or two sentences."
+[gate]
+iteration  = "pytest tests/unit -q"          # FAST, in-sample — runs every tick
+acceptance = "pytest tests/integration -q"   # HELD-OUT — runs once before DONE (see 'two gates' below)
+[safety]
+protected_paths = ["tests/"]                 # the loop may not edit its own gates
+```
+
+### 3 · Pre-flight, rehearse, run
+
+```bash
+loopkit doctor                 # is it safe here? are the gates actually set up to work?
+loopkit run --dry-run          # rehearse the control flow with no agent — no tokens spent
+loopkit run                    # the real run: commits every tick to its branch, drives to DONE
+```
+
+**How to tell it worked:** the run ends on a `reason: done` panel (any other reason is a hard stop —
+see [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md)); `git diff main..<branch>` is the change it
+made. A silent stretch is normal (the agent is working) — [`docs/OPERATING.md`](docs/OPERATING.md)
+shows how to tell a working run from a hung one.
+
+### 4 · Ship it as a draft PR
+
+```bash
+loopkit run --open-pr          # a DONE run pushes its branch + opens a DRAFT PR (needs gh/glab authed)
+```
+
+Nothing leaves your machine until you ask: this flag (or a static `[remote]` block) is the only thing
+that pushes, it can never push to `main`, and the PR is always a draft — you review and merge. Full
+setup: [`docs/USING-ON-YOUR-REPO.md`](docs/USING-ON-YOUR-REPO.md#2-sync-the-result-to-a-remote-github--gitlab).
+
+### 5 · Scale to many tasks
+
+One goal is `loopkit run`. Beyond that, three shapes — all detailed in
+[`docs/USING-ON-YOUR-REPO.md`](docs/USING-ON-YOUR-REPO.md):
+
+```bash
+loopkit init --plan            # SEQUENTIAL backlog: one loop grinds an ordered checklist
+loopkit batch --tasks b.toml   # PARALLEL: N independent tasks, one isolated branch + draft PR each
+loopkit mold-batch --tasks p.toml   # build that batch.toml for a pile of findings (oracle + config per task)
+```
+
+## Where to go
+
+| You want to… | Go to |
+|---|---|
+| **Run it now** — watch a loop reach `DONE`, annotated | [`examples/walkthrough/`](examples/walkthrough/) |
+| **Set it up on your repo** — end to end | [`docs/USING-ON-YOUR-REPO.md`](docs/USING-ON-YOUR-REPO.md) |
+| **Every `loopkit.toml` knob**, annotated | [`docs/CONTROL-FILES.md`](docs/CONTROL-FILES.md) · [`examples/gates/loopkit.example.toml`](examples/gates/loopkit.example.toml) |
+| **Pick an example** — 7 dirs, 7 questions | [`examples/`](examples/) |
+| **Learn the concepts** — the written course | [the *Agentic Loops* manual](https://github.com/debozkurt/loop-guide) · `loopkit demo` (runnable labs) |
+| **Understand how it's built** | [`docs/architecture/`](docs/architecture/README.md) |
+| **All docs** | [`docs/README.md`](docs/README.md) |
 
 ## The two gates (the heart of it)
 
@@ -271,26 +314,15 @@ Every other knob — `[stops]`, the optional second `regression` oracle, `[remot
 gate-stability preflight — is annotated in [`docs/CONTROL-FILES.md`](docs/CONTROL-FILES.md); the
 fully-commented reference is [`examples/gates/loopkit.example.toml`](examples/gates/loopkit.example.toml).
 
-## Use it on your own repo
+## Outward edges — beyond a local run
 
-loopkit isn't tied to the demo — point it at any project. The four fields that define a run:
-`goal`, `gate.iteration`, `gate.acceptance`, `safety.protected_paths`.
-
-```bash
-cd ~/code/my-project
-loopkit init .                 # writes loopkit.toml + PROMPT.md (never overwrites)
-loopkit doctor                 # preflight: branch safe? agent on PATH? gates set?
-loopkit run --dry-run          # rehearse the control flow — no agent, no tokens
-loopkit run                    # real run: commits every tick to its branch, drives to DONE
-loopkit measure -n 10          # how *reliably* does it solve this goal? pass^k over 10 trials
-```
-
-From there, three outward edges — all opt-in, all off by default, each walked through end-to-end in
+Setup is in the Quickstart above; these are the opt-in, off-by-default ways a finished run leaves
+your machine. Each is walked through end to end in
 [`docs/USING-ON-YOUR-REPO.md`](docs/USING-ON-YOUR-REPO.md):
 
 - **Sync to a forge** — a `[remote]` block (or one-off `loopkit run --open-pr`) pushes the loop's
-  branch and opens a **draft** PR/MR. The Ch 16 guard holds at this edge: it *cannot* push to `main`
-  and never force-pushes. Needs `gh`/`glab` authenticated.
+  branch and opens a **draft** PR/MR. The safety guard holds here: it *cannot* push to `main` and
+  never force-pushes. Needs `gh`/`glab` authenticated.
 - **Drive the fleet from issues** — label a backlog and `loopkit fleet run --from-issues` turns each
   open issue into a task on its own branch (`loopkit/issue-N` → a PR that closes it).
 - **Hands-off in CI, no cluster** — `loopkit init --ci github|gitlab`; a labelled issue starts a CI
@@ -313,7 +345,7 @@ The leverage order: most steering happens in `PROMPT.md` (what to do) and the **
 means) — they are the loop's goal and its grader. `CLAUDE.md`/`AGENTS.md` hold the rules that apply
 to *every* task; skills accumulate what past runs learned.
 
-## Safety defaults (Chapter 16)
+## Safety defaults
 
 loopkit is safe-by-default. It refuses to run on `main`/`master`, wants a clean tree on an
 allowed branch, commits every tick to its own branch (never force-pushes), reverts and halts
@@ -455,20 +487,16 @@ The fleet runs on a **dedicated, isolated** local kind cluster; the Makefile exp
 Full cluster walkthrough: [`docs/archive/part-ii-tilt-fleet-plan.md`](docs/archive/part-ii-tilt-fleet-plan.md).
 Using it on your own repo: [`docs/USING-ON-YOUR-REPO.md`](docs/USING-ON-YOUR-REPO.md).
 
-## Documentation
+## Operating references
 
-Index: [`docs/README.md`](docs/README.md). Operator quickstarts:
+Nav and setup are in [Where to go](#where-to-go) above; these are the day-to-day operating guides
+(full index: [`docs/README.md`](docs/README.md)):
 
-- **[All examples](examples/)** — four runnable dirs, each answering a different question
-  (walkthrough · demo-repo · gates · CI), mapped in [`examples/README.md`](examples/README.md).
-- **[Walkthrough](examples/walkthrough/)** — copy-this-run-it-see-`DONE` on the bundled demo repo.
 - **[Billing & credentials](docs/BILLING.md)** — `claude-code` runs on your **subscription** by default;
   `--api-key` opts into billing; `doctor` shows which pays; bound subscription runs with `--max-iter`.
 - **[Operating a run](docs/OPERATING.md)** — tell a *silent* run from a hung one, never edit a live
   tree, how to resume, where output goes per tier.
 - **[Troubleshooting](docs/TROUBLESHOOTING.md)** — `cost: $0.00`, `rc=1`, `safety_halt`, flaky gate, …
-- **[Gates](examples/gates/)** — a gate is *any shell command*; ready-to-copy two-oracle kits
-  (test split · docs/structural · peer-LLM-review).
 
 ## Develop
 
