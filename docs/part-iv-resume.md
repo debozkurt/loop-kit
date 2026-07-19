@@ -14,8 +14,15 @@ The spacer remediation harness is the existence proof (a human hand-built exactl
 findings). **The molder is the copilot; loopkit supplies the determinism, verification, and provenance
 the judgment can't self-supply.**
 
-## Current state (2026-07-16)
+## Current state (2026-07-19)
 
+- **Env-liveness probe SHIPPED (Q3, 2026-07-19)** — `synth-gate --probe` + mandatory
+  `acceptance/probe.sh` for molded oracles (`MOLD_PROBE_FILE` proposer contract, `probe_command()`,
+  `verdict.env_live`). Closes the 6/6 Wave-A false-blessing class: an env failure (SCRAM auth,
+  SIGABRT'd venv in the isolated copy) exits non-zero exactly like a genuine fail-first, so the
+  probe demands a positive proof — the oracle's own runner must pass a trivial guaranteed-green
+  invocation in the same tree — before fail-first is trusted. Probe fails ⇒ `env-broken`, never
+  blessed. Details in [`part-iv-molding-kit.md`](part-iv-molding-kit.md) (synth-gate section).
 - **Layer 5 BUILT** (branch `feat/batch-cli`): **`loopkit mold-batch`** (`extensions/mold.py` + CLI +
   `demo 29` + `tests/test_mold.py`, 18 tests no tokens) — unattended batch molding per the design's
   crux resolution: the coverage-tier→typed-DoD table carries the *mechanical* half of oracle proposal

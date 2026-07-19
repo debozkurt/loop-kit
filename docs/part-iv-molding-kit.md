@@ -180,6 +180,18 @@ The skill's content:
   is the verification loop, so it must be code, not a prompt. Lives in `extensions/synth_gate.py`
   (self-contained, stdlib + the core executor's `run_gate`, no fleet coupling); `loopkit demo 25` is the
   runnable lab.
+  - **`--probe` (env-liveness, Q3 — dogfooded from a 6/6 false-blessing batch):** fail-first cannot
+    tell a *diagnostic* failure (the assertion caught the bug) from an *environmental* one (test-DB
+    auth down, missing dep, a venv the isolated copy broke) — both exit non-zero, and output-signature
+    matching only catches failure classes already seen. The probe is the positive proof: a trivial
+    guaranteed-pass command through the oracle's OWN runner, run in the SAME tree as fail-first
+    (inside the isolated copy — materialization itself can break an env healthy at the source). Probe
+    fails ⇒ verdict **env-broken** (`env_live: false`), fail-first skipped, never blessed; no probe ⇒
+    `env_live: null` (unprobed, back-compat). Mold makes it **required**: the skeleton emits
+    `acceptance/probe.sh` (template: `templates/acceptance-probe.sh`), the proposer fills it via
+    `MOLD_PROBE_FILE`, and unfilled probe FILLs hold the task at needs-oracle. This is the fix-free
+    half of pass-on-fix (Q4): an env-broken oracle can never pass, but proving that normally needs a
+    reference fix — the probe needs none.
 - **`loopkit route`** ✅ **BUILT** — reliability-gated routing: read how *reliably* the loop solves a goal
   (`measure`'s pass^k) and apply the mechanical rule that connects it to `evolve` — **at/above a
   threshold, run once; below it, escalate to `evolve`** (best-of-N + held-out re-validation), sizing the

@@ -62,20 +62,26 @@ def _mold_manifest(tmp_path: Path, body: str, repo: Path) -> Path:
     return path
 
 
-def _write_failing_oracle(oracle_dir: Path) -> None:
-    """A complete (FILL-free) oracle that fails on the current tree — the fail-first ideal."""
+def _write_failing_oracle(oracle_dir: Path, *, probe_alive: bool = True) -> None:
+    """A complete (FILL-free) oracle that fails on the current tree — the fail-first ideal —
+    plus its env-liveness probe (required since Q3; `probe_alive=False` simulates a broken env)."""
     oracle_dir.mkdir(parents=True, exist_ok=True)
     (oracle_dir / "run.sh").write_text("#!/usr/bin/env bash\necho 'not fixed yet'\nexit 1\n")
+    (oracle_dir / "probe.sh").write_text(
+        "#!/usr/bin/env bash\n" + ("true\n" if probe_alive else "echo 'auth down'\nexit 1\n"))
 
 
 def _proposer_script(tmp_path: Path, *, exit_code: int = 1) -> str:
     """A stand-in for the headless-agent proposer: writes a real failing oracle into
-    $MOLD_ORACLE_DIR (exit_code controls what the *oracle* exits with, not the proposer)."""
+    $MOLD_ORACLE_DIR AND fills the env-liveness probe via $MOLD_PROBE_FILE (the Q3 contract — a
+    proposer that skips the probe holds its task at needs-oracle). `exit_code` controls what the
+    *oracle* exits with, not the proposer."""
     script = tmp_path / "proposer.sh"
     script.write_text(
         "#!/usr/bin/env bash\n"
         "printf '#!/usr/bin/env bash\\necho proposed for %s\\nexit "
         f"{exit_code}" "\\n' \"$MOLD_TASK_ID\" > \"$MOLD_ORACLE_DIR/run.sh\"\n"
+        "printf '#!/usr/bin/env bash\\ntrue\\n' > \"$MOLD_PROBE_FILE\"\n"
         "echo \"proposed using tier: $MOLD_TIER_ASSERTION\"\n")
     script.chmod(0o755)
     return f"bash {script}"
@@ -242,6 +248,7 @@ def test_filled_oracle_that_keeps_labels_and_prose_still_verifies(tmp_path):
         "echo 'not fixed yet'\n"
         "exit 1\n"
         "ORACLE\n"
+        "printf '#!/usr/bin/env bash\\ntrue\\n' > \"$MOLD_PROBE_FILE\"\n"
         "echo proposed\n")
     script.chmod(0o755)
     result = mold_batch(m, out, level="oracle", timestamp=TS,
@@ -251,6 +258,50 @@ def test_filled_oracle_that_keeps_labels_and_prose_still_verifies(tmp_path):
     assert row.verdict is not None and row.verdict.blessed
     kept = (out / "a" / "acceptance" / "run.sh").read_text()
     assert "a FILL marker would" in kept and "# FILL 1 —" in kept   # both leftovers survived, harmless
+
+
+def test_filled_oracle_with_unfilled_probe_stays_needs_oracle(tmp_path):
+    """The Q3 requirement: a molded oracle is unverifiable until its env-liveness probe is filled —
+    an unprobed oracle is exactly what got false-blessed 6/6 when the env (not the bug) failed."""
+    repo = _seed_repo(tmp_path / "repo")
+    m = load_mold_manifest(_mold_manifest(tmp_path, '[[task]]\nid = "a"\ngoal = "x"\n', repo))
+    out = tmp_path / "molded"
+    script = tmp_path / "proposer_no_probe.sh"
+    script.write_text(                        # fills run.sh, ignores $MOLD_PROBE_FILE
+        "#!/usr/bin/env bash\n"
+        "printf '#!/usr/bin/env bash\\nexit 1\\n' > \"$MOLD_ORACLE_DIR/run.sh\"\n")
+    script.chmod(0o755)
+    result = mold_batch(m, out, level="oracle", timestamp=TS,
+                        proposer=ShellProposer(f"bash {script}"))
+    row = result.rows[0]
+    assert row.status == NEEDS_ORACLE and "probe.sh" in row.note
+
+
+def test_env_broken_probe_rejects_instead_of_blessing(tmp_path):
+    """The Wave-A regression, end-to-end through mold: an oracle whose runner cannot even pass a
+    trivial probe (auth down / broken venv) is ORACLE_REJECTED on env-live — never VERIFIED."""
+    repo = _seed_repo(tmp_path / "repo")
+    m = load_mold_manifest(_mold_manifest(tmp_path, '[[task]]\nid = "a"\ngoal = "x"\n', repo))
+    out = tmp_path / "molded"
+    _write_failing_oracle(out / "a" / "acceptance", probe_alive=False)
+    result = mold_batch(m, out, level="oracle", timestamp=TS)
+    row = result.rows[0]
+    assert row.status == ORACLE_REJECTED
+    assert row.verdict is not None and row.verdict.env_live is False
+    assert "env-live" in row.note
+    # fail-first never ran — the only recorded check is the probe's.
+    assert [c.name for c in row.verdict.checks] == ["env-live"]
+
+
+def test_live_probe_verifies_and_records_env_live(tmp_path):
+    repo = _seed_repo(tmp_path / "repo")
+    m = load_mold_manifest(_mold_manifest(tmp_path, '[[task]]\nid = "a"\ngoal = "x"\n', repo))
+    out = tmp_path / "molded"
+    _write_failing_oracle(out / "a" / "acceptance", probe_alive=True)
+    result = mold_batch(m, out, level="oracle", timestamp=TS)
+    row = result.rows[0]
+    assert row.status == VERIFIED
+    assert row.verdict is not None and row.verdict.env_live is True
 
 
 def test_level_full_emits_config_and_batch_manifest(tmp_path):
@@ -283,6 +334,7 @@ def _touches_proposer(tmp_path: Path, lines: str) -> str:
     script.write_text(
         "#!/usr/bin/env bash\n"
         "printf '#!/usr/bin/env bash\\nexit 1\\n' > \"$MOLD_ORACLE_DIR/run.sh\"\n"
+        "printf '#!/usr/bin/env bash\\ntrue\\n' > \"$MOLD_PROBE_FILE\"\n"
         f"printf '{lines}' > \"$MOLD_TOUCHES_FILE\"\n")
     script.chmod(0o755)
     return f"bash {script}"

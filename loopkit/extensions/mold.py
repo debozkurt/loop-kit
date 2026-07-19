@@ -109,6 +109,27 @@ trap 'rm -f "$HOLDOUT"' EXIT           # never committed, never seen by the agen
 FILL_test_command "$HOLDOUT"
 """
 
+# The env-liveness probe (Q3, dogfooded from a 6/6 false-blessing batch): fail-first cannot tell a
+# DIAGNOSTIC failure (the assertion caught the bug) from an ENVIRONMENTAL one (test-DB auth down,
+# missing dep, a venv broken by the isolated copy) — both exit non-zero. The probe is the positive
+# proof: the oracle's OWN runner must pass a trivial guaranteed-green invocation in the same tree,
+# or verification records env-broken instead of blessing noise. Required for molded oracles:
+# goal-derived oracles are untrusted, and an unprobed one is exactly what false-blessed the batch.
+_PROBE_SKELETON = """\
+#!/usr/bin/env bash
+# Env-liveness probe for task '{task_id}' — proves the oracle's runner is even ALIVE here.
+#
+# Contract: CWD is the workspace clone; $ACCEPTANCE_DIR points at this directory. This must be a
+# TRIVIAL, GUARANTEED-PASS invocation of the SAME runner run.sh uses — never the held-out test.
+# If even this cannot exit 0, the environment is broken and a failing run.sh proves nothing
+# (auth-down / missing-dep / broken-venv failures exit non-zero exactly like a real reproduction).
+set -uo pipefail
+
+# FILL 1 — the same runner as run.sh, on something trivially green (`--version`, `--collect-only`,
+# a no-op test; for a DB-backed gate: open a connection and SELECT 1):
+FILL_probe_command
+"""
+
 
 # --------------------------------------------------------------------------------------------
 # Manifest — what to mold. Deliberately close to the batch manifest: mold consumes tasks that
@@ -228,6 +249,10 @@ class ShellProposer:
     - ``MOLD_TASK_ID`` / ``MOLD_TIER`` / ``MOLD_TIER_ASSERTION`` — what to prove;
     - ``MOLD_GOAL_FILE`` — a file holding the full goal text (env-safe for multi-line goals);
     - ``MOLD_ORACLE_DIR`` — where to (over)write ``run.sh`` + its hidden test files;
+    - ``MOLD_PROBE_FILE`` — the env-liveness ``probe.sh`` to fill: a trivial GUARANTEED-PASS
+      invocation of the same runner ``run.sh`` uses (never the held-out test). Required — an
+      unfilled probe holds the task at needs-oracle, and verification runs it before fail-first
+      so an env-broken tree is rejected instead of false-blessed (the 6/6 Wave-A class);
     - ``MOLD_TOUCHES_FILE`` — *optional byproduct*: the proposer explored the repo anyway, so it
       may write the repo-relative source paths it expects the FIX to touch, one per line. They
       fill the task's `touches` (advisory input to `loopkit overlap`) unless the author declared
@@ -243,13 +268,19 @@ class ShellProposer:
         self._timeout = timeout
 
     def propose(self, spec: MoldSpec, oracle_dir: Path, workspace: Path,
-                goal_file: Path, touches_file: Path | None = None) -> ProposeResult:
+                goal_file: Path, touches_file: Path | None = None,
+                probe_file: Path | None = None) -> ProposeResult:
         env = {**secrets.current().child_env(), "PYTHONDONTWRITEBYTECODE": "1",
                "MOLD_TASK_ID": spec.id, "MOLD_TIER": spec.tier,
                "MOLD_TIER_ASSERTION": TIER_ASSERTIONS[spec.tier],
                "MOLD_GOAL_FILE": str(goal_file), "MOLD_ORACLE_DIR": str(oracle_dir)}
         if touches_file is not None:
             env["MOLD_TOUCHES_FILE"] = str(touches_file)
+        if probe_file is not None:
+            # The env-liveness probe the proposer must also fill: a trivial guaranteed-pass
+            # invocation of the SAME runner it just wrote into run.sh (it knows the runner — it
+            # picked it). Unfilled probe FILLs hold the task at needs-oracle exactly like run.sh's.
+            env["MOLD_PROBE_FILE"] = str(probe_file)
         try:
             proc = subprocess.run(self._command, cwd=workspace, shell=True, env=env,
                                   capture_output=True, text=True, timeout=self._timeout)
@@ -293,6 +324,17 @@ def oracle_command(oracle_dir: Path) -> str:
     """The gate command that runs a task's held-out oracle (CWD = the workspace, per the contract)."""
     return (f"ACCEPTANCE_DIR={shlex.quote(str(oracle_dir))} "
             f"bash {shlex.quote(str(oracle_dir / 'run.sh'))}")
+
+
+def probe_command(oracle_dir: Path) -> str:
+    """The env-liveness probe command for a task's oracle — same contract, `probe.sh` not `run.sh`.
+
+    A separate FILE, not a probe-mode flag on run.sh, on purpose: an oracle that ignored a flag
+    would run the real failing test in "probe mode" and false-report a healthy env as broken.
+    Existence of the file IS the support signal.
+    """
+    return (f"ACCEPTANCE_DIR={shlex.quote(str(oracle_dir))} "
+            f"bash {shlex.quote(str(oracle_dir / 'probe.sh'))}")
 
 
 # An UNFILLED placeholder — not prose, not a step label. The skeleton's fill TARGETS are all
@@ -361,28 +403,36 @@ def mold_task(spec: MoldSpec, defaults: MoldDefaults, out_dir: Path, profile: Re
     if not run_sh.exists():
         run_sh.write_text(_ORACLE_SKELETON.format(task_id=spec.id, tier=spec.tier,
                                                   assertion=TIER_ASSERTIONS[spec.tier]))
+    # The env-liveness probe is REQUIRED for molded oracles (see _PROBE_SKELETON) — its FILL rides
+    # the same needs-oracle loop as run.sh's, so an unprobed oracle can never reach verification.
+    probe_sh = acc_dir / "probe.sh"
+    if not probe_sh.exists():
+        probe_sh.write_text(_PROBE_SKELETON.format(task_id=spec.id))
     goal_file = task_dir / "GOAL.md"
     goal_file.write_text(f"# {spec.title or spec.id}\n\ntier: {spec.tier}\n"
                          f"must assert: {TIER_ASSERTIONS[spec.tier]}\n\n{spec.goal or ''}\n")
-    if proposer is not None and _has_fill_markers(run_sh):
+    if proposer is not None and (_has_fill_markers(run_sh) or _has_fill_markers(probe_sh)):
         proposed = proposer.propose(spec, acc_dir, repo, goal_file,
-                                    touches_file=task_dir / "touches.txt")
+                                    touches_file=task_dir / "touches.txt", probe_file=probe_sh)
         (task_dir / "proposer-notes.md").write_text(proposed.notes + "\n")
         log.info("mold.propose", ok=proposed.ok, notesLen=len(proposed.notes))
         observed = _read_touches(task_dir / "touches.txt")
         if observed and not spec.touches:                 # author-declared touches always win
             spec.touches = observed
             log.info("mold.touches", observed=len(observed))
-    if _has_fill_markers(run_sh):
+    if _has_fill_markers(run_sh) or _has_fill_markers(probe_sh):
         # Mechanical-only stops here, honestly: a skeleton is guidance, not an oracle. The human
         # loop is "fill the FILLs (or wire a --proposer), re-run mold-batch" — failures retry.
-        log.info("mold.stage", stage="oracle", status=NEEDS_ORACLE)
+        owed = " + ".join(name for name, path in (("run.sh", run_sh), ("probe.sh", probe_sh))
+                          if _has_fill_markers(path))
+        log.info("mold.stage", stage="oracle", status=NEEDS_ORACLE, owed=owed)
         return MoldRow(spec=spec, status=NEEDS_ORACLE,
-                       note="oracle skeleton awaits judgment (FILL markers present)")
+                       note=f"oracle skeleton awaits judgment (FILL markers in {owed})")
     # Goal-derived oracles are untrusted input: verification is mandatory and isolated (a copy),
-    # so an attacker-shaped oracle can neither be blessed green nor touch the real tree.
+    # so an attacker-shaped oracle can neither be blessed green nor touch the real tree. The probe
+    # rides along: env-broken (the class that once false-blessed 6/6) is rejected, never verified.
     verdict = verify_oracle(oracle_command(acc_dir), repo, timestamp=timestamp, fix=spec.fix,
-                            isolate=True, run_gate=run_gate)
+                            isolate=True, run_gate=run_gate, probe=probe_command(acc_dir))
     (task_dir / "verdict.json").write_text(verdict.to_json() + "\n")
     if not verdict.blessed:
         failed = ", ".join(c.name for c in verdict.checks if not c.ok)
