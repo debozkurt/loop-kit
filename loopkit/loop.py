@@ -310,8 +310,16 @@ def run_loop(config, agent: Agent, *, iteration_gate: Gate | None = None,
                     tick.info("gate.review", passed=review.passed)
                     if not review.passed:
                         review_ok = False
+                        reason_full = secrets.redact(review.feedback or "")
+                        # Persist WHY review rejected, not just the pass/fail bit — otherwise the
+                        # judge's verdict is lost the moment it feeds back, and "did review catch the
+                        # real problem?" is unauditable after the run. Single-lined + tail-trimmed
+                        # (the verdict sits at the end of the judge output); the full text still rides
+                        # to the agent via `feedback` and to the trace span above.
+                        tick.info("gate.review.rejected",
+                                  reason=" ".join(reason_full.split())[-400:] or "(no detail returned)")
                         feedback = ("A review of your last change found issues to fix before it can "
-                                    "be accepted:\n" + secrets.redact(review.feedback or ""))
+                                    "be accepted:\n" + reason_full)
 
                 # DONE next: the iteration gate, then the held-out acceptance gate (Ch 9). Skipped
                 # when the review failed, so unreviewed-but-green work can never be declared done.
