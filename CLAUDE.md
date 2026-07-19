@@ -41,6 +41,20 @@ are the interface a future session (human or agent) uses to resume without re-de
 
 ## Invariants to preserve (don't regress)
 
+- **Repo-agnostic by design; dogfooded, not shaped, by any one repo.** loopkit is built to be pointed
+  at *any* repository — this is the tenet that underpins every design call. We dogfood it on **spacer**
+  (a deliberately gnarly stress case: docker-compose gates, SCRAM auth, non-relocatable venv, four
+  services), and spacer is where pain points surface first — but spacer is the *test subject, not the
+  target*. When a dogfood friction appears, fix the **general class** in loopkit-core (prefer a
+  declarative knob/contract over a heuristic that encodes one repo's accidents — e.g. a `group`/mutex
+  field over repo-path guessing), keep the **repo-specific instance** out of core (in the operator's
+  gates/proposer/config), and add a **generic example** so the next repo copies the right shape.
+  Tailoring for spacer and shipping spacer-like examples is fine; **baking spacer assumptions into core
+  is not.** Two guardrails bound this: never compromise loopkit's core goals/design to chase generality
+  (the invariants below win), and **don't over-engineer for hypothetical repos** — build the general
+  mechanism an *observed* need calls for, record deferred generality with a named trigger, and stop.
+  The measure of a good change: it contains no repo-specific nouns in core, and it didn't add a knob
+  nothing yet needs.
 - **Reuse the contracts**, don't fork them: `Agent` / `Gate` / `Store`, the three `StopPolicy`
   stops, the **held-out acceptance gate**, the `[loopkit][component]` + run-id logging, and
   safe-by-default (never `main`, clean tree, protected paths, budget ceiling).
