@@ -403,7 +403,8 @@ def run_batch(specs: list[TaskSpec], runner: TaskRunner, *, jobs: int = 3,
 # --------------------------------------------------------------------------------------------
 def make_batch_runner(*, base_config: Config | None = None, open_pr: bool = False,
                       agent_factory: Callable[[dict], Agent] | None = None,
-                      executor=None, artifacts_dir: Path | None = None) -> TaskRunner:
+                      executor=None, artifacts_dir: Path | None = None,
+                      no_review: bool = False) -> TaskRunner:
     """A `TaskRunner` for manifest tasks: load the task's config, materialise an isolated clone,
     run the pre-loop validate, run the loop (with its review hook), grade, and push + PR on DONE.
 
@@ -451,10 +452,16 @@ def make_batch_runner(*, base_config: Config | None = None, open_pr: bool = Fals
                     tlog.info("task.validate_abort", exit=vproc.returncode)
                     return WorkerOutcome(task_id=task_id, branch=branch, reason=VALIDATE_ABORT,
                                          error=secrets.redact(detail) or "validate: non-zero exit")
+            # Review is opt-out: a manifest `review =` wins, else the task's (or base) config
+            # [review] command runs by default — unless --no-review. So a batch can't silently skip
+            # the quality gate just because a task's manifest entry omitted `review =`.
+            review_cmd = cfg.review.resolved(override=task.get("review"), disabled=no_review)
+            if review_cmd is None and base_config is not None and not no_review:
+                review_cmd = base_config.review.resolved()   # a base-config default covers every task
             review_hook = None
-            if task.get("review"):
+            if review_cmd:
                 from .review import ShellReviewHook
-                review_hook = ShellReviewHook(task["review"])
+                review_hook = ShellReviewHook(review_cmd)
             agent = agent_factory(task) if agent_factory else build_agent(cfg.agent, executor=executor)
             from ..loop import run_loop
             result = run_loop(cfg, agent, review_hook=review_hook, executor=executor,

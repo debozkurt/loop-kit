@@ -113,6 +113,32 @@ class TraceConfig(BaseModel):
     project: str | None = None            # LangSmith project; falls back to env, then "loopkit"
 
 
+class ReviewConfig(BaseModel):
+    """Continuous review (Ch 8): an adversarial command run after each *advancing* tick; a clean
+    review (exit 0) is a precondition for DONE, and a failing review's output feeds back so the agent
+    self-corrects (the fix→re-review loop).
+
+    Setting `command` makes review **opt-OUT**: it runs by default on every `run` and every `batch`
+    task, so the quality gate can't be silently forgotten (the failure mode that ships gamed/half
+    fixes). Disable per invocation with `--no-review`, or globally with `enabled = false`. An explicit
+    `run --review <cmd>` or a manifest `review =` still overrides this default. None command ⇒ no
+    default review — exact prior behavior. Point it at an adversarial LLM judge (`claude -p …`) whose
+    wrapper exits non-zero when it finds problems."""
+
+    command: str | None = None            # the review/judge shell command; None = no default review
+    enabled: bool = True                  # false disables the default even when a command is set
+
+    def resolved(self, override: str | None = None, disabled: bool = False) -> str | None:
+        """The effective review command for one invocation: `--no-review` wins (None), else an
+        explicit override (CLI flag / manifest `review =`), else the configured default when enabled,
+        else None."""
+        if disabled:
+            return None
+        if override is not None:
+            return override
+        return self.command if self.enabled else None
+
+
 class Config(BaseModel):
     """The whole loop as one object. `goal` and `gate.iteration` are the only required fields."""
 
@@ -127,6 +153,7 @@ class Config(BaseModel):
     safety: SafetyConfig = Field(default_factory=SafetyConfig)
     remote: RemoteConfig = Field(default_factory=RemoteConfig)
     trace: TraceConfig = Field(default_factory=TraceConfig)
+    review: ReviewConfig = Field(default_factory=ReviewConfig)
 
     @field_validator("goal")
     @classmethod

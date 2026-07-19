@@ -288,7 +288,11 @@ def run(config: Path = typer.Option(DEFAULT_CONFIG, "--config", "-c"),
                                           help="A review command run after each tick's commit "
                                                "(ShellReviewHook). Exit 0 = clean; non-zero blocks "
                                                "DONE and its output is fed back as the next tick's "
-                                               "review feedback. E.g. an adversarial LLM judge."),
+                                               "review feedback. E.g. an adversarial LLM judge. "
+                                               "Overrides [review] command from config."),
+        no_review: bool = typer.Option(False, "--no-review",
+                                       help="Disable the review gate for this run, even when "
+                                            "[review] command is configured (the opt-out)."),
         skills: str | None = typer.Option(None, "--skills",
                                           help="Directory for the skills flywheel (FileSkillRegistry): "
                                                "learned lessons are rendered into every prompt and a "
@@ -400,10 +404,13 @@ def run(config: Path = typer.Option(DEFAULT_CONFIG, "--config", "-c"),
         f"budget ${cfg.agent.max_cost_usd}"
         + (f" · issue #{issue_number}" if issue_number is not None else ""),
         title="loopkit run"))
+    # Review is opt-OUT: an explicit --review wins, else the configured [review] command runs by
+    # default (unless --no-review). So a project that sets a judge once can't silently skip it.
     review_hook = None
-    if review:
+    review_cmd = cfg.review.resolved(override=review, disabled=no_review)
+    if review_cmd:
         from ..extensions.review import ShellReviewHook
-        review_hook = ShellReviewHook(review)
+        review_hook = ShellReviewHook(review_cmd)
     skills_registry = None
     if skills:
         from ..extensions.skills import FileSkillRegistry, ShellDistiller

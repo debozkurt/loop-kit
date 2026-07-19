@@ -279,6 +279,36 @@ def test_make_batch_runner_solves_in_a_clone_and_leaves_the_source_alone(tmp_pat
     assert "loopkit/t1" not in branches
 
 
+def test_make_batch_runner_review_defaults_from_config(tmp_path):
+    # A [review] command in the task's config makes review run BY DEFAULT (no manifest `review =`).
+    # "false" always fails -> blocks DONE -> the run can never finish, proving the gate is active.
+    src = _seed_repo(tmp_path / "src")
+    cfg_path = tmp_path / "task.toml"
+    cfg_path.write_text(
+        f'goal = "placeholder"\nrepo = "{src}"\n\n'
+        f'[gate]\niteration = "true"\n\n[stops]\nmax_iter = 2\n\n[review]\ncommand = "false"\n')
+
+    def agent_factory(task: dict) -> MockAgent:
+        state = {"i": 0}
+
+        def solve(ws: Path) -> str:
+            state["i"] += 1
+            (ws / "solved.txt").write_text(f"ok {state['i']}")   # unique each tick -> always advances
+            return "wrote solved.txt"
+
+        return MockAgent(behaviors=[solve, solve, solve])
+
+    task = {"id": "t1", "goal": "g", "config": str(cfg_path), "branch": "loopkit/t1"}
+    # Default: the configured review runs every advancing tick and blocks DONE to the iteration cap.
+    blocked = make_batch_runner(agent_factory=agent_factory)(task)
+    assert not blocked.done                                  # the default review ("false") gated DONE
+
+    # --no-review disables it -> the same task reaches DONE.
+    done = make_batch_runner(agent_factory=agent_factory, no_review=True)(
+        {**task, "id": "t2", "branch": "loopkit/t2"})
+    assert done.done and done.reason == StopReason.DONE.value
+
+
 def test_make_batch_runner_validate_abort_spends_nothing(tmp_path):
     src = _seed_repo(tmp_path / "src")
     cfg_path = _config_toml(tmp_path / "task.toml", src)
