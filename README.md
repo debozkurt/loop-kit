@@ -290,15 +290,34 @@ allowed branch, commits every tick to its own branch (never force-pushes), rever
 if the agent touches a protected path, and stops at the budget ceiling regardless of progress.
 `loopkit doctor` reports all of this before you run.
 
-## Observability — logs + traces
+## Observability — live stream, logs, traces
 
-Two layers, by design. **Logs** are always on and **payload-free** (`[loopkit][component]` + run id,
-ids/lengths/counts only — safe to ship anywhere). **Traces** are optional and rich: enable
-`loopkit[trace]` and tracing auto-activates when a LangSmith key is present, emitting a full run tree
-— `loopkit run → tick → agent → llm/tool → gates` — with the human-readable input/output of every
-step, all tool calls, and exact `cost_usd`/usage/model metadata on each span (the same cost
-`pricing.py` feeds the budget stop). A trace backend is the one controlled place payloads belong, so
-this never weakens the never-log-payloads rule.
+**Watch a run live.** The claude-code adapter streams by default, so loopkit emits one
+`[loopkit][agent]` line per agent step — thought, tool call, tool result — as it happens:
+
+```text
+[loopkit][agent] agent.think Scoping the notes queryset to the owner … idx=1 len=212
+[loopkit][agent] agent.tool  idx=2 tool=Edit arg=src/apps/notes/views/preferences.py
+[loopkit][agent] agent.result idx=3 isError=False outLen=0
+[loopkit][loop]  agent.done tick=1 costUsd=7.60
+```
+
+`tail -f` a run (or `grep '\[loopkit\]\[agent\]'`) and you see it work. ⚠️ These step lines carry the
+model's thoughts + tool targets (secrets redacted, but **not ship-safe**) — a deliberate trade for
+visibility. Pin `[agent] args = ["--output-format", "json"]` to revert claude-code to the quiet,
+payload-free buffered path.
+
+**Layers, by design:** the **loop** logs (`[loopkit][loop]`) stay always-on and payload-free
+(ids/lengths/counts — safe to ship); the **agent** step stream above is the live, payload-bearing view;
+and **traces** are the optional full-detail record. `loopkit batch` also persists each task's raw event
+stream to a durable `<manifest_dir>/<task>.activity.jsonl` (survives the worktree — replay/debug after
+the fact). See [`docs/OPERATING.md`](docs/OPERATING.md).
+
+**Traces (LangSmith).** Enable `loopkit[trace]` and tracing auto-activates when a LangSmith key is
+present, emitting a full run tree — `loopkit run → tick → agent → llm/tool → gates` — with the
+human-readable I/O of every step, all tool calls, and exact `cost_usd`/usage/model metadata per span
+(the same cost `pricing.py` feeds the budget stop). The access-gated trace backend is where full
+payloads belong.
 
 ```bash
 pip install -e ".[trace]"                  # optional; pulls langsmith

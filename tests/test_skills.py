@@ -57,7 +57,7 @@ def test_rendered_skill_changes_agent_behaviour(git_repo: Path):
     # never writes the file (no progress); with it rendered, the marker reaches the prompt and
     # the run completes. Proves the read edge is wired end to end through run_loop.
     class PromptAwareAgent:
-        def act(self, prompt: str, workspace: Path) -> AgentResult:
+        def act(self, prompt: str, workspace: Path, *, observer=None) -> AgentResult:
             if "MAGIC" in prompt:
                 (workspace / "solution.txt").write_text("done")
             return AgentResult(ok=True, cost_usd=0.1, summary="acted")

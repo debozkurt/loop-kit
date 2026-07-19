@@ -142,7 +142,9 @@ def batch(tasks_file: Path = typer.Option(..., "--tasks", "-t",
                       f" · {outcome.iterations} iters · ${outcome.cost_usd:.2f}"
                       f" · {finished_count}/{total} finished")
 
-    runner = make_batch_runner(base_config=base_cfg, open_pr=open_pr)
+    # artifacts_dir = the manifest's own directory, so each task's durable `<task>.activity.jsonl`
+    # lands next to the journal (a persistent location, not the rmtree'd per-task worktree).
+    runner = make_batch_runner(base_config=base_cfg, open_pr=open_pr, artifacts_dir=manifest_dir)
     result: BatchResult = run_batch(specs, runner, jobs=jobs, defaults=manifest.defaults,
                                     timeout=timeout, journal=journal, preloaded=preloaded,
                                     on_finish=progress)

@@ -38,7 +38,7 @@ class SkillSeekingAgent:
     arrives before the mistake instead of after it.
     """
 
-    def act(self, prompt: str, workspace: Path) -> AgentResult:
+    def act(self, prompt: str, workspace: Path, *, observer=None) -> AgentResult:
         knows_boundary = "pricing-boundary" in prompt or "fit the visible tests" in prompt
         content = CORRECT_PRICING if knows_boundary else NAIVE_PRICING
         (workspace / "pricing.py").write_text(content)

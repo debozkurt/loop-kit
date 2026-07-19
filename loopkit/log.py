@@ -39,6 +39,15 @@ class Logger:
         child._threshold = self._threshold
         return child
 
+    def for_component(self, component: str) -> "Logger":
+        """A sibling logger under a different component tag — same run id, stream, sticky fields, and
+        level. Lets a subsystem grep out on its own `[loopkit][<component>]` tag while still carrying
+        the parent's run/tick correlation (e.g. the agent's per-step stream branches off the loop's
+        tick logger, so its lines keep `run=`/`tick=` but read as `[loopkit][agent]`)."""
+        sibling = Logger(component, self.run_id, stream=self._stream, sticky=dict(self._sticky))
+        sibling._threshold = self._threshold
+        return sibling
+
     def _emit(self, level: str, message: str, fields: dict[str, Any]) -> None:
         if _LEVELS[level] < self._threshold:
             return
