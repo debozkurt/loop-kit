@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import tomllib
 from pathlib import Path
+from typing import NamedTuple
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -113,30 +114,59 @@ class TraceConfig(BaseModel):
     project: str | None = None            # LangSmith project; falls back to env, then "loopkit"
 
 
+class ReviewDecision(NamedTuple):
+    """The resolved review outcome for ONE invocation: the command to run (``None`` = no review)
+    plus a short, human-readable ``reason``. The reason exists so every entry point can LOG *why*
+    review is on or off — the decision was previously invisible, which is exactly how review once
+    fired in zero of 28 batch runs behind a reassuring "default-on" banner. ``on`` is the boolean."""
+
+    command: str | None
+    reason: str
+
+    @property
+    def on(self) -> bool:
+        return self.command is not None
+
+
 class ReviewConfig(BaseModel):
     """Continuous review (Ch 8): an adversarial command run after each *advancing* tick; a clean
     review (exit 0) is a precondition for DONE, and a failing review's output feeds back so the agent
     self-corrects (the fix→re-review loop).
 
-    Setting `command` makes review **opt-OUT**: it runs by default on every `run` and every `batch`
-    task, so the quality gate can't be silently forgotten (the failure mode that ships gamed/half
-    fixes). Disable per invocation with `--no-review`, or globally with `enabled = false`. An explicit
-    `run --review <cmd>` or a manifest `review =` still overrides this default. None command ⇒ no
-    default review — exact prior behavior. Point it at an adversarial LLM judge (`claude -p …`) whose
-    wrapper exits non-zero when it finds problems."""
+    Two fields, distinct jobs. ``enabled`` (default True) is the master switch — set it false to turn
+    review OFF everywhere. ``command`` is the judge to run; set it to a custom judge, or leave it unset
+    to use the built-in default judge (planned — see docs/default-judge-design). Precedence when
+    enabled: an explicit override (``run --review`` / manifest ``review =``) wins, else ``command``,
+    else the built-in judge. ``--no-review`` disables for a single invocation.
 
-    command: str | None = None            # the review/judge shell command; None = no default review
-    enabled: bool = True                  # false disables the default even when a command is set
+    (Today the built-in judge is not yet wired, so ``enabled=True`` + no ``command`` resolves to OFF
+    with a visible reason — `run` prints it and `doctor` shows it, so it is never a *silent* off. The
+    default-judge work flips that last branch to run a bundled judge, making review truly on-by-default.)"""
+
+    command: str | None = None            # the review/judge shell command; None = use the built-in judge (once wired)
+    enabled: bool = True                  # master switch; false = review off everywhere
+
+    def decide(self, override: str | None = None, disabled: bool = False) -> ReviewDecision:
+        """Resolve the effective review command AND a reason. Precedence (unchanged from the original
+        resolver): ``--no-review`` wins, then an explicit override (``--review`` / manifest ``review =``
+        — deliberately strong enough to run even when ``enabled=false``), then the ``enabled`` gate,
+        then the configured ``command``."""
+        # Reasons carry no on/off prefix — callers render the state (see cli run-line / batch log),
+        # so the reason states only the cause.
+        if disabled:
+            return ReviewDecision(None, "--no-review")
+        if override is not None:
+            return ReviewDecision(override, "explicit override (--review / manifest review=)")
+        if not self.enabled:
+            return ReviewDecision(None, "disabled ([review] enabled = false)")
+        if self.command is not None:
+            return ReviewDecision(self.command, "[review] command")
+        # TODO(default-judge): return the built-in judge here so on-by-default actually runs.
+        return ReviewDecision(None, "no [review] command configured (built-in judge not yet wired)")
 
     def resolved(self, override: str | None = None, disabled: bool = False) -> str | None:
-        """The effective review command for one invocation: `--no-review` wins (None), else an
-        explicit override (CLI flag / manifest `review =`), else the configured default when enabled,
-        else None."""
-        if disabled:
-            return None
-        if override is not None:
-            return override
-        return self.command if self.enabled else None
+        """Back-compat thin wrapper returning just the command; prefer ``decide()`` for the reason."""
+        return self.decide(override=override, disabled=disabled).command
 
 
 class Config(BaseModel):

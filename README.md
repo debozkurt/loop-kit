@@ -240,12 +240,15 @@ protected_paths = ["tests/"]                      # the loop may not touch these
 command = "bash review-judge.sh"                  # adversarial judge run after each advancing tick
 ```
 
-**`[review]` is opt-OUT.** Setting `command` makes an adversarial review run on **every** `run` and
-**every** `batch` task by default — a clean review (exit 0) is a precondition for DONE, a failing one
-feeds back so the agent self-corrects. This closes the failure mode where an opt-in gate is silently
-*forgotten* and half-fixes/gamed tests ship green. Disable per invocation with `--no-review`, or
-globally with `enabled = false`; an explicit `run --review <cmd>` (or a manifest `review =`) overrides
-the configured default. Point it at an LLM judge whose wrapper exits non-zero on problems.
+**`[review]` is opt-OUT.** When enabled (`enabled = true`, the default), an adversarial review runs on
+**every** `run` and **every** `batch` task — a clean review (exit 0) is a precondition for DONE, a
+failing one feeds back so the agent self-corrects. This closes the failure mode where an opt-in gate is
+silently *forgotten* and half-fixes/gamed tests ship green. `command` names the judge (point it at an
+LLM judge whose wrapper exits non-zero on problems); leave it unset to use the **built-in default
+judge** (planned — see `docs/default-judge-design`). Turn review off everywhere with `enabled = false`,
+or for a single invocation with `--no-review`; an explicit `run --review <cmd>` (or a manifest
+`review =`) overrides the command. `run` prints the decision (`review: on/off — <reason>`) and
+`loopkit doctor` shows it, so an accidentally-off review is never silent.
 
 Every other knob — `[stops]`, the optional second `regression` oracle, `[remote]` sync, `[trace]`,
 gate-stability preflight — is annotated in [`docs/CONTROL-FILES.md`](docs/CONTROL-FILES.md); the

@@ -124,6 +124,16 @@ def doctor(config: Path = typer.Option(DEFAULT_CONFIG, "--config", "-c"),
     if gate:
         _doctor_gate_verdict(table, cfg)
 
+    # Continuous review (Ch 8): make the on/off decision apparent here, so a config that never wired
+    # a judge is caught at doctor time — not discovered later as a batch of unreviewed MRs.
+    review = cfg.review.decide()
+    if review.on:
+        table.add_row("review", "[green]on[/]", escape(review.command))
+    else:
+        table.add_row("review", "[yellow]off[/]",
+                      escape("no [review] command — set one (e.g. an adversarial LLM judge) to gate "
+                             "DONE on a clean review; runs by default once set (--no-review opts out)"))
+
     # Tracing (Ch 14-15): full-tree LangSmith observability, auto-on when langsmith + a key present.
     trace.configure(cfg.trace)
     if trace.active():
@@ -404,13 +414,17 @@ def run(config: Path = typer.Option(DEFAULT_CONFIG, "--config", "-c"),
         f"budget ${cfg.agent.max_cost_usd}"
         + (f" · issue #{issue_number}" if issue_number is not None else ""),
         title="loopkit run"))
-    # Review is opt-OUT: an explicit --review wins, else the configured [review] command runs by
-    # default (unless --no-review). So a project that sets a judge once can't silently skip it.
+    # Review is opt-out: an explicit --review wins, else the configured [review] command runs by
+    # default (unless --no-review). Announce the decision up front so an accidentally-off review
+    # (the failure mode that let review fire in zero of 28 runs) is impossible to miss.
     review_hook = None
-    review_cmd = cfg.review.resolved(override=review, disabled=no_review)
-    if review_cmd:
+    decision = cfg.review.decide(override=review, disabled=no_review)
+    console.print(
+        f"[bold]review:[/] {'[green]on[/]' if decision.on else '[yellow]off[/]'} — {decision.reason}"
+        + (f" [dim]· {decision.command}[/]" if decision.on else ""))
+    if decision.command:
         from ..extensions.review import ShellReviewHook
-        review_hook = ShellReviewHook(review_cmd)
+        review_hook = ShellReviewHook(decision.command)
     skills_registry = None
     if skills:
         from ..extensions.skills import FileSkillRegistry, ShellDistiller

@@ -39,7 +39,7 @@ from pydantic import BaseModel, Field, model_validator
 
 from .. import secrets
 from ..agent import Agent, build_agent
-from ..config import Config, load_config
+from ..config import Config, ReviewDecision, load_config
 from ..log import get_logger
 from ..stops import StopReason
 from .fleet import InMemoryQueue, Queue, TaskRunner, WorkerOutcome, _grade, _prepare_repo, run_workers
@@ -453,15 +453,18 @@ def make_batch_runner(*, base_config: Config | None = None, open_pr: bool = Fals
                     return WorkerOutcome(task_id=task_id, branch=branch, reason=VALIDATE_ABORT,
                                          error=secrets.redact(detail) or "validate: non-zero exit")
             # Review is opt-out: a manifest `review =` wins, else the task's (or base) config
-            # [review] command runs by default — unless --no-review. So a batch can't silently skip
-            # the quality gate just because a task's manifest entry omitted `review =`.
-            review_cmd = cfg.review.resolved(override=task.get("review"), disabled=no_review)
-            if review_cmd is None and base_config is not None and not no_review:
-                review_cmd = base_config.review.resolved()   # a base-config default covers every task
+            # [review] command runs by default — unless --no-review. Log the decision + reason per
+            # task, so a batch that runs unreviewed shows WHY in its log instead of silently skipping.
+            decision = cfg.review.decide(override=task.get("review"), disabled=no_review)
+            if not decision.on and not no_review and base_config is not None:
+                base = base_config.review.decide()          # a base-config default covers every task
+                if base.on:
+                    decision = ReviewDecision(base.command, "base-config [review] command")
+            tlog.info("review", state="on" if decision.on else "off", reason=decision.reason)
             review_hook = None
-            if review_cmd:
+            if decision.command:
                 from .review import ShellReviewHook
-                review_hook = ShellReviewHook(review_cmd)
+                review_hook = ShellReviewHook(decision.command)
             agent = agent_factory(task) if agent_factory else build_agent(cfg.agent, executor=executor)
             from ..loop import run_loop
             result = run_loop(cfg, agent, review_hook=review_hook, executor=executor,
