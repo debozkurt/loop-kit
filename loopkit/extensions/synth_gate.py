@@ -66,6 +66,7 @@ from ..log import get_logger
 GateRunner = Callable[[str, Path], GateResult]
 
 # The check names, so callers/tests key off a stable string rather than positional order.
+ENV_LIVE = "env-live"            # a trivial probe through the oracle's runner must PASS (env sanity)
 FAIL_FIRST = "fail-first"        # the oracle must FAIL on the current (buggy) tree
 PASS_ON_FIX = "pass-on-fix"      # given a reference fix, the oracle must PASS on the fixed tree
 
@@ -155,11 +156,17 @@ class OracleVerdict:
     target: str
     blessed: bool
     checks: list[OracleCheck]
-    signature: str                       # short hash of (oracle, fix, mode) — the provenance identity
+    signature: str                       # short hash of (oracle, fix, mode[, probe]) — the provenance identity
     loopkit_version: str
     timestamp: str                       # ISO-8601; supplied by the caller (no hidden clock)
     fix: str | None = None
     isolated: bool = False               # was the fail-first check run in a throwaway copy?
+    # Env-liveness (the fix-free half of pass-on-fix): did a trivial guaranteed-pass probe through
+    # the oracle's own runner PASS in the same tree fail-first ran in? True/False when a probe was
+    # supplied; None = unprobed (no probe given — fail-first's diagnosis is then unconfirmed against
+    # environmental breakage: SCRAM auth, SIGABRT/non-relocatable venv, missing deps all exit
+    # non-zero exactly like a genuine reproduction).
+    env_live: bool | None = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -168,14 +175,19 @@ class OracleVerdict:
         return json.dumps(self.to_dict(), indent=indent, sort_keys=True)
 
 
-def oracle_signature(oracle: str, fix: str | None, mode: str) -> str:
-    """A short, stable hash of what was verified — the oracle command, the fix, and the copy mode.
+def oracle_signature(oracle: str, fix: str | None, mode: str, probe: str | None = None) -> str:
+    """A short, stable hash of what was verified — the oracle command, the fix, the copy mode, and
+    (when supplied) the env-liveness probe.
 
     Ties a blessing to the *exact* inputs it certified: change the oracle or the reference fix and the
     signature changes, so a stored verdict can never be silently reused for a different oracle. Mirrors
     `measure.harness_signature` — a certificate that doesn't name what it certifies isn't a certificate.
+    The probe key is added only when present, so every pre-probe signature stays byte-stable.
     """
-    blob = json.dumps({"oracle": oracle, "fix": fix, "mode": mode}, sort_keys=True).encode("utf-8")
+    payload: dict = {"oracle": oracle, "fix": fix, "mode": mode}
+    if probe is not None:
+        payload["probe"] = probe
+    blob = json.dumps(payload, sort_keys=True).encode("utf-8")
     return hashlib.sha256(blob).hexdigest()[:12]
 
 
@@ -245,12 +257,27 @@ def _run_oracle(run_gate: GateRunner, oracle: str, workspace: Path, *, expect_pa
 def verify_oracle(oracle: str, workspace: Path, *, timestamp: str, fix: str | None = None,
                   mode: str = "copy", isolate: bool = False, tail: int = 2000,
                   run_gate: GateRunner | None = None,
-                  loopkit_version: str | None = None) -> OracleVerdict:
-    """Verify a proposed held-out oracle is real: fail-first, and (given a fix) fail→pass.
+                  loopkit_version: str | None = None,
+                  probe: str | None = None) -> OracleVerdict:
+    """Verify a proposed held-out oracle is real: env-live (given a probe), fail-first, and (given a
+    fix) fail→pass.
 
     Runs the mandatory **fail-first** check — the oracle must FAIL on the current tree — and, when
     `fix` is supplied, the gold **pass-on-fix** check: apply the reference fix to an isolated copy and
     require the oracle to PASS. The oracle is `blessed` iff every check holds.
+
+    **env-live** (`probe`, optional): fail-first alone cannot distinguish a *diagnostic* failure (the
+    assertion caught the bug) from an *environmental* one (auth to a test DB down, a missing dep, a
+    non-relocatable venv SIGABRTing in the copy) — both exit non-zero, and output-signature matching
+    only ever catches the failure classes already seen. The probe is the positive proof: a trivial
+    guaranteed-pass command through the oracle's OWN runner, run in the SAME tree fail-first will use
+    (crucially: inside the isolated copy when isolating — a copy can break an env that was healthy at
+    the source). If even the probe cannot PASS, the environment is broken: the verdict records
+    `env-live` failed + `env_live: false`, **fail-first is skipped** (its output would be the same
+    environmental noise misread as a reproduction), and the oracle is never blessed. No probe ⇒
+    `env_live: null` — verified as before, honestly marked unprobed. This is the fix-free half of
+    pass-on-fix: an env-broken oracle can never pass, but proving that normally needs a fix; the
+    probe needs none.
 
     Isolation: with a `fix`, both checks run in one throwaway copy (the fix only touches that copy, and
     fail→pass is proven on a single materialized tree). Without a fix, fail-first runs **in place** by
@@ -264,7 +291,7 @@ def verify_oracle(oracle: str, workspace: Path, *, timestamp: str, fix: str | No
     log = get_logger("synth-gate")
     workspace = Path(workspace).resolve()
     runner = run_gate or _default_runner()
-    sig = oracle_signature(oracle, fix, mode)
+    sig = oracle_signature(oracle, fix, mode, probe)
     from .. import __version__ as _v
     version = loopkit_version or _v
 
@@ -286,45 +313,78 @@ def verify_oracle(oracle: str, workspace: Path, *, timestamp: str, fix: str | No
     # A fix forces isolation (we're about to mutate a tree); `isolate` opts fail-first into a copy too.
     isolated = isolate or fix is not None
     checks: list[OracleCheck] = []
+    env_live: bool | None = None
+
+    def _env_probe(tree: Path) -> bool:
+        """Run the env-liveness probe in `tree`; append its check. Returns False ⇒ short-circuit."""
+        nonlocal env_live
+        if probe is None:
+            return True
+        log.info("verify.start", check=ENV_LIVE, isolated=isolated)
+        result = runner(probe, tree)
+        env_live = bool(result.passed)
+        if env_live:
+            checks.append(OracleCheck(
+                name=ENV_LIVE, expected="pass", passed_gate=True, ok=True,
+                detail="the runner passes a trivial probe in this tree — a fail-first failure "
+                       "below is diagnostic, not environmental"))
+            return True
+        evidence = (shape_failure_output(result.feedback, budget=tail)
+                    if result.feedback else None)
+        log.warn("verify.env_broken", check=ENV_LIVE)
+        checks.append(OracleCheck(
+            name=ENV_LIVE, expected="pass", passed_gate=False, ok=False, broken=True,
+            detail="the ENVIRONMENT is broken — the oracle's runner cannot pass even a trivial "
+                   "guaranteed-pass probe in this tree, so a failing oracle here proves nothing "
+                   "(the auth-down / missing-dep / non-relocatable-venv class). fail-first was "
+                   "SKIPPED; fix the environment (or the probe), then re-verify.",
+            evidence=evidence))
+        return False
 
     if not isolated:
         # Common case: verify fail-first in place, exactly like the `--validate` pre-loop seam.
-        log.info("verify.start", check=FAIL_FIRST, isolated=False, hasFix=False)
-        checks.append(_run_oracle(runner, oracle, workspace, expect_pass=False,
-                                  name=FAIL_FIRST, tail=tail))
+        if _env_probe(workspace):
+            log.info("verify.start", check=FAIL_FIRST, isolated=False, hasFix=False)
+            checks.append(_run_oracle(runner, oracle, workspace, expect_pass=False,
+                                      name=FAIL_FIRST, tail=tail))
     else:
-        # Isolated: materialize once, run fail-first there, then (if a fix) apply it and run pass-on-fix
-        # on the SAME tree — the truest fail→pass discrimination proof, and it never touches the caller.
+        # Isolated: materialize once, PROBE the copy (materialization itself can break an env that
+        # was healthy at the source — the observed case: copytree duplicating a non-relocatable
+        # venv), then run fail-first there, then (if a fix) apply it and run pass-on-fix on the
+        # SAME tree — the truest fail→pass discrimination proof, and it never touches the caller.
         with tempfile.TemporaryDirectory(prefix="loopkit-synth-") as scratch:
             copy = Path(scratch) / "tree"
             log.info("verify.materialize", mode=mode)
             _materialize(workspace, copy, mode=mode)
-            log.info("verify.start", check=FAIL_FIRST, isolated=True, hasFix=fix is not None)
-            checks.append(_run_oracle(runner, oracle, copy, expect_pass=False,
-                                      name=FAIL_FIRST, tail=tail))
-            if fix is not None:
-                # Apply the reference fix in the copy with the same credential-free child env the gate
-                # gets, so the fix can't reach a token either. A fix that itself errors is a failed
-                # pass-on-fix check (we can't prove the oracle flips if the fix never landed).
-                env = {**secrets.current().child_env(), "PYTHONDONTWRITEBYTECODE": "1"}
-                proc = subprocess.run(fix, cwd=copy, shell=True, env=env, capture_output=True,
-                                      text=True, timeout=GATE_TIMEOUT)
-                if proc.returncode != 0:
-                    out = shape_failure_output((proc.stdout or "") + (proc.stderr or ""), budget=tail)
-                    log.warn("verify.fix_failed", rc=proc.returncode)
-                    checks.append(OracleCheck(
-                        name=PASS_ON_FIX, expected="pass", passed_gate=False, ok=False,
-                        detail=f"the reference fix did not apply cleanly (exit {proc.returncode}) — "
-                               "cannot prove the oracle flips",
-                        evidence=out or None))
-                else:
-                    log.info("verify.start", check=PASS_ON_FIX, isolated=True)
-                    checks.append(_run_oracle(runner, oracle, copy, expect_pass=True,
-                                              name=PASS_ON_FIX, tail=tail))
+            if _env_probe(copy):           # env-broken ⇒ skip every oracle run in this dead tree
+                log.info("verify.start", check=FAIL_FIRST, isolated=True, hasFix=fix is not None)
+                checks.append(_run_oracle(runner, oracle, copy, expect_pass=False,
+                                          name=FAIL_FIRST, tail=tail))
+                if fix is not None:
+                    # Apply the reference fix in the copy with the same credential-free child env the
+                    # gate gets, so the fix can't reach a token either. A fix that itself errors is a
+                    # failed pass-on-fix check (we can't prove the oracle flips if the fix never landed).
+                    env = {**secrets.current().child_env(), "PYTHONDONTWRITEBYTECODE": "1"}
+                    proc = subprocess.run(fix, cwd=copy, shell=True, env=env, capture_output=True,
+                                          text=True, timeout=GATE_TIMEOUT)
+                    if proc.returncode != 0:
+                        out = shape_failure_output((proc.stdout or "") + (proc.stderr or ""),
+                                                   budget=tail)
+                        log.warn("verify.fix_failed", rc=proc.returncode)
+                        checks.append(OracleCheck(
+                            name=PASS_ON_FIX, expected="pass", passed_gate=False, ok=False,
+                            detail=f"the reference fix did not apply cleanly (exit {proc.returncode}) "
+                                   "— cannot prove the oracle flips",
+                            evidence=out or None))
+                    else:
+                        log.info("verify.start", check=PASS_ON_FIX, isolated=True)
+                        checks.append(_run_oracle(runner, oracle, copy, expect_pass=True,
+                                                  name=PASS_ON_FIX, tail=tail))
 
     blessed = all(c.ok for c in checks)
     log.info("verify.done", blessed=blessed, checks=len(checks),
-             failed=[c.name for c in checks if not c.ok], sig=sig)
+             failed=[c.name for c in checks if not c.ok], sig=sig, envLive=env_live)
     return OracleVerdict(
         oracle=oracle, target=str(workspace), blessed=blessed, checks=checks, signature=sig,
-        loopkit_version=version, timestamp=timestamp, fix=fix, isolated=isolated)
+        loopkit_version=version, timestamp=timestamp, fix=fix, isolated=isolated,
+        env_live=env_live)

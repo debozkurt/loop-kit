@@ -16,8 +16,8 @@ from pathlib import Path
 
 import pytest
 
-from loopkit.extensions.synth_gate import (FAIL_FIRST, PASS_ON_FIX, OracleVerdict, oracle_signature,
-                                           verify_oracle)
+from loopkit.extensions.synth_gate import (ENV_LIVE, FAIL_FIRST, PASS_ON_FIX, OracleVerdict,
+                                           oracle_signature, verify_oracle)
 from loopkit.gate import GateResult
 
 TS = "2026-07-10T00:00:00+00:00"          # a fixed timestamp (the verdict takes the clock as input)
@@ -126,6 +126,78 @@ def test_signature_is_stable_and_sensitive():
     assert oracle_signature("o", None, "copy") == oracle_signature("o", None, "copy")
     assert oracle_signature("o", None, "copy") != oracle_signature("o", "git apply x", "copy")
     assert oracle_signature("o", None, "copy") != oracle_signature("o2", None, "copy")
+    # The probe key is added only when supplied: pre-probe signatures stay byte-stable, and a
+    # different probe is a different certification.
+    assert oracle_signature("o", None, "copy", probe=None) == oracle_signature("o", None, "copy")
+    assert oracle_signature("o", None, "copy", probe="p") != oracle_signature("o", None, "copy")
+    assert oracle_signature("o", None, "copy", probe="p") != oracle_signature("o", None, "copy",
+                                                                             probe="p2")
+
+
+# --- env-liveness probe (Q3): a positive proof the oracle's runner is even alive ------------------
+def _probe_aware_runner(probe_cmd: str = "probe", probe_alive: bool = True):
+    """A fake runner where the PROBE's fate is scripted and the oracle always 'fails' (buggy tree).
+
+    Stands in for the Wave-A failure class: an oracle exiting non-zero for ENVIRONMENTAL reasons
+    (auth down, SIGABRT'd venv) is byte-for-byte indistinguishable, at the exit-code level, from one
+    that genuinely reproduces the bug — only the probe's verdict separates the two worlds.
+    """
+    seen: list[tuple[str, str]] = []
+
+    def run(command: str, workspace: Path) -> GateResult:
+        seen.append((command, str(workspace)))
+        if command == probe_cmd:
+            return GateResult(probe_alive, None if probe_alive
+                              else "FATAL: password authentication failed for user \"spacer\"")
+        return GateResult(False, "E   assert 20.0 == 18.0  (boundary not discounted)")
+
+    run.seen = seen        # type: ignore[attr-defined]
+    return run
+
+
+def test_probe_pass_records_env_live_and_blesses(tmp_path: Path):
+    runner = _probe_aware_runner(probe_alive=True)
+    verdict = verify_oracle("run oracle", tmp_path, timestamp=TS, probe="probe", run_gate=runner)
+    assert verdict.blessed and verdict.env_live is True
+    assert [c.name for c in verdict.checks] == [ENV_LIVE, FAIL_FIRST]
+    assert [c for c, _ in runner.seen] == ["probe", "run oracle"]     # probe ran FIRST
+
+
+def test_probe_fail_is_env_broken_and_skips_fail_first(tmp_path: Path):
+    # The Wave-A regression: an env failure must yield env-broken, NOT a fail-first blessing —
+    # and fail-first must not even run (its output would be the same environmental noise).
+    runner = _probe_aware_runner(probe_alive=False)
+    verdict = verify_oracle("run oracle", tmp_path, timestamp=TS, probe="probe", run_gate=runner)
+    assert not verdict.blessed and verdict.env_live is False
+    assert [c.name for c in verdict.checks] == [ENV_LIVE]             # short-circuit: no fail-first
+    assert verdict.checks[0].broken and "ENVIRONMENT is broken" in verdict.checks[0].detail
+    assert [c for c, _ in runner.seen] == ["probe"]                   # the oracle never ran
+
+
+def test_probe_runs_inside_the_isolated_copy(tmp_path: Path):
+    # Materialization itself can break the env (the observed case: copytree duplicating a
+    # non-relocatable venv) — so the probe must run in the COPY, never the pristine source.
+    runner = _probe_aware_runner(probe_alive=True)
+    verify_oracle("run oracle", tmp_path, timestamp=TS, probe="probe", isolate=True,
+                  run_gate=runner)
+    probe_ws = runner.seen[0][1]
+    assert probe_ws != str(tmp_path.resolve())                        # the copy, not the source
+    assert runner.seen[0][1] == runner.seen[1][1]                     # same tree as fail-first
+
+
+def test_no_probe_is_unprobed_not_failed(tmp_path: Path):
+    # Back-compat: probe-less verification behaves exactly as before, honestly marked unprobed.
+    verdict = verify_oracle("run oracle", tmp_path, timestamp=TS, run_gate=_marker_runner())
+    assert verdict.blessed and verdict.env_live is None
+    assert [c.name for c in verdict.checks] == [FAIL_FIRST]
+
+
+def test_verdict_json_carries_env_live(tmp_path: Path):
+    verdict = verify_oracle("run oracle", tmp_path, timestamp=TS, probe="probe",
+                            run_gate=_probe_aware_runner(probe_alive=False))
+    data = json.loads(verdict.to_json())
+    assert data["env_live"] is False
+    assert [c["name"] for c in data["checks"]] == [ENV_LIVE]
 
 
 def test_verdict_json_roundtrip_is_self_describing(tmp_path: Path):
@@ -197,6 +269,27 @@ def test_cli_refuses_an_already_green_oracle_exit_3(tmp_path: Path, monkeypatch)
     result = _run_cli(["true"], repo, monkeypatch, tmp_path)
     assert result.exit_code == 3, result.output
     assert "not blessed" in result.output
+
+
+def test_cli_probe_pass_blesses_with_env_live(tmp_path: Path, monkeypatch):
+    repo = _demo_copy(tmp_path)
+    out = tmp_path / "verdict.json"
+    result = _run_cli([f"{sys.executable} -m pytest tests/holdout -q",
+                       "--probe", "true", "--out", str(out)], repo, monkeypatch, tmp_path)
+    assert result.exit_code == 0, result.output
+    data = json.loads(out.read_text())
+    assert data["blessed"] is True and data["env_live"] is True
+
+
+def test_cli_probe_fail_refuses_as_env_broken(tmp_path: Path, monkeypatch):
+    repo = _demo_copy(tmp_path)
+    out = tmp_path / "verdict.json"
+    result = _run_cli([f"{sys.executable} -m pytest tests/holdout -q",
+                       "--probe", "false", "--out", str(out)], repo, monkeypatch, tmp_path)
+    assert result.exit_code == 3, result.output
+    data = json.loads(out.read_text())
+    assert data["blessed"] is False and data["env_live"] is False
+    assert [c["name"] for c in data["checks"]] == ["env-live"]        # fail-first never ran
 
 
 def test_cli_errors_when_no_oracle_and_no_config(tmp_path: Path, monkeypatch):

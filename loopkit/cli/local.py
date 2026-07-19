@@ -756,6 +756,13 @@ def synth_gate(oracle: str | None = typer.Argument(None,
                mode: str = typer.Option("copy", "--mode",
                     help="How the isolated copy is materialized: copy (working tree, incl. uncommitted) "
                          "| clone (committed state)."),
+               probe: str | None = typer.Option(None, "--probe",
+                    help="Env-liveness probe: a trivial GUARANTEED-PASS command through the oracle's "
+                         "own runner (e.g. its test runner on an always-green selection). Runs in the "
+                         "same tree as fail-first (inside the isolated copy when isolating); if even "
+                         "the probe can't pass, the env is broken — the verdict records env-broken and "
+                         "fail-first is skipped, because an env failure exits non-zero exactly like a "
+                         "genuine reproduction. Omit ⇒ env_live: null (unprobed)."),
                out: Path | None = typer.Option(None, "--out",
                     help="Write the full JSON OracleVerdict here — the auditable provenance record.")) -> None:
     """Verify a proposed held-out oracle is *real*: fail-first, and (with --fix) fail→pass.
@@ -797,8 +804,9 @@ def synth_gate(oracle: str | None = typer.Argument(None,
                     metadata={"has_fix": fix is not None, "isolate": isolate}) as span:
         verdict = verify_oracle(
             the_oracle, target, timestamp=datetime.now(timezone.utc).isoformat(timespec="seconds"),
-            fix=fix, mode=mode, isolate=isolate)
-        span.outputs(blessed=verdict.blessed, checks=len(verdict.checks), signature=verdict.signature)
+            fix=fix, mode=mode, isolate=isolate, probe=probe)
+        span.outputs(blessed=verdict.blessed, checks=len(verdict.checks), signature=verdict.signature,
+                     env_live=verdict.env_live)
 
     console.print(_oracle_verdict_table(verdict))
     for check in verdict.checks:
