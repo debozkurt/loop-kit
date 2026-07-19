@@ -26,6 +26,7 @@ references** (design records + current-phase resume doc).
 
 | Doc | Covers |
 |---|---|
+| [`AI-PRIMER.md`](AI-PRIMER.md) | the one-page structured map — modules → contracts, invariants, full command + config surface; written for AI readers, equally the fastest human ramp (root [`llms.txt`](../llms.txt) points here) |
 | [`architecture/`](architecture/README.md) | the living architecture wiki (system today + the module-ownership map, cloud, adapters/auth, security) — start with its README |
 | [`../examples/ci/`](../examples/ci/) | the CI deployment tier templates (claude-api + claude-code/OAuth) |
 

@@ -136,6 +136,7 @@ loopkit mold-batch --tasks p.toml   # build that batch.toml for a pile of findin
 | **Pick an example** — 7 dirs, 7 questions | [`examples/`](examples/) |
 | **Learn the concepts** — the written course | [the *Agentic Loops* manual](https://github.com/debozkurt/loop-guide) · `loopkit demo` (runnable labs) |
 | **Understand how it's built** | [`docs/architecture/`](docs/architecture/README.md) |
+| **The one-page map** — modules → contracts, invariants, full command + config surface (AI readers / fast ramp) | [`docs/AI-PRIMER.md`](docs/AI-PRIMER.md) |
 | **All docs** | [`docs/README.md`](docs/README.md) |
 
 ## The two gates (the heart of it)

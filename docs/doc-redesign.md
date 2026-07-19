@@ -1,6 +1,6 @@
 # Documentation redesign — design + pickup
 
-Status: **designed 2026-07-19; Phase 1 shipped, Phases 2–3 queued for a new session.** This is the
+Status: **designed 2026-07-19; Phases 1–2 shipped, Phase 3 queued for a new session.** This is the
 canonical plan for reshaping loopkit's docs + examples so they (a) index every feature/command,
 (b) onboard a new project with copy-paste-easy, jr-friendly steps, and (c) double as a primer an AI
 can read to understand the whole platform.
@@ -80,20 +80,29 @@ also the densest truth-map for humans in a hurry — not a robots-only artifact.
    removed the triplicated quickstart; reframed `USING-ON-YOUR-REPO.md` as the deep reference that
    builds on the Quickstart; de-duped the `## Documentation` nav; re-pointed all four "start here"s
    (README, `docs/README.md`, `examples/README.md`) at the one spine. ~60% of the onboarding benefit.
-2. **Phase 2 — `AI-PRIMER.md` + `llms.txt`. NEXT (start here in the new session).** Highest leverage
-   for least effort: mostly lifting existing material (module table, invariants) into one structured
-   page. Serves the AI + sr-engineer readers immediately; independently valuable.
+2. **Phase 2 — `AI-PRIMER.md` + `llms.txt`. ✅ DONE (2026-07-19).** `docs/AI-PRIMER.md` — module →
+   contract map (core + extensions), invariants, tick lifecycle + all 8 `StopReason` terminals,
+   review semantics, the FULL command surface (core/batch/fleet/cloud incl. `review`, `measure`,
+   `route`, `synth-gate`, `executor` — commands the README never listed), the config table with
+   **code defaults from `config.py`** (not the README's example values), and the seam table with the
+   `ShellProposer` env contract. Root `llms.txt` (llmstxt.org shape) points at it. Linked from the
+   README "Where to go" nav + `docs/README.md` architecture table.
 3. **Phase 3 — the Diátaxis reorg.** Larger: split the README, topic-rename the design docs, generate
    the command reference, unify the config reference, move state to `project/`. Do it when doc drift
    actually hurts, not preemptively.
 
 ## Pickup (new session)
 
-- Read this doc first, then the current README `## Quickstart` (the Phase-1 result — the model for the
-  tutorial layer's voice).
-- **Do Phase 2 first:** draft `docs/AI-PRIMER.md` from the spec above + a root `llms.txt`. Source
-  material: the README module table (`## The whole tool mirrors the manual`), `CLAUDE.md`
-  "Invariants to preserve", the `## Command reference` section, `examples/gates/loopkit.example.toml`.
-- Then scope Phase 3 as its own change (it touches many files — land it deliberately, per the CLAUDE.md
-  doc contract: docs updated in the same change as what they describe).
+- Read this doc first, then skim `docs/AI-PRIMER.md` (the Phase-2 result — its tables are the seed
+  material for Phase 3's `reference/` layer).
+- **Next: scope Phase 3 as its own deliberate change** (it touches many files — land it per the
+  CLAUDE.md doc contract: docs updated in the same change as what they describe). Suggested order:
+  (a) topic-rename the design docs + move resume docs to `project/` (pure moves, low risk);
+  (b) split the README into `reference/` + `explanation/` (the primer's command/config tables are
+  the starting point for the generated references); (c) split `USING-ON-YOUR-REPO.md` into
+  `how-to/` recipes.
+- Phase-2 gotcha worth keeping: the README/example-toml show *illustrative* values
+  (`max_cost_usd = 5.0`, `max_iter = 12`) that differ from `config.py` defaults (10.0, 30) — any
+  generated config reference must source `config.py`, and `examples/gates/loopkit.example.toml`'s
+  `[review]` comment still predates the built-in default judge (fix in Phase 3's config unification).
 - Convention reminder: loopkit design/state lives in this repo (not spacer memory); spacer keeps only a pointer.

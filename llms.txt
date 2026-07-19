@@ -1,0 +1,33 @@
+# loopkit
+
+> A self-governed coding loop for any git repository: declare a goal and two shell-command gates,
+> and it drives a coding agent toward the goal tick by tick — committing every tick to an isolated
+> branch, verified by an in-sample iteration gate, a held-out acceptance gate, and an on-by-default
+> adversarial review judge, bounded by hard stops (budget / no-progress / iteration cap) and a
+> safety envelope (never `main`, protected paths, opt-in-only push). Python; core deps are only
+> `typer + rich + pydantic`. The same loop scales to a parallel batch, a Redis-queue fleet, and a
+> Kubernetes control plane.
+
+Start with the AI primer — it is the one-page structured map (module → contract table, invariants,
+full command + config surface, extension seams) written for machine readers:
+
+## Docs
+
+- [AI primer](docs/AI-PRIMER.md): the dense canonical map — read this first
+- [README](README.md): what it is, install, the 5-step Quickstart, the two gates
+- [Using on your repo](docs/USING-ON-YOUR-REPO.md): end-to-end operator guide (remote sync, issues, CI, batch)
+- [Control files](docs/CONTROL-FILES.md): every `loopkit.toml` / `PROMPT.md` knob, annotated
+- [Config reference example](examples/gates/loopkit.example.toml): fully-commented starter config
+- [Architecture wiki](docs/architecture/README.md): how it's built; module-ownership map
+
+## Operations
+
+- [Operating a run](docs/OPERATING.md): silent-vs-hung, resume, output per tier
+- [Troubleshooting](docs/TROUBLESHOOTING.md): common failures and what they mean
+- [Billing](docs/BILLING.md): which credential pays; subscription vs API key
+
+## Optional
+
+- [Default judge design](docs/default-judge-design.md): the built-in review judge
+- [Docs index](docs/README.md): everything else, including design records
+- [Agentic Loops manual](https://github.com/debozkurt/loop-guide): the paired concepts course loopkit implements
