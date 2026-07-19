@@ -119,7 +119,8 @@ def test_review_runs_when_agent_self_commits(git_repo: Path):
 
 
 def test_review_config_resolution():
-    # No command: review is OFF (the default) — nothing runs unless an explicit override is given.
+    # No command: `resolved()` (the command-only view) is None — the built-in judge has no shell
+    # command; on-ness now lives on decide().kind, never on the command (see the decision test).
     off = ReviewConfig()
     assert off.resolved() is None
     assert off.resolved(override="cmd.sh") == "cmd.sh"
@@ -136,19 +137,23 @@ def test_review_config_resolution():
     assert disabled.resolved(override="explicit.sh") == "explicit.sh"
 
 
-def test_review_decision_carries_reason():
-    # decide() is resolved()'s richer sibling: the command AND a human-readable reason, so callers
-    # can LOG why review is on/off (the decision was previously invisible → silently-off).
-    off = ReviewConfig().decide()
-    assert off.command is None and off.on is False and "no [review] command" in off.reason
+def test_review_decision_carries_reason_and_kind():
+    # decide() names WHAT runs (kind) AND why (reason), so callers can LOG the decision (it was
+    # previously invisible → silently-off). Review is truly on-by-default: a bare config resolves
+    # to the BUILT-IN judge — on with no command — which is exactly why `on` derives from kind,
+    # never from `command is not None` (that would render the default judge "off" while it runs).
+    default = ReviewConfig().decide()
+    assert default.kind == "default" and default.on is True and default.command is None
+    assert "built-in judge" in default.reason
     on = ReviewConfig(command="judge.sh").decide()
-    assert on.command == "judge.sh" and on.on is True and "[review] command" in on.reason
+    assert on.kind == "command" and on.command == "judge.sh" and on.on is True
+    assert "[review] command" in on.reason
     ovr = ReviewConfig(command="judge.sh").decide(override="cli.sh")
-    assert ovr.command == "cli.sh" and ovr.on and "override" in ovr.reason
+    assert ovr.kind == "command" and ovr.command == "cli.sh" and ovr.on and "override" in ovr.reason
     no = ReviewConfig(command="judge.sh").decide(disabled=True)
-    assert no.command is None and no.on is False and "--no-review" in no.reason
+    assert no.kind == "off" and no.command is None and no.on is False and "--no-review" in no.reason
     off_switch = ReviewConfig(command="judge.sh", enabled=False).decide()
-    assert off_switch.command is None and "enabled" in off_switch.reason
+    assert off_switch.kind == "off" and off_switch.on is False and "enabled" in off_switch.reason
 
 
 def test_shell_review_hook_passes_clean_and_fails_dirty(tmp_path: Path):

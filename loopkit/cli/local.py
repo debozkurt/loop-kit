@@ -124,15 +124,19 @@ def doctor(config: Path = typer.Option(DEFAULT_CONFIG, "--config", "-c"),
     if gate:
         _doctor_gate_verdict(table, cfg)
 
-    # Continuous review (Ch 8): make the on/off decision apparent here, so a config that never wired
-    # a judge is caught at doctor time — not discovered later as a batch of unreviewed MRs.
+    # Continuous review (Ch 8): make the decision apparent here — WHICH judge gates DONE (custom
+    # command or the built-in default and its backend/model), or WHY review is off. On-by-default
+    # means a review model call per plausibly-done tick; doctor is where that spend is visible
+    # before a run starts.
     review = cfg.review.decide()
-    if review.on:
+    if review.kind == "default":
+        table.add_row("review", "[green]on[/]",
+                      escape(f"{_review_detail(review, cfg)} — a review model call per "
+                             "plausibly-done tick (--no-review opts out)"))
+    elif review.on:
         table.add_row("review", "[green]on[/]", escape(review.command))
     else:
-        table.add_row("review", "[yellow]off[/]",
-                      escape("no [review] command — set one (e.g. an adversarial LLM judge) to gate "
-                             "DONE on a clean review; runs by default once set (--no-review opts out)"))
+        table.add_row("review", "[yellow]off[/]", escape(review.reason))
 
     # Tracing (Ch 14-15): full-tree LangSmith observability, auto-on when langsmith + a key present.
     trace.configure(cfg.trace)
@@ -148,6 +152,17 @@ def doctor(config: Path = typer.Option(DEFAULT_CONFIG, "--config", "-c"),
     console.print(table)
     if not pf.ok:
         raise typer.Exit(1)
+
+
+def _review_detail(decision, cfg: Config) -> str:
+    """The human-readable judge identity for a review decision: the shell command for
+    kind=="command", the resolved backend/model for the built-in default judge — so the run line
+    and doctor always say WHICH judge gates DONE, not just that one does."""
+    if decision.kind == "command":
+        return decision.command
+    from ..extensions.judge import resolve_judge
+    target = resolve_judge(cfg.review, cfg.agent)
+    return f"built-in judge: {target.backend}/{target.model or 'backend default'}"
 
 
 # Adapter binary / SDK / key for each adapter name, used by `doctor`.
@@ -414,17 +429,24 @@ def run(config: Path = typer.Option(DEFAULT_CONFIG, "--config", "-c"),
         f"budget ${cfg.agent.max_cost_usd}"
         + (f" · issue #{issue_number}" if issue_number is not None else ""),
         title="loopkit run"))
-    # Review is opt-out: an explicit --review wins, else the configured [review] command runs by
-    # default (unless --no-review). Announce the decision up front so an accidentally-off review
-    # (the failure mode that let review fire in zero of 28 runs) is impossible to miss.
+    # Review is opt-out: an explicit --review wins, else the configured [review] command, else the
+    # BUILT-IN default judge (unless --no-review). Announce the decision up front so an
+    # accidentally-off review (the failure mode that let review fire in zero of 28 runs) is
+    # impossible to miss — and name the judge identity when the default runs, so on-by-default is
+    # never an anonymous spend.
     review_hook = None
     decision = cfg.review.decide(override=review, disabled=no_review)
     console.print(
         f"[bold]review:[/] {'[green]on[/]' if decision.on else '[yellow]off[/]'} — {decision.reason}"
-        + (f" [dim]· {decision.command}[/]" if decision.on else ""))
-    if decision.command:
+        + (f" [dim]· {escape(_review_detail(decision, cfg))}[/]" if decision.on else ""))
+    if decision.kind == "command":
         from ..extensions.review import ShellReviewHook
         review_hook = ShellReviewHook(decision.command)
+    elif decision.kind == "default":
+        # Construct BEFORE run_loop: the hook captures the repo's pre-run HEAD as the diff fork point.
+        from ..extensions.judge import DefaultReviewHook
+        review_hook = DefaultReviewHook(cfg.review, cfg.agent, cfg.repo_path(), cfg.goal,
+                                        plan_file=cfg.plan.file)
     skills_registry = None
     if skills:
         from ..extensions.skills import FileSkillRegistry, ShellDistiller

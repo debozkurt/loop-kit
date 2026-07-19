@@ -311,8 +311,11 @@ elif decision.kind == "default": hook = DefaultReviewHook(cfg.review, cfg.agent)
 else:                            hook = None
 ```
 
-Both sites have the full `cfg`. **Batch's base-config fallback** (`batch.py:459-462`) becomes dead
-once `default` exists — every task resolves on — so remove it rather than leave a misleading branch.
+Both sites have the full `cfg`. **Batch's base-config fallback is repointed, not removed** (a
+build-time correction to this doc's earlier "remove it"): per-task configs don't inherit
+`[defaults]`, so with the old code deleted a batch owner's base-config custom judge would be
+silently replaced by the bundled default. Precedence per task: manifest `review =` > task-config
+command > **base-config command** > built-in default judge.
 
 ## Deployment surfaces (batch · cloud)
 
