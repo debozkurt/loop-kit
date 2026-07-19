@@ -23,11 +23,13 @@ from __future__ import annotations
 
 import json
 import subprocess
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Protocol, runtime_checkable
+from typing import Callable, Iterable, Protocol, runtime_checkable
 
 from . import secrets, trace
+from .log import Logger
 from .executor import LocalToolExecutor, ToolExecutor, _WorkspaceTools  # noqa: F401 — _WorkspaceTools re-exported
 from .pricing import DEFAULT_MODELS, Usage, estimate_cost
 
@@ -42,9 +44,36 @@ class AgentResult:
     raw_tail: str = ""             # last chars of agent output, for feedback only
 
 
+@dataclass
+class AgentObserver:
+    """Optional, None-safe observability sinks handed to an adapter for one invocation.
+
+    Two sinks, two rules (the house two-layer split, docs/OPERATING.md):
+      * `log`      — a component logger for the *live*, human-tailable step stream. What lands here
+                     follows the operator's log policy; it is formatted text on stderr and is how you
+                     watch a background run tool-by-tool (and thought-by-thought) via `tail -f`.
+      * `activity` — a writer called once per raw agent event, for the *durable*, replayable
+                     `<task>.activity.jsonl` artifact. The loop owns the file + its lifecycle; the
+                     adapter just feeds it the verbatim event line, so a hung tick still leaves a
+                     partial, replayable trail on disk.
+
+    Both optional so an adapter can observe unconditionally — a None field is a silent no-op. Only the
+    streaming CLI path (claude-code) populates these today; every other adapter accepts and ignores.
+    """
+
+    log: "Logger | None" = None
+    activity: "Callable[[str], None] | None" = None
+
+    def record(self, raw_line: str) -> None:
+        """Persist one raw event line to the durable artifact (no-op without an activity sink)."""
+        if self.activity is not None and raw_line:
+            self.activity(raw_line)
+
+
 @runtime_checkable
 class Agent(Protocol):
-    def act(self, prompt: str, workspace: Path) -> AgentResult: ...
+    def act(self, prompt: str, workspace: Path, *,
+            observer: "AgentObserver | None" = None) -> AgentResult: ...
 
 
 class MockAgent:
@@ -62,7 +91,8 @@ class MockAgent:
         self._cost = cost_per_tick
         self._i = 0
 
-    def act(self, prompt: str, workspace: Path) -> AgentResult:
+    def act(self, prompt: str, workspace: Path, *,
+            observer: "AgentObserver | None" = None) -> AgentResult:
         summary = "noop"
         if self._i < len(self._behaviors):
             summary = self._behaviors[self._i](workspace) or "edit"
@@ -92,7 +122,11 @@ class _CLIAdapter:
             cmd += ["--model", self.model]
         return cmd + self.extra_args
 
-    def act(self, prompt: str, workspace: Path) -> AgentResult:
+    def act(self, prompt: str, workspace: Path, *,
+            observer: "AgentObserver | None" = None) -> AgentResult:
+        # Buffered path: stdout is captured whole and parsed at exit, so there is no live stream —
+        # `observer` is accepted (uniform contract) but unused. The streaming claude-code path
+        # overrides `act`; codex and any pinned-`json` claude run land here.
         # The vendor binary runs its own loop on untrusted instructions: hand it ONLY its model key
         # (no git token, no other provider's key) via a scrubbed env (Part III Phase 5a containment).
         env = secrets.current().child_env(add=self.cred_keys)
@@ -115,12 +149,16 @@ class _CLIAdapter:
 
 
 class ClaudeCodeAdapter(_CLIAdapter):
-    """`claude -p "<prompt>" --output-format json` headless. Primary adapter.
+    """`claude -p "<prompt>" --output-format stream-json --verbose` headless. Primary adapter.
 
-    The JSON output is what makes the budget stop usable on the CLI path: it carries
-    `total_cost_usd` (and `usage`) alongside the `result` text, so we get a real per-tick cost
-    without scraping human prose. The `--output-format json` flag is added automatically unless the
-    caller already pinned an output format in their own args.
+    Streams by default: the CLI emits one JSON event per line as the agent works, so loopkit sees the
+    tick unfold event-by-event (each thought, tool call, and tool result) instead of one opaque blob
+    at exit. That drives two sinks via the tick's `AgentObserver` — a live `[loopkit][agent]` log line
+    per step, and a verbatim copy of every raw event into the durable `.activity.jsonl` artifact. The
+    final `result` event still carries `total_cost_usd` alongside the `result` text, so the budget
+    stop stays real (Ch 14). `--output-format`/`--verbose` are added automatically unless the caller
+    pinned an output format — pinning `json` reverts to the quiet buffered path (`_CLIAdapter.act` +
+    `_result`), which is the escape hatch for ship-safe (payload-free) logs.
 
     Billing: by default the agent's scrubbed env carries only the **subscription** token (or nothing,
     so `claude` uses its on-disk login) — `ANTHROPIC_API_KEY` is withheld so an ambient shell key can't
@@ -135,10 +173,39 @@ class ClaudeCodeAdapter(_CLIAdapter):
                  use_api_key: bool = False) -> None:
         args = list(extra_args or [])
         if "--output-format" not in args:
-            args += ["--output-format", "json"]
+            args += ["--output-format", "stream-json"]
+        self._stream_events = _stream_json_selected(args)
+        # `claude -p` only emits the per-event stream with --verbose; add it when we're streaming.
+        if self._stream_events and "--verbose" not in args:
+            args += ["--verbose"]
         super().__init__(model=model, extra_args=args)
         self.cred_keys = (secrets.ADAPTER_KEYS["claude-code"] if use_api_key
                           else secrets.CLAUDE_CODE_SUBSCRIPTION_KEYS)
+
+    def act(self, prompt: str, workspace: Path, *,
+            observer: "AgentObserver | None" = None) -> AgentResult:
+        # A caller pinned a non-stream output format (e.g. --output-format json) → quiet buffered path.
+        if not self._stream_events:
+            return super().act(prompt, workspace, observer=observer)
+        observer = observer or AgentObserver()
+        alog = observer.log.for_component("agent") if observer.log is not None else None
+        env = secrets.current().child_env(add=self.cred_keys)
+        proc = subprocess.Popen(self._command(prompt), cwd=workspace, env=env, text=True, bufsize=1,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        # Drain stderr on a side thread: a chatty stderr filling its pipe while we block reading stdout
+        # would dead-lock the stream. Daemon so a wedged binary can't keep the process alive.
+        err: list[str] = []
+        drain = threading.Thread(
+            target=lambda: err.append(proc.stderr.read() if proc.stderr else ""), daemon=True)
+        drain.start()
+        cost, result_text, captured = _stream_claude_events(
+            proc.stdout or iter(()), alog, observer.record)
+        proc.wait()
+        drain.join(timeout=2.0)
+        tail_src = result_text or (captured + "".join(err))
+        return AgentResult(ok=proc.returncode == 0, cost_usd=cost,
+                           summary=f"rc={proc.returncode} costUsd={round(cost, 4)}",
+                           raw_tail=secrets.redact(tail_src[-2000:]))
 
     def _result(self, proc: subprocess.CompletedProcess) -> AgentResult:
         out = (proc.stdout or "") + (proc.stderr or "")
@@ -194,6 +261,121 @@ def _parse_claude_json(stdout: str) -> tuple[float, str]:
     raw = data.get("total_cost_usd")
     cost = _as_float(raw if raw is not None else data.get("cost_usd"))
     return cost, str(data.get("result") or "")
+
+
+# --------------------------------------------------------------------------------------------------
+# Live event streaming (claude-code) — turn the stream-json event stream into log lines + a durable
+# artifact as it arrives, and fold in the final cost. Pure over an iterable of lines so the whole
+# thing is testable with a fake stream + fake logger — no subprocess, no `claude` binary, no tokens.
+# --------------------------------------------------------------------------------------------------
+
+_STEP_LOG_CHARS = 1200          # per-thought cap in the LIVE log (full text is in the trace + artifact)
+_TOOL_ARG_CHARS = 200           # per-tool salient-arg cap
+_SALIENT_TOOL_ARGS = ("file_path", "path", "notebook_path", "command", "pattern", "url", "query",
+                      "description")
+
+
+def _stream_json_selected(args: list[str]) -> bool:
+    """True iff `args` pin `--output-format stream-json` — the live-streaming path (vs pinned json)."""
+    if "--output-format" in args:
+        i = args.index("--output-format")
+        return i + 1 < len(args) and args[i + 1] == "stream-json"
+    return False
+
+
+def _one_line(text: str) -> str:
+    """Collapse all whitespace (incl. newlines) to single spaces so prose stays one greppable line."""
+    return " ".join(str(text).split())
+
+
+def _stream_claude_events(lines: Iterable[str], log: "Logger | None",
+                          record: "Callable[[str], None] | None" = None) -> tuple[float, str, str]:
+    """Consume `claude -p --output-format stream-json` events line by line as they arrive.
+
+    For each event: persist the raw line verbatim via `record` (the durable artifact — faithful for
+    replay), emit a per-step line via `log` (the live stream), and fold in the budget-bearing cost.
+    Returns (cost_usd, result_text, captured_raw)."""
+    cost = 0.0
+    result_text = ""
+    captured: list[str] = []
+    idx = 0
+    for raw in lines:
+        line = raw.rstrip("\n")
+        if not line.strip():
+            continue
+        if record is not None:
+            record(line)
+        captured.append(line)
+        obj = _loads_lenient(line)
+        if not isinstance(obj, dict):
+            continue
+        etype = obj.get("type")
+        if etype == "assistant":
+            for block in _content_blocks(obj):
+                idx += 1
+                _log_step(log, idx, block)
+        elif etype == "user":
+            for block in _content_blocks(obj):
+                if isinstance(block, dict) and block.get("type") == "tool_result":
+                    idx += 1
+                    _log_tool_result(log, idx, block)
+        # The final `result` event (and any object carrying a cost) is the budget-bearing one; last
+        # wins, matching the buffered parser. total_cost_usd is cumulative for the tick.
+        if "total_cost_usd" in obj or "cost_usd" in obj:
+            raw_cost = obj.get("total_cost_usd")
+            cost = _as_float(raw_cost if raw_cost is not None else obj.get("cost_usd"))
+            if obj.get("result"):
+                result_text = str(obj.get("result"))
+    return cost, result_text, "\n".join(captured)
+
+
+def _content_blocks(event: dict) -> list:
+    """The content-block list of a stream-json assistant/user event (`message.content`), else []."""
+    msg = event.get("message")
+    if isinstance(msg, dict) and isinstance(msg.get("content"), list):
+        return msg["content"]
+    return []
+
+
+def _log_step(log: "Logger | None", idx: int, block: object) -> None:
+    """One live-stream line for an assistant content block: tool_use, text, or thinking."""
+    if log is None or not isinstance(block, dict):
+        return
+    btype = block.get("type")
+    if btype == "tool_use":
+        log.info("agent.tool", idx=idx, **_tool_fields(block))
+    elif btype in ("text", "thinking"):
+        body = (block.get("text") if btype == "text" else block.get("thinking")) or ""
+        inline = _one_line(secrets.redact(body))
+        clipped = inline[:_STEP_LOG_CHARS]
+        more = "" if len(inline) <= _STEP_LOG_CHARS else f" …(+{len(inline) - _STEP_LOG_CHARS})"
+        kind = "say" if btype == "text" else "think"
+        # Thought content rides in the MESSAGE (space-preserving); structure stays in the fields.
+        log.info(f"agent.{kind} {clipped}{more}", idx=idx, len=len(body))
+
+
+def _tool_fields(block: dict) -> dict:
+    """Payload-light fields for a tool_use block: the tool name + its salient arg (or arg keys)."""
+    fields: dict = {"tool": block.get("name") or "?"}
+    inp = block.get("input")
+    if isinstance(inp, dict):
+        for key in _SALIENT_TOOL_ARGS:
+            val = inp.get(key)
+            if val:
+                fields["arg"] = secrets.redact(_one_line(str(val))[:_TOOL_ARG_CHARS])
+                return fields
+        if inp:
+            fields["argKeys"] = ",".join(sorted(inp.keys()))
+    return fields
+
+
+def _log_tool_result(log: "Logger | None", idx: int, block: dict) -> None:
+    """One live-stream line for a tool_result block — payload-free (error flag + output length)."""
+    if log is None:
+        return
+    content = block.get("content")
+    length = len(content) if isinstance(content, str) else len(str(content or ""))
+    log.info("agent.result", idx=idx, isError=bool(block.get("is_error")), outLen=length)
 
 
 def _parse_codex_usage(stdout: str) -> Usage:
@@ -325,7 +507,10 @@ class _APIAdapter:
     def model(self) -> str:
         return self._backend.model
 
-    def act(self, prompt: str, workspace: Path) -> AgentResult:
+    def act(self, prompt: str, workspace: Path, *,
+            observer: "AgentObserver | None" = None) -> AgentResult:
+        # The API path already emits per-call `llm`/`tool` spans to LangSmith (below); `observer` is
+        # accepted for a uniform contract and left for a future log-stream parity pass.
         transcript: list[dict] = [{"role": "user", "content": prompt}]
         total = Usage()
         last_text = ""

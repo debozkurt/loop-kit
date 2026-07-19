@@ -403,7 +403,7 @@ def run_batch(specs: list[TaskSpec], runner: TaskRunner, *, jobs: int = 3,
 # --------------------------------------------------------------------------------------------
 def make_batch_runner(*, base_config: Config | None = None, open_pr: bool = False,
                       agent_factory: Callable[[dict], Agent] | None = None,
-                      executor=None) -> TaskRunner:
+                      executor=None, artifacts_dir: Path | None = None) -> TaskRunner:
     """A `TaskRunner` for manifest tasks: load the task's config, materialise an isolated clone,
     run the pre-loop validate, run the loop (with its review hook), grade, and push + PR on DONE.
 
@@ -420,6 +420,9 @@ def make_batch_runner(*, base_config: Config | None = None, open_pr: bool = Fals
     def run_task(task: dict) -> WorkerOutcome:
         task_id = str(task["id"])
         branch = task.get("branch") or f"loopkit/{task_id}"
+        # Durable activity artifact lands in the PERSISTENT artifacts dir (next to the journal), never
+        # in `scratch` below — that worktree is rmtree'd in the finally, this outlives the run.
+        activity_path = (artifacts_dir / f"{task_id}.activity.jsonl") if artifacts_dir else None
         cfg = load_config(task["config"]) if task.get("config") else base_config
         if cfg is None:
             raise RuntimeError(f"task '{task_id}' has no config — set [defaults] config in the "
@@ -455,7 +458,8 @@ def make_batch_runner(*, base_config: Config | None = None, open_pr: bool = Fals
             agent = agent_factory(task) if agent_factory else build_agent(cfg.agent, executor=executor)
             from ..loop import run_loop
             result = run_loop(cfg, agent, review_hook=review_hook, executor=executor,
-                              trace_metadata={"task": task_id, "issue": task.get("issue")})
+                              trace_metadata={"task": task_id, "issue": task.get("issue")},
+                              activity_path=activity_path)
             score, revalidated = _grade(result)
             pr_url: str | None = None
             if cfg.remote.enabled and result.reason is StopReason.DONE:

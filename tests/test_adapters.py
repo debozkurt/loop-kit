@@ -7,10 +7,14 @@ exercised here without a single token or network call.
 """
 from __future__ import annotations
 
+import io
+import json
 import subprocess
 from pathlib import Path
 
 from loopkit.agent import (
+    AgentObserver,
+    AgentResult,
     ClaudeAPIAdapter,
     ClaudeCodeAdapter,
     CodexAdapter,
@@ -18,12 +22,15 @@ from loopkit.agent import (
     _APIAdapter,
     _parse_claude_json,
     _parse_codex_usage,
+    _stream_claude_events,
+    _stream_json_selected,
     _ToolCall,
     _Turn,
     _WorkspaceTools,
     build_agent,
 )
 from loopkit.config import AgentConfig, Config, GateConfig, StopsConfig
+from loopkit.log import Logger
 from loopkit.gate import CallableGate
 from loopkit.loop import run_loop
 from loopkit.pricing import Usage, estimate_cost, known_model
@@ -95,11 +102,96 @@ def test_claude_json_array_carries_cost():
     assert cost == 0.0839 and text == "done"
 
 
-def test_claude_code_adapter_requests_json_and_parses_cost():
+def test_claude_code_adapter_streams_by_default_and_parses_cost():
     adapter = ClaudeCodeAdapter()
-    assert "--output-format" in adapter._command("do it")  # json output is added automatically
+    cmd = adapter._command("do it")
+    # Default is the streaming path: stream-json + the --verbose that `claude -p` needs to emit it.
+    assert "--output-format" in cmd and "stream-json" in cmd and "--verbose" in cmd
+    assert adapter._stream_events is True
+    # The buffered fallback parser still works (used when a caller pins --output-format json).
     result = adapter._result(_proc('{"total_cost_usd": 0.25, "result": "done"}'))
     assert result.ok and result.cost_usd == 0.25 and result.raw_tail == "done"
+
+
+def test_claude_code_pinned_json_disables_streaming():
+    # Escape hatch for ship-safe (payload-free) logs: pinning --output-format json reverts to the
+    # quiet buffered path (no per-step stream, so no thoughts in the log).
+    adapter = ClaudeCodeAdapter(extra_args=["--output-format", "json"])
+    assert adapter._stream_events is False
+    assert not _stream_json_selected(["--output-format", "json"])
+    assert "--verbose" not in adapter._command("x")        # not force-added off the streaming path
+
+
+def _agent_log() -> tuple[Logger, io.StringIO]:
+    buf = io.StringIO()
+    return Logger("loop", run_id="r1", stream=buf).for_component("agent"), buf
+
+
+def test_for_component_keeps_run_id_and_switches_tag():
+    log, buf = _agent_log()
+    log.info("agent.tool", tool="Edit")
+    line = buf.getvalue()
+    assert "[loopkit][agent]" in line and "run=r1" in line   # new tag, same correlation id
+
+
+def test_stream_claude_events_logs_thoughts_tools_results_and_parses_cost():
+    log, buf = _agent_log()
+    recorded: list[str] = []
+    events = [
+        '{"type":"system","subtype":"init"}',
+        json.dumps({"type": "assistant", "message": {"content": [
+            {"type": "thinking", "thinking": "Scope the queryset to the owner"},
+            {"type": "text", "text": "Adding an owner filter"},
+            {"type": "tool_use", "name": "Edit", "input": {"file_path": "src/notes/views.py"}}]}}),
+        json.dumps({"type": "user", "message": {"content": [
+            {"type": "tool_result", "tool_use_id": "t1", "is_error": False, "content": "ok"}]}}),
+        json.dumps({"type": "result", "subtype": "success",
+                    "total_cost_usd": 0.42, "result": "done"}),
+    ]
+    cost, text, captured = _stream_claude_events(events, log, recorded.append)
+    out = buf.getvalue()
+
+    assert cost == 0.42 and text == "done"                          # budget-bearing final event read
+    assert "agent.think" in out and "Scope the queryset" in out     # thoughts land in the live stream
+    assert "agent.say" in out and "Adding an owner filter" in out
+    assert "agent.tool" in out and "tool=Edit" in out and "arg=src/notes/views.py" in out
+    assert "agent.result" in out and "isError=False" in out
+    assert len(recorded) == 4                                       # every non-empty raw line persisted
+    assert recorded[-1].startswith('{"type": "result"')            # verbatim, faithful for replay
+    assert captured.count("\n") == 3                               # 4 lines joined
+
+
+def test_stream_claude_events_redacts_registered_secret_in_the_log():
+    from loopkit import secrets
+    secrets.register_secret("sk-ant-supersecretvalue", label="ANTHROPIC_API_KEY")
+    log, buf = _agent_log()
+    event = json.dumps({"type": "assistant", "message": {"content": [
+        {"type": "text", "text": "I will use sk-ant-supersecretvalue to authenticate"}]}})
+    _stream_claude_events([event], log, None)
+    out = buf.getvalue()
+    assert "agent.say" in out                                       # the thought is logged...
+    assert "sk-ant-supersecretvalue" not in out                    # ...but the secret is scrubbed
+    assert "‹redacted:ANTHROPIC_API_KEY›" in out
+
+
+def test_stream_claude_events_caps_long_thoughts():
+    from loopkit.agent import _STEP_LOG_CHARS
+    log, buf = _agent_log()
+    event = json.dumps({"type": "assistant", "message": {"content": [
+        {"type": "text", "text": "x" * (_STEP_LOG_CHARS + 500)}]}})
+    _stream_claude_events([event], log, None)
+    out = buf.getvalue()
+    assert f"…(+500)" in out and f"len={_STEP_LOG_CHARS + 500}" in out   # clipped, full length noted
+
+
+def test_stream_claude_events_survives_a_torn_line():
+    # A partial/garbage line (e.g. a crash mid-write) must not blow up the stream — it is skipped.
+    log, buf = _agent_log()
+    events = ['{"type":"assistant","message":{"content":[{"type":"text","text":"hi"}]}}',
+              '{"type":"resu',                                       # torn JSON
+              json.dumps({"type": "result", "total_cost_usd": 0.1, "result": "ok"})]
+    cost, text, _ = _stream_claude_events(events, log, None)
+    assert cost == 0.1 and text == "ok" and "agent.say" in buf.getvalue()
 
 
 def test_claude_code_defaults_to_subscription_withholding_the_api_key():
@@ -235,6 +327,41 @@ class CyclingBackend:
                                                        {"path": f"f{i}.txt", "content": str(i)})],
                          usage=Usage(input_tokens=self._input))
         return _Turn(text="working", tool_calls=[], usage=Usage(output_tokens=10))
+
+
+class _RecordingAgent:
+    """A fake agent that emits a couple of raw events through the observer (as a streaming CLI adapter
+    would) and then solves the goal — proving the loop routes `observer.activity` to the artifact."""
+
+    def act(self, prompt, workspace, *, observer=None):
+        if observer is not None:
+            observer.record('{"type":"assistant","message":{"content":'
+                            '[{"type":"text","text":"working"}]}}')
+            observer.record('{"type":"result","total_cost_usd":0.01,"result":"done"}')
+        (workspace / "solution.txt").write_text("ok")
+        return AgentResult(ok=True, cost_usd=0.01, summary="rc=0", raw_tail="done")
+
+
+def test_run_loop_writes_durable_activity_artifact(git_repo: Path, tmp_path: Path):
+    activity = tmp_path / "notes-authz.activity.jsonl"
+    gate = CallableGate(lambda ws: (ws / "solution.txt").exists())
+    result = run_loop(_config(git_repo), _RecordingAgent(),
+                      iteration_gate=gate, acceptance_gate=gate, activity_path=activity)
+    assert result.reason is StopReason.DONE
+    lines = activity.read_text().splitlines()
+    # loopkit markers delimit the run + tick; the agent's raw events are teed verbatim between them.
+    assert any('"loopkit": "run.start"' in ln for ln in lines)
+    assert any('"loopkit": "tick.start"' in ln for ln in lines)
+    assert any('"loopkit": "run.done"' in ln for ln in lines)
+    assert any('"type":"result"' in ln for ln in lines)            # verbatim agent event persisted
+
+
+def test_run_loop_without_activity_path_writes_nothing(git_repo: Path):
+    # None path ⇒ a silent no-op — single runs keep exact prior behavior (no artifact).
+    gate = CallableGate(lambda ws: (ws / "solution.txt").exists())
+    result = run_loop(_config(git_repo), _RecordingAgent(),
+                      iteration_gate=gate, acceptance_gate=gate)
+    assert result.reason is StopReason.DONE                          # ran fine with activity=None
 
 
 def test_api_adapter_budget_ceiling_bites(git_repo: Path):

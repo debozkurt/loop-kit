@@ -16,6 +16,7 @@ adapter's `llm`/`tool` spans nest under the `agent` span automatically via LangS
 """
 from __future__ import annotations
 
+import json
 import threading
 import time
 import uuid
@@ -24,7 +25,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from . import durability, safety, secrets, trace
-from .agent import Agent
+from .agent import Agent, AgentObserver
 from .gate import AlwaysPass, Gate, ShellGate
 from .log import get_logger
 from .prompt import build_prompt
@@ -34,6 +35,7 @@ from .stops import BudgetCeiling, LoopState, NoProgress, PlanStall, StopReason, 
 if TYPE_CHECKING:
     # Typing-only imports: the core never depends on an extension at runtime — the hook and the
     # registry are duck-called. Both are opt-in (Ch 8, Ch 17), so passing None keeps v1 exact.
+    from pathlib import Path
     from .executor import ToolExecutor
     from .extensions.review import ReviewHook
     from .extensions.skills import SkillRegistry
@@ -108,12 +110,57 @@ def _make_run_id(repo) -> str:
     return f"{durability.state_signature(repo)[:8]}-{uuid.uuid4().hex[:4]}"
 
 
+class _ActivityWriter:
+    """The durable per-run activity artifact: the agent's raw event stream + loopkit tick markers,
+    one JSON object per line, written as they happen. A None path is a silent no-op (a single `run`
+    writes nothing extra; the batch runner points it next to the journal so it survives the rmtree'd
+    worktree). The loop owns the handle and flushes each line, so a *hung* tick still leaves a partial,
+    replayable trail — the exact 'why did this tick go sideways' case (docs/OPERATING.md)."""
+
+    def __init__(self, path: "Path | None", run_id: str, branch: str) -> None:
+        self.run_id = run_id
+        self._fh = None
+        if path is not None:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            self._fh = path.open("a", encoding="utf-8")
+            self._mark("run.start", branch=branch)
+
+    def _mark(self, event: str, **fields) -> None:
+        """Write a loopkit-authored marker line (namespaced under `loopkit` so it never collides
+        with a verbatim agent event, which carries `type`)."""
+        if self._fh is not None:
+            self._fh.write(json.dumps({"loopkit": event, "run": self.run_id, **fields}) + "\n")
+            self._fh.flush()
+
+    def tick(self, i: int) -> None:
+        self._mark("tick.start", tick=i)
+
+    @property
+    def sink(self):
+        """The per-event writer handed to the adapter via `AgentObserver.activity` (None ⇒ no-op)."""
+        if self._fh is None:
+            return None
+
+        def _write(raw_line: str) -> None:
+            self._fh.write(raw_line.rstrip("\n") + "\n")   # verbatim agent event, faithful for replay
+            self._fh.flush()
+
+        return _write
+
+    def close(self) -> None:
+        if self._fh is not None:
+            self._mark("run.done")
+            self._fh.close()
+            self._fh = None
+
+
 def run_loop(config, agent: Agent, *, iteration_gate: Gate | None = None,
              acceptance_gate: Gate | None = None, regression_gate: Gate | None = None,
              review_hook: "ReviewHook | None" = None,
              skills: "SkillRegistry | None" = None, dry_run: bool = False,
              trace_metadata: dict | None = None,
-             executor: "ToolExecutor | None" = None) -> RunResult:
+             executor: "ToolExecutor | None" = None,
+             activity_path: "Path | None" = None) -> RunResult:
     """Drive the agent toward `config.goal` until a terminal is reached. Returns the terminal.
 
     `trace_metadata` is merged onto the top-level trace span — the fleet worker passes the task id
@@ -124,10 +171,17 @@ def run_loop(config, agent: Agent, *, iteration_gate: Gate | None = None,
     sidecar. None ⇒ the in-process `LocalToolExecutor`. The protected-path guard and commit-every-tick
     stay here in loopkit-core (trusted) operating on the shared workspace — only the gate *command* is
     dispatched. An explicitly-passed gate keeps its own executor (the caller's choice).
+
+    `activity_path` turns on the durable per-run activity artifact (the agent's raw event stream +
+    tick markers, one JSON object per line). None (single runs) ⇒ off; the batch runner points it at
+    `<manifest_dir>/<task>.activity.jsonl` — next to the journal, so it survives the rmtree'd worktree.
     """
     repo = config.repo_path()
     run_id = _make_run_id(repo)             # unique per run (see _make_run_id) — not just the state sig
     log = get_logger("loop", run_id)
+    # Durable activity artifact, written as events happen (flushed per line, so a hung tick still
+    # leaves a partial trail). None path ⇒ a silent no-op — exact prior behavior.
+    activity = _ActivityWriter(activity_path, run_id, config.branch)
 
     iteration_gate = iteration_gate or ShellGate(config.gate.iteration, executor=executor)
     acceptance_gate = acceptance_gate or (
@@ -176,8 +230,14 @@ def run_loop(config, agent: Agent, *, iteration_gate: Gate | None = None,
             pt = last_plan.total if last_plan else None
             return RunResult(reason, iterations, cost_usd, plan_open=po, plan_total=pt, **kw)
 
+        def _terminal(result):
+            # Every terminal funnels here: finalize the durable artifact, then stamp the trace span.
+            activity.close()
+            return _finish(run_span, result)
+
         for i in range(1, config.stops.max_iter + 1):
             tick = log.bind(tick=i)
+            activity.tick(i)                               # delimit this tick's events in the artifact
             head_before = durability.current_head(repo)   # to detect an agent self-commit this tick
             with trace.span(f"tick {i}", run_type="chain", metadata={"tick": i}) as tick_span:
                 # Read edge of the flywheel (Ch 17): render learned skills into this tick's prompt.
@@ -193,7 +253,11 @@ def run_loop(config, agent: Agent, *, iteration_gate: Gate | None = None,
                                 metadata={"adapter": config.agent.adapter,
                                           "model": config.agent.model}) as agent_span:
                     with _heartbeat(tick, "agent"):       # liveness pings during the silent agent call
-                        result = _DryResult() if dry_run else agent.act(prompt, repo)
+                        # Observer sinks: the tick logger for the live step stream, the activity writer
+                        # for the durable artifact. A streaming adapter feeds both; others ignore them.
+                        observer = AgentObserver(log=tick, activity=activity.sink)
+                        result = (_DryResult() if dry_run
+                                  else agent.act(prompt, repo, observer=observer))
                     agent_span.outputs(ok=result.ok, summary=result.summary,
                                        tail=result.raw_tail or None)
                     agent_span.metadata(cost_usd=round(result.cost_usd, 6))
@@ -208,7 +272,7 @@ def run_loop(config, agent: Agent, *, iteration_gate: Gate | None = None,
                                first=violations[0])
                     durability.revert_uncommitted(repo)
                     tick_span.outputs(halt="safety", protected_path=violations[0])
-                    return _finish(run_span, _res(
+                    return _terminal(_res(
                         StopReason.SAFETY, i, cost, detail=f"touched protected path {violations[0]}"))
 
                 commit_msg = f"loopkit: tick {i} on {config.branch}"
@@ -287,7 +351,7 @@ def run_loop(config, agent: Agent, *, iteration_gate: Gate | None = None,
                                     tick.info("skill.write_back", minted=minted is not None,
                                               name=minted.name if minted else "-")
                                 tick_span.outputs(result="done")
-                                return _finish(run_span, done)
+                                return _terminal(done)
                             # Regression: the target is fixed but previously-passing behavior broke.
                             tick.warn("gate.regression_failed", detail="acceptance_pass_regression_fail")
                             feedback = ("The held-out acceptance check passes, but a regression check "
@@ -326,12 +390,12 @@ def run_loop(config, agent: Agent, *, iteration_gate: Gate | None = None,
                                   f"{last_plan.total} items still open")
                     tick.warn("loop.halt", reason=reason.value, iterations=i, costUsd=round(cost, 4))
                     tick_span.outputs(halt=reason.value)
-                    return _finish(run_span, _res(reason, i, cost, overfit=overfit, detail=detail))
+                    return _terminal(_res(reason, i, cost, overfit=overfit, detail=detail))
                 # Not a terminal: record why this tick continues (the feedback the next tick gets),
                 # so a tick is never a blank row in the trace UI.
                 tick_span.outputs(result="continue", feedback=feedback or None)
 
         log.warn("loop.halt", reason=StopReason.ITERATION_CAP.value,
                  iterations=config.stops.max_iter, costUsd=round(cost, 4))
-        return _finish(run_span, _res(StopReason.ITERATION_CAP, config.stops.max_iter, cost,
-                                      overfit=overfit))
+        return _terminal(_res(StopReason.ITERATION_CAP, config.stops.max_iter, cost,
+                              overfit=overfit))

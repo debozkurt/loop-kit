@@ -176,7 +176,7 @@ def test_render_is_budget_bounded_and_honest(tmp_path: Path):
 class AlwaysSolve:
     """Writes the solution every tick — a run that reaches DONE with no help (mints the lesson)."""
 
-    def act(self, prompt: str, workspace: Path) -> AgentResult:
+    def act(self, prompt: str, workspace: Path, *, observer=None) -> AgentResult:
         (workspace / "solution.txt").write_text("done")
         return AgentResult(ok=True, cost_usd=0.1, summary="solved")
 
@@ -184,7 +184,7 @@ class AlwaysSolve:
 class NeedsMagic:
     """Solves only when the prompt carries the MAGIC marker — i.e. only once the skill is rendered."""
 
-    def act(self, prompt: str, workspace: Path) -> AgentResult:
+    def act(self, prompt: str, workspace: Path, *, observer=None) -> AgentResult:
         if "MAGIC" in prompt:
             (workspace / "solution.txt").write_text("done")
         return AgentResult(ok=True, cost_usd=0.1, summary="acted")

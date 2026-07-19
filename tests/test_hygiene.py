@@ -7,6 +7,7 @@ scrubs a planted env var so a later spawn can't see it.
 """
 from __future__ import annotations
 
+import io
 import json
 import subprocess
 from pathlib import Path
@@ -54,11 +55,20 @@ def test_cli_adapter_gets_only_its_model_key_not_git_or_other_provider(tmp_path,
                                              "GITHUB_TOKEN": "ghp_tok", "OPENAI_API_KEY": "sk-oa-y"}))
     captured = {}
 
-    def fake_run(cmd, **kw):
-        captured["env"] = kw.get("env")
-        return subprocess.CompletedProcess(cmd, 0, stdout="{}", stderr="")
+    class _FakePopen:
+        # The claude-code adapter STREAMS by default (subprocess.Popen + stream-json), so the env
+        # containment we're asserting rides on the Popen call, not subprocess.run. Capture it there.
+        returncode = 0
 
-    monkeypatch.setattr("loopkit.agent.subprocess.run", fake_run)
+        def __init__(self, cmd, **kw):
+            captured["env"] = kw.get("env")
+            self.stdout = iter(['{"type":"result","total_cost_usd":0,"result":"ok"}'])
+            self.stderr = io.StringIO("")
+
+        def wait(self):
+            return 0
+
+    monkeypatch.setattr("loopkit.agent.subprocess.Popen", _FakePopen)
 
     # Default: SUBSCRIPTION — the OAuth token is re-injected; an ambient ANTHROPIC_API_KEY is WITHHELD
     # (no surprise API billing); and never the git token or another provider's key.
