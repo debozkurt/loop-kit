@@ -74,7 +74,7 @@ EXPECTED: dict[str, list[str]] = {
         "from_issue", "max_iter", "no_review", "open_pr", "provider", "repo", "review", "sandbox",
         "skills", "skills_distiller", "validate",
     ],
-    "synth-gate": ["config", "fix", "isolate", "mode", "oracle", "out", "repo"],
+    "synth-gate": ["config", "fix", "isolate", "mode", "oracle", "out", "probe", "repo"],
 }
 
 

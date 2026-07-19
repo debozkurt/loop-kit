@@ -57,18 +57,27 @@ def run(stage: Stage) -> None:
                                 "from pricing import line_total\n"
                                 "assert line_total(10.0, 10) == 90.0, 'no bulk discount applied'\n"
                                 "EOF\n")
+    # The env-liveness probe rides beside run.sh (required): the SAME runner on a guaranteed-green
+    # invocation, so an env failure (auth down, broken venv in the verify copy) is rejected as
+    # env-broken instead of masquerading as a genuine fail-first.
+    (acc / "probe.sh").write_text("#!/usr/bin/env bash\n"
+                                  "python -c 'import pricing'\n")
     second = mold_batch(manifest, out, level="full", timestamp=_TS)
     row = second.rows[0]
     verdict = row.verdict
     checks = ", ".join(f"{c.name}={'ok' if c.ok else 'FAIL'}" for c in verdict.checks)
     stage.console.print(f"  status: [green]{row.status}[/] — {row.note}")
-    stage.console.print(f"  verdict: blessed={verdict.blessed} ({checks}) sig={verdict.signature}")
+    stage.console.print(f"  verdict: blessed={verdict.blessed} ({checks}) "
+                        f"env_live={verdict.env_live} sig={verdict.signature}")
     stage.beat("A failure at needs-oracle always [bold]retries[/] (successes skip via state.json) — the "
-               "loop is [italic]fill the FILLs, re-run[/]. The filled oracle is goal-derived and therefore "
-               "[bold]untrusted input[/]: verification is mandatory and runs in an [italic]isolated copy[/] "
-               "(the security boundary). It FAILS on the buggy tree → [green]blessed[/], with the verdict "
-               "stored beside it as provenance. An oracle that had passed would be "
-               "[yellow]oracle-rejected[/] — it certifies nothing.")
+               "loop is [italic]fill the FILLs, re-run[/] — and since the env-liveness probe, the FILLs "
+               "include [bold]probe.sh[/]: a trivial guaranteed-pass call through the oracle's own "
+               "runner, checked [italic]before[/] fail-first so an environment failure (auth down, a "
+               "venv the isolated copy broke) is [yellow]env-broken[/], never a false blessing. The "
+               "filled oracle is goal-derived and therefore [bold]untrusted input[/]: verification is "
+               "mandatory and runs in an [italic]isolated copy[/] (the security boundary). It FAILS on "
+               "the buggy tree → [green]blessed[/], with the verdict stored beside it as provenance. "
+               "An oracle that had passed would be [yellow]oracle-rejected[/] — it certifies nothing.")
 
     stage.rule("3 · the terminal artifact is a batch, not a run")
     emitted = (out / "batch.toml").read_text()
