@@ -49,8 +49,44 @@ def run(stage: Stage) -> None:
                "Review is the gate for everything the tests can't see — and it runs while the "
                "context that wrote the diff is still fresh (the roborev fix -> re-review loop).")
 
+    # ---- Act 2: the BUILT-IN default judge — review with zero configuration ---------------------
+    stage.beat("Since the default-judge work, review is [bold]on by default[/]: with no [review] "
+               "command configured the loop runs the bundled adversarial judge — fresh clean "
+               "context, real-defects-only, nonce'd verdict, judged only behind a [italic]green[/] "
+               "iteration gate. Same fix→re-review discipline, zero setup. Here it runs with a "
+               "scripted judge backend (no tokens): REJECT on the debug print, APPROVE on the fix.")
+
+    from ..config import AgentConfig, ReviewConfig
+    from ..extensions.judge import DefaultReviewHook
+
+    repo2 = stage.fixture()
+    verdicts = iter(["REJECT — pricing.py:5 leftover debug print() ships to production",
+                     "APPROVE"])
+
+    def scripted_judge(prompt: str, target) -> tuple[str, float]:
+        # Echo the per-call nonce back — the anti-spoof grammar the real judge enforces.
+        nonce = prompt.rsplit("VERDICT[", 1)[1].split("]")[0]
+        return f"VERDICT[{nonce}]: {next(verdicts)}", 0.0
+
+    judge = DefaultReviewHook(ReviewConfig(), AgentConfig(adapter="claude-code"), repo2,
+                              "correct line-item pricing with a bulk discount",
+                              runner=scripted_judge)
+    scripted2 = MockAgent(behaviors=[writes("pricing.py", PRICING_WITH_DEBUG),
+                                     writes("pricing.py", CORRECT_PRICING)])
+    cfg2 = demo_config(repo2, max_iter=6, no_progress_after=5)
+    stage.run(cfg2, stage.agent(scripted2), iteration_gate=pytest_gates()[0],
+              acceptance_gate=pytest_gates()[1], review_hook=judge)
+
+    stage.beat("Identical arc, no hand-written review hook: the bundled judge rejected the debug "
+               "print, the verdict fed back, the fix cleared it. Verdicts are sticky per commit "
+               "(an unchanged HEAD is never re-billed), a judge that can't run halts the loop "
+               "(REVIEW_UNAVAILABLE — infra failure is not a rejection), and N straight rejections "
+               "stop it for a human (REVIEW_STALL). `--no-review` opts out; a [review] command "
+               "overrides.")
+
 
 SCENARIO = Scenario(chapter=8, slug="review", title="Continuous review gates done",
                     teaches="A clean review is a precondition for done: review catches what green "
-                            "tests don't, and feeds fixes back while the context is fresh.",
+                            "tests don't, and feeds fixes back while the context is fresh — and "
+                            "with the built-in default judge it runs with zero configuration.",
                     live_supported=False, run=run)

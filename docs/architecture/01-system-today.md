@@ -39,7 +39,8 @@ Architecture mirrors the agentic-loops curriculum — **one module per concern**
 
 | Module | Owns | Tier |
 |---|---|---|
-| `review.py` | continuous review of every commit → `run_loop(review_hook=)` | II · Ch 8 |
+| `review.py` | continuous review hooks (shell/callable) → `run_loop(review_hook=)` | II · Ch 8 |
+| `judge.py` | the **built-in default judge** — review with zero config (on by default) | II · Ch 8 |
 | `orchestrate.py` | a supervisor over many worker loops | II · Ch 10-12 |
 | `skills.py` | the skill registry + write-back flywheel | II · Ch 17 |
 | `fleet.py` | the loop behind a Redis queue, run by many workers → `loopkit fleet` | II · Ch 12 |
@@ -64,13 +65,14 @@ flowchart LR
   P["prompt<br/>fresh · Ch 4-5"] --> A["agent<br/>edits · Ch 1-3"]
   A --> G["guard<br/>protected paths · Ch 16"]
   G --> C["commit<br/>every tick · Ch 15"]
-  C --> R["review<br/>opt-in · Ch 8"]
-  R --> I["iteration gate<br/>seen · Ch 6-7"]
-  I --> H["held-out gate<br/>unseen · Ch 9"]
+  C --> I["iteration gate<br/>seen · Ch 6-7"]
+  I --> R["review<br/>default-on · Ch 8"]
+  R --> H["held-out gate<br/>unseen · Ch 9"]
   H --> D(["DONE"])
   I -- "fail" --> P
+  R -- "reject" --> P
   H -- "overfit" --> P
-  C --> S["hard stops<br/>BUDGET > NO_PROGRESS<br/>> PLAN_STALL > CAP"]
+  C --> S["hard stops<br/>BUDGET > NO_PROGRESS<br/>> REVIEW_STALL<br/>> PLAN_STALL > CAP"]
   S -- "halt" --> T(["stop"])
 ```
 
@@ -226,7 +228,7 @@ extension attaches at a keyword-only, typing-only-imported, duck-called, `None`-
 | Extension | File | Seam | What it adds |
 |---|---|---|---|
 | **Orchestration** (Ch 10–12) | `orchestrate.py` | wraps `run_loop` as a worker body | `Supervisor` over git-worktree workers: blind **fan-out** + **evolutionary** select-and-reseed |
-| **Continuous review** (Ch 8) | `review.py` | `run_loop(review_hook=…)`, after a real commit | gates `DONE` on a clean diff; a failing review skips the gate block and feeds findings to the next tick |
+| **Continuous review** (Ch 8) | `review.py` + `judge.py` | `run_loop(review_hook=…)`, behind a *green* iteration gate | gates `DONE` on a clean review; verdicts **sticky per HEAD** (no re-bill, no reject-then-idle escape); a failing review feeds findings to the next tick. With no hook configured the **built-in default judge** runs (on by default): backend/model derive from `[agent]` (`[review]` overrides), nonce'd verdict, fail-closed truncation, scratch-cwd isolation; judge cost counts toward the budget; `REVIEW_UNAVAILABLE` halts on infra failure, `REVIEW_STALL` bounds reject loops. Standalone: `loopkit review` (exit 0/1/2) |
 | **Skills flywheel** (Ch 17; git home Phase 5b) | `skills.py` | `build_prompt(skills=…)` read edge + `run_loop` DONE write edge | render learned skills into the prompt; **gated** write-back on `DONE` so solved runs teach future ones. Three storage tiers, one Protocol: `InMemory` → `File` (durable on one fs) → **`GitSkillRegistry`** (Part III: durable across machines via a `loopkit-skills` git repo — clone at start, gated push on `DONE`, rebase-retry for concurrent pods) |
 | **Remote sync** | `remote.py` | post-`DONE` in `run` + the worker runner | push branch (never force, refuses forbidden branches) + optional **draft** PR/MR via `gh`/`glab` |
 | **Issue tasks** | `issues.py` | `fleet run --from-issues` | `gh`/`glab issue list` → tasks (goal = title+body, branch `loopkit/issue-N`, issue # rides to the PR) |

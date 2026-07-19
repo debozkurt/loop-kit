@@ -315,6 +315,53 @@ def test_gate_result_cost_defaults_to_zero():
     assert GateResult(True).cost_usd == 0.0                      # additive field, nothing breaks
 
 
+# ---------------------------------------------------------------- `loopkit review` — exit codes
+
+def _invoke_review(git_repo: Path, monkeypatch, dispatch, *args: str):
+    from typer.testing import CliRunner
+    from loopkit.cli import app
+    from loopkit.extensions import judge as judge_mod
+    monkeypatch.setattr(judge_mod, "_dispatch", dispatch)
+    return CliRunner().invoke(app, ["review", "--repo", str(git_repo),
+                                    "-c", str(git_repo / "nope.toml"), *args])
+
+
+def test_review_verb_exit_codes(git_repo: Path, monkeypatch):
+    # 0 APPROVE · 1 REJECT · 2 unavailable — the ShellReviewHook contract, so the verb is itself
+    # wireable as a plain [review] command.
+    _commit(git_repo, "a.py", "x\n", "add")
+
+    def approve(prompt, target):
+        nonce = prompt.rsplit("VERDICT[", 1)[1].split("]")[0]
+        return f"VERDICT[{nonce}]: APPROVE", 0.01
+
+    def reject(prompt, target):
+        nonce = prompt.rsplit("VERDICT[", 1)[1].split("]")[0]
+        return f"VERDICT[{nonce}]: REJECT — bad", 0.01
+
+    def broken(prompt, target):
+        raise FileNotFoundError("claude")
+
+    assert _invoke_review(git_repo, monkeypatch, approve).exit_code == 0
+    assert _invoke_review(git_repo, monkeypatch, reject).exit_code == 1
+    assert _invoke_review(git_repo, monkeypatch, broken).exit_code == 2
+
+
+def test_review_verb_defaults_to_claude_code_not_mock(git_repo: Path, monkeypatch):
+    # Ad hoc with no config file, the judge must NOT inherit AgentConfig's `mock` default — a
+    # mock judge auto-approves everything, turning the verb into a rubber stamp.
+    _commit(git_repo, "a.py", "x\n", "add")
+    seen: dict = {}
+
+    def capture(prompt, target):
+        seen["backend"] = target.backend
+        nonce = prompt.rsplit("VERDICT[", 1)[1].split("]")[0]
+        return f"VERDICT[{nonce}]: APPROVE", 0.0
+
+    assert _invoke_review(git_repo, monkeypatch, capture).exit_code == 0
+    assert seen["backend"] == "claude-code"
+
+
 # ---------------------------------------------------------------- preflight — grader integrity
 
 def _preflight_config(repo: Path, criteria: list[str], protected: list[str]):

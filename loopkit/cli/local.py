@@ -569,6 +569,73 @@ def _goal_from_issue(repo: Path, number: int, provider: str) -> tuple[str, int]:
 
 
 @app.command()
+def review(config: Path = typer.Option(DEFAULT_CONFIG, "--config", "-c",
+                                       help="Config to derive the judge from; when the file is "
+                                            "missing, ad-hoc defaults apply (claude-code)."),
+           backend: str | None = typer.Option(None, "--backend",
+                                              help="Judge backend override (claude-code | codex | "
+                                                   "claude-api | openai-api)."),
+           model: str | None = typer.Option(None, "--model", help="Judge model override."),
+           criteria: list[Path] = typer.Option([], "--criteria",
+                                               help="Extra rubric file(s) layered onto the bundled "
+                                                    "checklist (repeatable)."),
+           base: str | None = typer.Option(None, "--base",
+                                           help="Diff base ref (default: the last commit)."),
+           goal: str | None = typer.Option(None, "--goal",
+                                           help="What the change was supposed to accomplish."),
+           repo: Path = typer.Option(Path("."), "--repo", help="Repository to review.")) -> None:
+    """Run the built-in judge ONCE on the repo's current change (exit 0 APPROVE · 1 REJECT ·
+    2 judge unavailable).
+
+    The same implementation the loop runs on every plausibly-done tick, standalone — for judging a
+    diff ad hoc, debugging a judge decision by hand, or wiring as an explicit `[review] command`
+    (`loopkit review` exits non-zero on problems, which is the ShellReviewHook contract).
+    """
+    from ..config import AgentConfig, ReviewConfig
+    from ..extensions.judge import resolve_judge, run_judge
+    from ..gate import ReviewUnavailable
+
+    if Path(config).is_file():
+        cfg = load_config(config)
+        review_cfg, agent_cfg, goal_text = cfg.review, cfg.agent, goal or cfg.goal
+    else:
+        # Ad hoc, no config: default the judge to claude-code — NOT AgentConfig's `mock` default,
+        # which would auto-approve everything and make the verb a rubber stamp.
+        review_cfg, agent_cfg = ReviewConfig(), AgentConfig(adapter="claude-code")
+        goal_text = goal or "Review this change for real defects."
+    overrides = {k: v for k, v in (("backend", backend), ("model", model)) if v is not None}
+    if criteria:
+        overrides["criteria"] = [str(f) for f in criteria]
+    if overrides:
+        review_cfg = review_cfg.model_copy(update=overrides)
+    target = resolve_judge(review_cfg, agent_cfg)
+    texts = []
+    for name in review_cfg.criteria:
+        path = Path(name) if Path(name).is_absolute() else Path(repo) / name
+        if not path.is_file():
+            err.print(f"[red]review[/] criteria file missing: {name} (fail-closed)")
+            raise typer.Exit(2)
+        texts.append(path.read_text(encoding="utf-8", errors="replace"))
+    console.print(f"[bold]judge:[/] {target.backend}/{target.model or 'backend default'} "
+                  f"· base {base or 'HEAD~1'}")
+    try:
+        verdict = run_judge(Path(repo), target=target, goal=goal_text,
+                            commit_message="(ad-hoc `loopkit review`)", base=base,
+                            extra_criteria=tuple(texts))
+    except ReviewUnavailable as exc:
+        err.print(f"[red]review unavailable[/] {escape(secrets.redact(str(exc)))}")
+        raise typer.Exit(2)
+    if verdict.raw:
+        console.print(escape(secrets.redact(verdict.raw)))
+    if verdict.passed:
+        console.print(f"[green]VERDICT: APPROVE[/] [dim]· cost ${verdict.cost_usd:.4f}[/]")
+        return
+    console.print(f"[red]VERDICT: REJECT[/] — {escape(secrets.redact(verdict.reason))} "
+                  f"[dim]· cost ${verdict.cost_usd:.4f}[/]")
+    raise typer.Exit(1)
+
+
+@app.command()
 def measure(config: Path = typer.Option(DEFAULT_CONFIG, "--config", "-c"),
             repo: str | None = typer.Option(None, "--repo", help="Override the target repo (config `repo`)."),
             adapter: str | None = typer.Option(None, "--adapter", help="Override the configured agent adapter."),

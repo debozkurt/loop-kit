@@ -334,7 +334,14 @@ def run_loop(config, agent: Agent, *, iteration_gate: Gate | None = None,
                             tick.info("gate.review", passed=False, sticky=True)
                             feedback = review_last_feedback
                     else:
-                        with trace.span("review", run_type="tool") as review_span:
+                        # The judge's identity rides the span (the built-in hook exposes .target;
+                        # shell/callable hooks have none) — so a trace answers "which model judged
+                        # this?" without grepping config.
+                        target = getattr(review_hook, "target", None)
+                        review_meta = ({"backend": target.backend, "model": target.model}
+                                       if target is not None else None)
+                        with trace.span("review", run_type="tool",
+                                        metadata=review_meta) as review_span:
                             try:
                                 with _heartbeat(tick, "review"):
                                     review = review_hook.review(repo, commit_msg)

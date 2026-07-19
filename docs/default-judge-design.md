@@ -1,9 +1,11 @@
 # Built-in default judge — design & build plan
 
-**Status:** design locked (v3 — end-to-end flow vetting complete), not yet built. The observability groundwork shipped in PRs #17 + #18:
-`ReviewConfig.decide()` returns a `ReviewDecision(command, reason)` and there is a
-`TODO(default-judge)` branch at [`config.py:164`](../loopkit/config.py) where this feature plugs in.
-Read this doc cold and build it.
+**Status:** **BUILT** (branch `feat/default-judge`, 5 commits, suite 576+ green) per this design
+(v3 — end-to-end flow vetting locked). Two build-time corrections are recorded inline: the batch
+base-config fallback is *repointed* rather than removed (see Call-site wiring), and the
+criteria-protection preflight is a hard preflight problem (`--force` escapes) rather than a
+warning — matching the acceptance-gate precedent in `safety.py`. The doc remains the design of
+record; `loopkit/extensions/judge.py` is the implementation.
 
 ## Why
 
