@@ -43,6 +43,10 @@ def mold_batch_cmd(
         limit: int | None = typer.Option(None, "--limit", min=1,
                                          help="Mold at most N unmolded tasks this invocation; "
                                               "re-invoke to resume (state.json tracks progress)."),
+        jobs: int = typer.Option(1, "--jobs", "-j", min=1,
+                                 help="Mold N tasks concurrently (default 1 = serial). Proposers "
+                                      "fan out; the verify step serialises per `group` (a shared "
+                                      "gate resource), ungrouped tasks verify in parallel."),
         force: bool = typer.Option(False, "--force",
                                    help="Re-mold tasks that already succeeded at this level."),
         proposer: str | None = typer.Option(None, "--proposer",
@@ -83,6 +87,7 @@ def mold_batch_cmd(
     console.print(Panel.fit(
         f"[bold]{len(manifest.task)}[/] task(s) · level {level}"
         + (f" · limit {limit}" if limit else "")
+        + (f" · jobs {jobs}" if jobs > 1 else "")
         + f" · proposer {'set' if proposer_cmd else 'none (skeletons stop at needs-oracle)'}"
         + f"\nout {out_dir}", title="loopkit mold-batch"))
     if dry_run:
@@ -92,8 +97,10 @@ def mold_batch_cmd(
 
     timestamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
     result = mold_batch(manifest, out_dir, level=level, timestamp=timestamp, limit=limit,
-                        force=force,
-                        proposer=ShellProposer(proposer_cmd) if proposer_cmd else None)
+                        force=force, jobs=jobs,
+                        proposer=(ShellProposer(proposer_cmd,
+                                                timeout=manifest.defaults.proposer_timeout)
+                                  if proposer_cmd else None))
     console.print(_result_table(result))
     if result.skipped:
         console.print(f"[dim]skipped {len(result.skipped)} already-molded task(s) "

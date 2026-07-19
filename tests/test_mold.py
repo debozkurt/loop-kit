@@ -584,3 +584,127 @@ def test_emit_drops_bare_test_root_from_protected_paths():
     # Author override wins verbatim.
     assert 'protected_paths    = ["only/this"]' in _render(
         MoldSpec(id="F-1", goal="g", protected_paths=["only/this"]))
+
+
+# --------------------------------------------------------------------------------------------
+# Parallel molding (--jobs): proposers fan out, verify serialises per group, state is durable,
+# and jobs=1 stays byte-identical to the serial path. See docs/mold-parallel-design.md.
+# --------------------------------------------------------------------------------------------
+import threading                                          # noqa: E402 — grouped with its users
+import time                                               # noqa: E402
+
+from loopkit.gate import GateResult                       # noqa: E402
+
+
+def _many_task_body(ids, *, group=None):
+    """A manifest body of independent single-goal tasks, optionally all sharing one group."""
+    blocks = []
+    for i in ids:
+        g = f'\ngroup = "{group}"' if group else ""
+        blocks.append(f'[[task]]\nid = "{i}"\ngoal = "fix {i}"{g}\n')
+    return "\n".join(blocks)
+
+
+class _ConcurrencyGate:
+    """A fake gate runner that records peak in-flight concurrency. Probe passes, fail-first fails,
+    so every task blesses; the sleep widens the window an overlapping call would occupy."""
+
+    def __init__(self, *, delay=0.1):
+        self._delay, self._lock = delay, threading.Lock()
+        self.inflight = self.peak = 0
+
+    def __call__(self, command, workspace):
+        with self._lock:
+            self.inflight += 1
+            self.peak = max(self.peak, self.inflight)
+        time.sleep(self._delay)
+        with self._lock:
+            self.inflight -= 1
+        return GateResult(passed="probe.sh" in command, feedback=None)
+
+
+def test_jobs_1_matches_serial_and_parallel_agrees(tmp_path):
+    # jobs=1 and jobs=4 must reach the same per-task verdicts (parity), differing only in wall-clock.
+    def run(jobs, out):
+        repo = _seed_repo(tmp_path / f"repo{jobs}")
+        m = load_mold_manifest(_mold_manifest(tmp_path, _many_task_body(["a", "b", "c", "d"]), repo))
+        return mold_batch(m, out, level="oracle", timestamp=TS, jobs=jobs,
+                          proposer=ShellProposer(_proposer_script(tmp_path)))
+    serial = run(1, tmp_path / "s")
+    parallel = run(4, tmp_path / "p")
+    assert [r.spec.id for r in serial.rows] == ["a", "b", "c", "d"]        # manifest order, not race order
+    assert [r.spec.id for r in parallel.rows] == ["a", "b", "c", "d"]
+    assert ([r.status for r in serial.rows] == [r.status for r in parallel.rows]
+            == [VERIFIED] * 4)
+
+
+def test_grouped_verify_never_overlaps(tmp_path):
+    # Same-group tasks name one contended gate resource — their VERIFY steps must be mutually exclusive.
+    repo = _seed_repo(tmp_path / "repo")
+    m = load_mold_manifest(_mold_manifest(tmp_path,
+                                          _many_task_body(["a", "b", "c"], group="db"), repo))
+    gate = _ConcurrencyGate()
+    result = mold_batch(m, tmp_path / "out", level="oracle", timestamp=TS, jobs=3,
+                        proposer=ShellProposer(_proposer_script(tmp_path)), run_gate=gate)
+    assert [r.status for r in result.rows] == [VERIFIED] * 3
+    assert gate.peak == 1                                 # the group lock held: never two verifies at once
+
+
+def test_ungrouped_verify_runs_concurrently(tmp_path):
+    # No group ⇒ no verify lock ⇒ verifies overlap (the whole point of --jobs for hermetic gates).
+    repo = _seed_repo(tmp_path / "repo")
+    m = load_mold_manifest(_mold_manifest(tmp_path, _many_task_body(["a", "b", "c"]), repo))
+    gate = _ConcurrencyGate()
+    result = mold_batch(m, tmp_path / "out", level="oracle", timestamp=TS, jobs=3,
+                        proposer=ShellProposer(_proposer_script(tmp_path)), run_gate=gate)
+    assert [r.status for r in result.rows] == [VERIFIED] * 3
+    assert gate.peak >= 2                                 # at least two verifies were in flight together
+
+
+def test_limit_selects_first_n_in_manifest_order_under_jobs(tmp_path):
+    repo = _seed_repo(tmp_path / "repo")
+    m = load_mold_manifest(_mold_manifest(tmp_path,
+                                          _many_task_body(["a", "b", "c", "d"]), repo))
+    result = mold_batch(m, tmp_path / "out", level="oracle", timestamp=TS, jobs=4, limit=2,
+                        proposer=ShellProposer(_proposer_script(tmp_path)))
+    assert [r.spec.id for r in result.rows] == ["a", "b"]  # first two by manifest order, deterministic
+    state = json.loads((tmp_path / "out" / "state.json").read_text())
+    assert set(state["tasks"]) == {"a", "b"}              # only the selected two persisted
+
+
+def test_state_written_incrementally_per_task(tmp_path):
+    # Each finished task is persisted AS IT LANDS (durable checklist), not only at the end: at jobs=1,
+    # by the time task 'b' reaches the gate, 'a' is already recorded in state.json.
+    repo = _seed_repo(tmp_path / "repo")
+    m = load_mold_manifest(_mold_manifest(tmp_path, _many_task_body(["a", "b"]), repo))
+    out = tmp_path / "out"
+    seen: list[int] = []
+    gate = _ConcurrencyGate(delay=0.02)
+
+    def watcher(command, workspace):
+        state_path = out / "state.json"
+        seen.append(len(json.loads(state_path.read_text())["tasks"]) if state_path.exists() else 0)
+        return gate(command, workspace)
+
+    mold_batch(m, out, level="oracle", timestamp=TS, jobs=1,
+               proposer=ShellProposer(_proposer_script(tmp_path)), run_gate=watcher)
+    assert 1 in seen                                      # 'a' was persisted before 'b' ran (incremental)
+    assert set(json.loads((out / "state.json").read_text())["tasks"]) == {"a", "b"}
+
+
+def test_proposer_timeout_default_and_override():
+    assert MoldDefaults().proposer_timeout == 1800.0
+    assert MoldDefaults(proposer_timeout=42.0).proposer_timeout == 42.0
+
+
+def test_proposer_honours_its_timeout(tmp_path):
+    # A proposer that overruns its wall-clock cap is a failed proposal (not a hang) → needs-oracle.
+    repo = _seed_repo(tmp_path / "repo")
+    slow = tmp_path / "slow.sh"
+    slow.write_text("#!/usr/bin/env bash\nsleep 5\n")
+    slow.chmod(0o755)
+    m = load_mold_manifest(_mold_manifest(tmp_path, '[[task]]\nid = "a"\ngoal = "x"\n', repo))
+    result = mold_batch(m, tmp_path / "out", level="oracle", timestamp=TS,
+                        proposer=ShellProposer(f"bash {slow}", timeout=0.3))
+    assert result.rows[0].status == NEEDS_ORACLE          # timed out → no proposal → skeleton stands
+    assert "timed out" in (tmp_path / "out" / "a" / "proposer-notes.md").read_text()

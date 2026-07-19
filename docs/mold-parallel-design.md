@@ -1,9 +1,18 @@
 # `mold-batch --jobs N` — parallel molding design
 
-Status: **designed, ready to build** (2026-07-19). Reviewed end-to-end against `extensions/mold.py`,
-`extensions/batch.py`, `extensions/fleet.py`, `extensions/synth_gate.py`, and the spacer Wave-A
-dogfood run. Spacer is the dogfood, not the model: every decision below is stated for arbitrary
-repos/job types, with spacer measurements as one worked example.
+Status: **BUILT 2026-07-19** (design + implementation same day). Reviewed end-to-end against
+`extensions/mold.py`, `extensions/batch.py`, `extensions/fleet.py`, `extensions/synth_gate.py`, and
+the spacer Wave-A dogfood run. Spacer is the dogfood, not the model: every decision below is stated
+for arbitrary repos/job types, with spacer measurements as one worked example.
+
+**Implemented:** `mold_batch(..., jobs=1)` fans the per-task pipeline across a `ThreadPoolExecutor`;
+`mold_task(..., verify_lock=...)` serialises only the synth-gate verify step; `MoldDefaults.proposer_timeout`
+(default 1800s) threads through the CLI into `ShellProposer`; `--jobs/-j` on the CLI. Tests in
+`tests/test_mold.py` (parallel section): jobs=1↔jobs=4 parity, grouped verify never overlaps
+(`peak==1`), ungrouped verifies overlap (`peak>=2`), `--limit` manifest-order selection under jobs,
+incremental state.json, proposer-timeout default/override + a real timeout → needs-oracle.
+NOT yet built (deferred, see table): probe-staleness diagnostic, relocatable molded dirs, `[stops]`
+knobs, staged pipeline.
 
 ## Problem
 

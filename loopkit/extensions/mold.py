@@ -35,6 +35,9 @@ import json
 import re
 import shlex
 import subprocess
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -141,6 +144,11 @@ class MoldDefaults(BaseModel):
     repo: str | None = None               # the checkout the tasks target (per-task override below)
     provider: str = "auto"                # forge for issue-sourced goals
     proposer: str | None = None           # ShellProposer command — the judgment seam (see class)
+    proposer_timeout: float = 1800.0      # per-task proposer wall-clock cap (s). The proposer is a
+                                          # fresh-context headless agent and is the batch's dominant
+                                          # cost; a too-tight cap turns a slow-but-good proposal into a
+                                          # false needs-oracle, and parallel contention lengthens the
+                                          # tail — so the default is generous. Repo/prompt-dependent.
     adapter: str | None = None            # emitted configs' agent (default: detect's pick)
     iteration: str | None = None          # emitted configs' iteration gate (default: detect's pick)
     max_cost_usd: float = 8.0             # per-task budget in emitted configs
@@ -378,7 +386,7 @@ def _read_touches(path: Path, cap: int = 50) -> list[str]:
 
 def mold_task(spec: MoldSpec, defaults: MoldDefaults, out_dir: Path, profile: RepoProfile, *,
               level: str, timestamp: str, proposer: ShellProposer | None = None,
-              run_gate=None) -> MoldRow:
+              run_gate=None, verify_lock: AbstractContextManager | None = None) -> MoldRow:
     """Mold one task up to `level`, leaving provenance at every stage (the reviewable instance).
 
     detect: record the repo profile. oracle: materialise the skeleton + tier guidance, let the
@@ -386,7 +394,13 @@ def mold_task(spec: MoldSpec, defaults: MoldDefaults, out_dir: Path, profile: Re
     verification (plus pass-on-fix when the spec carries a reference `fix`). route: decide
     single-vs-evolve from the spec's reliability report, or record "uncalibrated" honestly. full:
     render the per-task config wired to the blessed oracle.
+
+    `verify_lock` serialises ONLY the synth-gate verification step (the one that runs the oracle's
+    gate, which may touch a contended resource — a test DB, a staging env). Under `mold_batch --jobs`
+    it is the group's shared lock; the proposer above always runs unserialised. None ⇒ no
+    serialisation (the serial path, and every ungrouped task).
     """
+    verify_lock = verify_lock or nullcontext()
     task_dir = out_dir / spec.id
     task_dir.mkdir(parents=True, exist_ok=True)
     repo = Path(spec.repo or defaults.repo).expanduser().resolve()
@@ -431,8 +445,12 @@ def mold_task(spec: MoldSpec, defaults: MoldDefaults, out_dir: Path, profile: Re
     # Goal-derived oracles are untrusted input: verification is mandatory and isolated (a copy),
     # so an attacker-shaped oracle can neither be blessed green nor touch the real tree. The probe
     # rides along: env-broken (the class that once false-blessed 6/6) is rejected, never verified.
-    verdict = verify_oracle(oracle_command(acc_dir), repo, timestamp=timestamp, fix=spec.fix,
-                            isolate=True, run_gate=run_gate, probe=probe_command(acc_dir))
+    # The lock (a no-op unless mold_batch --jobs grouped this task) serialises this step alone: the
+    # gate may touch a shared resource, and two overlapping runs would tear each other down —
+    # producing environmental noise fail-first can't tell from a real reproduction (a false bless).
+    with verify_lock:
+        verdict = verify_oracle(oracle_command(acc_dir), repo, timestamp=timestamp, fix=spec.fix,
+                                isolate=True, run_gate=run_gate, probe=probe_command(acc_dir))
     (task_dir / "verdict.json").write_text(verdict.to_json() + "\n")
     if not verdict.blessed:
         failed = ", ".join(c.name for c in verdict.checks if not c.ok)
@@ -561,9 +579,15 @@ def _already_molded(state: dict, spec_id: str, level: str) -> bool:
             and status == _SUCCESS_FOR_LEVEL.get(prior_level))
 
 
+def _save_state(out_dir: Path, state: dict) -> None:
+    """Persist the molding state file. Called after EACH task completes (durable checklist): with
+    `--jobs` the collector thread is the single writer, so a crash keeps every finished task."""
+    (out_dir / "state.json").write_text(json.dumps(state, indent=2, sort_keys=True) + "\n")
+
+
 def mold_batch(manifest: MoldManifest, out_dir: Path, *, level: str, timestamp: str,
                limit: int | None = None, force: bool = False,
-               proposer: ShellProposer | None = None, run_gate=None) -> MoldResult:
+               proposer: ShellProposer | None = None, run_gate=None, jobs: int = 1) -> MoldResult:
     """Mold up to `limit` unmolded tasks to `level`, then (at level full) emit the batch manifest.
 
     Idempotent by the state file: a task that already succeeded at this level (or deeper) is
@@ -571,34 +595,76 @@ def mold_batch(manifest: MoldManifest, out_dir: Path, *, level: str, timestamp: 
     retried, because the expected loop is "human (or proposer) improves the oracle → re-run".
     The emitted `batch.toml` includes only READY tasks; everything else is listed in a trailing
     comment block so nothing silently disappears.
+
+    `jobs` (default 1 = serial, byte-identical to the pre-parallel path) fans the per-task pipeline
+    across a thread pool. The proposer — the dominant cost — always runs concurrently; only the
+    synth-gate VERIFY step is serialised, and only among tasks sharing a `group` (a group names a
+    contended gate resource, e.g. one test DB). Ungrouped tasks verify fully in parallel. Tasks are
+    SELECTED serially in manifest order (so `--limit` and skip semantics are deterministic), repos
+    are detected once up front (detect isn't thread-safe), and results/state are assembled in
+    manifest order regardless of completion order.
     """
     if level not in LEVELS:
         raise ValueError(f"unknown level '{level}' (one of: {', '.join(LEVELS)})")
     out_dir = Path(out_dir).expanduser().resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
     state = _load_state(out_dir)
-    profiles: dict[str, RepoProfile] = {}                 # detect once per distinct repo
     result = MoldResult()
-    processed = 0
-    _log.info("mold.start", tasks=len(manifest.task), level=level, limit=limit or "-")
+
+    # -- Select (serial, manifest order): skip already-molded, honour --limit on the rest ----------
+    to_process: list[MoldSpec] = []
     for spec in manifest.task:
         if not force and _already_molded(state, spec.id, level):
             result.skipped.append(spec.id)
             continue
-        if limit is not None and processed >= limit:
+        if limit is not None and len(to_process) >= limit:
             break
+        to_process.append(spec)
+
+    # Detect once per distinct repo, up front and single-threaded (detect_repo mutates no shared
+    # state here, but building the cache concurrently would double-detect / race the dict).
+    profiles: dict[str, RepoProfile] = {}
+    for spec in to_process:
         repo = str(Path(spec.repo or manifest.defaults.repo).expanduser().resolve())
         if repo not in profiles:
             profiles[repo] = detect_repo(repo)
-        row = mold_task(spec, manifest.defaults, out_dir, profiles[repo], level=level,
-                        timestamp=timestamp, proposer=proposer, run_gate=run_gate)
-        result.rows.append(row)
-        state["tasks"][spec.id] = {"level": level, "status": row.status, "timestamp": timestamp}
-        processed += 1
-    (out_dir / "state.json").write_text(json.dumps(state, indent=2, sort_keys=True) + "\n")
+
+    # One verify lock per group present among the selected tasks; ungrouped tasks get none (verify
+    # unserialised). A group's members share the SAME lock object, so their verify steps can't overlap.
+    group_locks: dict[str, threading.Lock] = {
+        g: threading.Lock() for g in {s.group for s in to_process if s.group}}
+
+    _log.info("mold.start", tasks=len(manifest.task), selected=len(to_process), level=level,
+              limit=limit or "-", jobs=max(1, jobs))
+
+    def _mold_one(spec: MoldSpec) -> MoldRow:
+        repo = str(Path(spec.repo or manifest.defaults.repo).expanduser().resolve())
+        return mold_task(spec, manifest.defaults, out_dir, profiles[repo], level=level,
+                         timestamp=timestamp, proposer=proposer, run_gate=run_gate,
+                         verify_lock=group_locks.get(spec.group) if spec.group else None)
+
+    # -- Mold (parallel): the collector thread (here) is the single writer of state.json, so the
+    # incremental per-task write needs no lock and a crash keeps every already-finished task. -------
+    rows_by_id: dict[str, MoldRow] = {}
+    done = 0
+    with ThreadPoolExecutor(max_workers=max(1, jobs)) as pool:
+        futures = {pool.submit(_mold_one, spec): spec for spec in to_process}
+        for future in as_completed(futures):
+            spec = futures[future]
+            row = future.result()                         # a mold_task bug still aborts (as before),
+            rows_by_id[spec.id] = row                     # but finished tasks are already persisted
+            state["tasks"][spec.id] = {"level": level, "status": row.status, "timestamp": timestamp}
+            _save_state(out_dir, state)
+            done += 1
+            _log.info("mold.progress", task=spec.id, status=row.status, done=done,
+                      total=len(to_process))
+
+    # Assemble results in MANIFEST order (not completion order) so tables/manifests are stable.
+    result.rows = [rows_by_id[s.id] for s in manifest.task if s.id in rows_by_id]
+    _save_state(out_dir, state)
     if level == "full":
         emit_batch_manifest(manifest, out_dir, state)
-    _log.info("mold.done", processed=processed, skipped=len(result.skipped),
+    _log.info("mold.done", processed=len(to_process), skipped=len(result.skipped),
               attention=len(result.attention))
     return result
 
