@@ -54,10 +54,27 @@ def test_clean_review_does_not_block_done(git_repo: Path):
     assert result.iterations == 1
 
 
-def test_unfixable_review_blocks_done_to_the_cap(git_repo: Path):
-    # Gates always pass, but the review never clears: done is never reached -> iteration cap.
+def test_unfixable_review_halts_on_review_stall(git_repo: Path):
+    # Gates always pass, but the review never clears. This is the priciest way to be stuck (two
+    # model calls per rejected tick) and NoProgress can't see it — the agent keeps changing files.
+    # REVIEW_STALL bounds it: N consecutive fresh rejections halt the run for a human.
     behaviors = [_writes(f"f{i}.txt", str(i)) for i in range(10)]   # keep changing -> no NO_PROGRESS
-    cfg = _config(git_repo, stops=StopsConfig(max_iter=4, no_progress_after=99))
+    cfg = _config(git_repo, stops=StopsConfig(max_iter=10, no_progress_after=99,
+                                              review_stall_after=3))
+    result = run_loop(cfg, MockAgent(behaviors=behaviors),
+                      iteration_gate=CallableGate(lambda ws: True),
+                      acceptance_gate=CallableGate(lambda ws: True),
+                      review_hook=CallableReviewHook(lambda ws: False, feedback="never clean"))
+    assert result.reason is StopReason.REVIEW_STALL
+    assert result.iterations == 3          # bounded by the stall stop, NOT ground to the cap
+
+
+def test_review_stall_tuned_high_still_reaches_the_cap(git_repo: Path):
+    # The old money-pit behavior remains reachable when the stall window exceeds the cap — the
+    # stop bounds by default but never forbids a deliberate grind.
+    behaviors = [_writes(f"f{i}.txt", str(i)) for i in range(10)]
+    cfg = _config(git_repo, stops=StopsConfig(max_iter=4, no_progress_after=99,
+                                              review_stall_after=99))
     result = run_loop(cfg, MockAgent(behaviors=behaviors),
                       iteration_gate=CallableGate(lambda ws: True),
                       acceptance_gate=CallableGate(lambda ws: True),
@@ -154,6 +171,100 @@ def test_review_decision_carries_reason_and_kind():
     assert no.kind == "off" and no.command is None and no.on is False and "--no-review" in no.reason
     off_switch = ReviewConfig(command="judge.sh", enabled=False).decide()
     assert off_switch.kind == "off" and off_switch.on is False and "enabled" in off_switch.reason
+
+
+def test_rejected_head_stays_rejected_on_idle_ticks(git_repo: Path):
+    # THE reject-then-idle regression (the hole that motivated sticky verdicts): tick 1 commits work
+    # the review REJECTs; tick 2+ the agent commits NOTHING. Before sticky verdicts, review_ok reset
+    # each tick and review only ran on new commits — so the idle tick sailed through the gates and
+    # DONE shipped the rejected diff. Now the verdict is keyed to HEAD: same HEAD, same rejection,
+    # zero extra judge calls, and DONE stays blocked until the agent actually changes something.
+    calls: list[str] = []
+
+    class RejectOnce:
+        def review(self, workspace: Path, commit_message: str) -> GateResult:
+            calls.append(commit_message)
+            return GateResult(False, "rejected: hardcoded credentials")
+
+    agent = MockAgent(behaviors=[_writes("solution.py")])          # tick 1 commits; then idles
+    gate = CallableGate(lambda ws: (ws / "solution.py").exists())
+    cfg = _config(git_repo, stops=StopsConfig(max_iter=6, no_progress_after=2))
+    result = run_loop(cfg, agent, iteration_gate=gate, acceptance_gate=gate,
+                      review_hook=RejectOnce())
+    assert result.reason is not StopReason.DONE    # the rejected diff must never ship
+    assert len(calls) == 1                         # sticky: the unchanged HEAD is not re-billed
+
+
+def test_approved_head_is_not_rereviewed(git_repo: Path):
+    # The flip side of sticky verdicts: an APPROVEd HEAD never re-bills the judge, even when the
+    # acceptance gate keeps the run going (overfit path) across idle ticks.
+    calls: list[str] = []
+
+    class ApproveAlways:
+        def review(self, workspace: Path, commit_message: str) -> GateResult:
+            calls.append(commit_message)
+            return GateResult(True, None)
+
+    agent = MockAgent(behaviors=[_writes("solution.py")])
+    gate = CallableGate(lambda ws: (ws / "solution.py").exists())
+    cfg = _config(git_repo, stops=StopsConfig(max_iter=6, no_progress_after=2))
+    result = run_loop(cfg, agent, iteration_gate=gate,
+                      acceptance_gate=CallableGate(lambda ws: False),   # held-out never passes
+                      review_hook=ApproveAlways())
+    assert result.reason is StopReason.NO_PROGRESS
+    assert len(calls) == 1                         # one fresh verdict; idle ticks reuse it free
+
+
+def test_review_not_called_behind_a_red_gate(git_repo: Path):
+    # Ordering: the (billed) review runs only behind a green iteration gate — no judge tokens on a
+    # draft that doesn't even pass its own checks.
+    seen: list[str] = []
+
+    class CountingReview:
+        def review(self, workspace: Path, commit_message: str) -> GateResult:
+            seen.append(commit_message)
+            return GateResult(True, None)
+
+    behaviors = [_writes(f"f{i}.txt", str(i)) for i in range(3)]   # keeps committing
+    cfg = _config(git_repo, stops=StopsConfig(max_iter=2, no_progress_after=99))
+    result = run_loop(cfg, MockAgent(behaviors=behaviors),
+                      iteration_gate=CallableGate(lambda ws: False), review_hook=CountingReview())
+    assert result.reason is StopReason.ITERATION_CAP
+    assert seen == []                              # gate never green -> judge never billed
+
+
+def test_review_unavailable_halts_the_run(git_repo: Path):
+    # Infra failure is not a verdict: a judge that cannot decide halts the run with its own stop
+    # reason instead of feeding "the judge is broken" to the agent as a defect to fix.
+    from loopkit.gate import ReviewUnavailable
+
+    class BrokenJudge:
+        def review(self, workspace: Path, commit_message: str) -> GateResult:
+            raise ReviewUnavailable("claude binary not found")
+
+    agent = MockAgent(behaviors=[_writes("solution.py")])
+    gate = CallableGate(lambda ws: (ws / "solution.py").exists())
+    result = run_loop(_config(git_repo), agent, iteration_gate=gate, acceptance_gate=gate,
+                      review_hook=BrokenJudge())
+    assert result.reason is StopReason.REVIEW_UNAVAILABLE
+    assert result.iterations == 1                  # halts immediately, never grinds the cap
+
+
+def test_judge_cost_reaches_the_budget_ceiling_same_tick(git_repo: Path):
+    # Judge spend is real spend: GateResult.cost_usd folds into the run cost BEFORE the stops are
+    # evaluated, so the budget ceiling can fire on the very tick the judge billed.
+    class ExpensiveReject:
+        def review(self, workspace: Path, commit_message: str) -> GateResult:
+            return GateResult(False, "no", cost_usd=5.0)
+
+    agent = MockAgent(behaviors=[_writes(f"f{i}.txt", str(i)) for i in range(5)])  # $0.5/tick
+    cfg = _config(git_repo, agent=AgentConfig(max_cost_usd=5.2),
+                  stops=StopsConfig(max_iter=10, no_progress_after=99))
+    result = run_loop(cfg, agent, iteration_gate=CallableGate(lambda ws: True),
+                      acceptance_gate=CallableGate(lambda ws: True), review_hook=ExpensiveReject())
+    assert result.reason is StopReason.BUDGET_CEILING
+    assert result.iterations == 1                  # 0.5 agent + 5.0 judge ≥ 5.2 on tick 1
+    assert result.cost_usd == 5.5                  # both spends visible in the terminal result
 
 
 def test_shell_review_hook_passes_clean_and_fails_dirty(tmp_path: Path):

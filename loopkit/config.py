@@ -66,6 +66,10 @@ class StopsConfig(BaseModel):
     # done-count). Coarser than no_progress_after because a plan item legitimately spans several
     # ticks. Keep it < max_iter so it can fire before the cap. Ignored off plan mode.
     plan_stall_after: int = Field(default=6, ge=1)
+    # Review only: halt after this many CONSECUTIVE fresh review rejections (an APPROVE resets).
+    # A reject loop bills two model calls per tick (agent + judge) and NoProgress can't see it —
+    # the agent keeps editing, so the signature keeps changing. Ignored when review is off.
+    review_stall_after: int = Field(default=4, ge=1)
 
 
 class SafetyConfig(BaseModel):

@@ -3,14 +3,17 @@
 A loop has one good terminal (DONE, decided by the acceptance gate) and several bad ones. The
 bad ones are evaluated every tick in a fixed precedence so a runaway is impossible:
 
-    BUDGET_CEILING  >  NO_PROGRESS  >  PLAN_STALL  >  ITERATION_CAP
+    BUDGET_CEILING  >  NO_PROGRESS  >  REVIEW_STALL  >  PLAN_STALL  >  ITERATION_CAP
 
 Budget wins because money already spent can't be unspent; no-progress beats the cap because
-detecting a stuck loop early is cheaper than waiting out the cap. PLAN_STALL is the plan-mode
-counterpart of NO_PROGRESS — it watches the *checklist* rather than the git tree, and is only in
-the policy list when plan-driven backlog mode is on. SAFETY is a separate terminal raised by the
-protected-path guard (Ch 16). Each stop is a small policy object, so adding another (a wall-clock
-deadline, say) is a one-liner.
+detecting a stuck loop early is cheaper than waiting out the cap. REVIEW_STALL bounds a reject
+loop (each rejected tick is TWO model calls — agent + judge — and NoProgress can't see it: the
+agent edits code every tick, so the signature keeps changing); it is only in the policy list when
+a review hook is wired. PLAN_STALL is the plan-mode counterpart of NO_PROGRESS — it watches the
+*checklist* rather than the git tree, and is only in the policy list when plan-driven backlog mode
+is on. SAFETY and REVIEW_UNAVAILABLE are separate terminals raised mid-tick (the protected-path
+guard, Ch 16; a judge that cannot render verdicts). Each stop is a small policy object, so adding
+another (a wall-clock deadline, say) is a one-liner.
 """
 from __future__ import annotations
 
@@ -23,9 +26,11 @@ class StopReason(str, Enum):
     DONE = "done"                       # the held-out acceptance gate passed
     BUDGET_CEILING = "budget_ceiling"
     NO_PROGRESS = "no_progress"
+    REVIEW_STALL = "review_stall"       # N consecutive review REJECTs — a human should look (Ch 8)
     PLAN_STALL = "plan_stall"           # plan mode: the checklist stopped advancing (Ch 13)
     ITERATION_CAP = "iteration_cap"
     SAFETY = "safety_halt"              # touched a protected path (Ch 16)
+    REVIEW_UNAVAILABLE = "review_unavailable"  # the judge can't render verdicts — infra, not a verdict
 
 
 @dataclass
@@ -37,6 +42,7 @@ class LoopState:
     signature: str                     # state_signature this tick (Ch 15)
     signatures: list[str]              # signature history, oldest -> newest
     plan_dones: list[int] | None = None  # plan mode: done-count history, oldest -> newest (None off)
+    review_rejects: int = 0            # consecutive FRESH review rejections (an APPROVE resets)
 
 
 class StopPolicy(Protocol):
@@ -94,6 +100,27 @@ class PlanStall:
             return False
         recent = dones[-(self.window + 1):]
         return recent[-1] <= recent[0]     # no net item completed across the window (or regressed)
+
+
+class ReviewStall:
+    """Halt after N consecutive FRESH review rejections — the review-loop NoProgress (Ch 8).
+
+    A reject loop is the priciest way to be stuck: every rejected tick bills TWO model calls (the
+    agent's fix attempt plus the judge's re-review), and NoProgress cannot see it — the agent edits
+    code each tick, so the git signature keeps changing. Counting *rejections* rather than
+    "unchanged verdicts" is deliberate: LLM verdict text varies call to call, so a string-equality
+    stall almost never fires. Only fresh verdicts count (a sticky re-used rejection on an idle tick
+    adds nothing new); any APPROVE resets the counter. Wired only when a review hook is present, so
+    off review the stop set is byte-identical to before.
+    """
+
+    reason = StopReason.REVIEW_STALL
+
+    def __init__(self, window: int) -> None:
+        self.window = window
+
+    def triggered(self, state: LoopState) -> bool:
+        return state.review_rejects >= self.window
 
 
 class IterationCap:

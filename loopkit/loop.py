@@ -26,11 +26,12 @@ from typing import TYPE_CHECKING
 
 from . import durability, safety, secrets, trace
 from .agent import Agent, AgentObserver
-from .gate import AlwaysPass, Gate, ShellGate
+from .gate import AlwaysPass, Gate, ReviewUnavailable, ShellGate
 from .log import get_logger
 from .prompt import build_prompt
 from .plan import PlanState, read_plan
-from .stops import BudgetCeiling, LoopState, NoProgress, PlanStall, StopReason, first_triggered
+from .stops import (BudgetCeiling, LoopState, NoProgress, PlanStall, ReviewStall, StopReason,
+                    first_triggered)
 
 if TYPE_CHECKING:
     # Typing-only imports: the core never depends on an extension at runtime — the hook and the
@@ -195,6 +196,11 @@ def run_loop(config, agent: Agent, *, iteration_gate: Gate | None = None,
     # Per-tick hard stops, in precedence order. The iteration cap is the loop's own bound.
     hard_stops = [BudgetCeiling(config.agent.max_cost_usd),
                   NoProgress(config.stops.no_progress_after)]
+    # Review-loop bound (Ch 8): a reject loop bills agent + judge every tick and NoProgress can't
+    # see it (the agent keeps editing → the signature keeps changing). Only when a hook is wired,
+    # so off review the stop set is byte-identical to before.
+    if review_hook is not None:
+        hard_stops.append(ReviewStall(config.stops.review_stall_after))
     # Plan-driven backlog: NoProgress watches the git signature, but an agent stuck on one item still
     # edits files each tick (signature changes) so it never fires — the run would grind to the cap on
     # a wedged item, spending the whole budget. Add a stall stop that watches the done-count instead.
@@ -223,6 +229,15 @@ def run_loop(config, agent: Agent, *, iteration_gate: Gate | None = None,
         plan_file = config.plan.file            # plan-driven backlog mode; None = single-task (prior)
         last_plan: PlanState | None = None
         plan_dones: list[int] = []              # done-count history for the PlanStall stop (Ch 13)
+        # Sticky review verdict, keyed by HEAD (Ch 8). A verdict outlives its tick: a REJECTed HEAD
+        # stays rejected on idle ticks WITHOUT re-billing the judge, and an APPROVEd HEAD is never
+        # re-reviewed. This closes the reject-then-idle hole (reject at tick N, commit nothing at
+        # tick N+1 → the old per-tick reset let the gates run and DONE ship the rejected diff), and
+        # it subsumes the old `advanced` condition: "only review new work" falls out of the key.
+        review_head: str | None = None          # last HEAD a fresh verdict was rendered for
+        review_last_ok = True                   # that verdict
+        review_last_feedback: str | None = None  # its feedback, re-fed on sticky-rejected ticks
+        review_rejects = 0                      # consecutive fresh rejections (ReviewStall input)
 
         def _res(reason, iterations, cost_usd, **kw):
             # Stamp the latest checklist progress onto every terminal (None when not in plan mode).
@@ -238,7 +253,6 @@ def run_loop(config, agent: Agent, *, iteration_gate: Gate | None = None,
         for i in range(1, config.stops.max_iter + 1):
             tick = log.bind(tick=i)
             activity.tick(i)                               # delimit this tick's events in the artifact
-            head_before = durability.current_head(repo)   # to detect an agent self-commit this tick
             with trace.span(f"tick {i}", run_type="chain", metadata={"tick": i}) as tick_span:
                 # Read edge of the flywheel (Ch 17): render learned skills into this tick's prompt.
                 # None registry -> no block -> v1 prompt exactly.
@@ -277,10 +291,9 @@ def run_loop(config, agent: Agent, *, iteration_gate: Gate | None = None,
 
                 commit_msg = f"loopkit: tick {i} on {config.branch}"
                 committed = durability.commit_progress(repo, commit_msg)
-                # A CLI agent (claude-code/codex) often commits its own work, so loopkit's commit is a
-                # no-op (committed=False) even though HEAD advanced. Detect either path so the review
-                # gate below can't be silently skipped for a self-committing agent.
-                advanced = committed or durability.current_head(repo) != head_before
+                # (Self-committing CLI agents make loopkit's commit a no-op while HEAD still moves;
+                # the review below keys on HEAD itself — sticky verdict — so either commit path, or
+                # a HEAD that moved ticks ago while the gate was red, is reviewed exactly once.)
                 signature = durability.state_signature(repo)
                 signatures.append(signature)
                 tick.info("tick.commit", committed=committed, sig=signature)
@@ -293,46 +306,81 @@ def run_loop(config, agent: Agent, *, iteration_gate: Gate | None = None,
                     tick.info("plan.progress", done=last_plan.done, open=last_plan.open,
                               total=last_plan.total)
                     tick_span.metadata(plan_done=last_plan.done, plan_open=last_plan.open)
-                state = LoopState(iteration=i, cost_usd=cost, signature=signature,
-                                  signatures=signatures,
-                                  plan_dones=plan_dones if plan_file else None)
+                # Iteration gate FIRST — free and deterministic. The (billed, nondeterministic)
+                # review runs only behind a green gate, so no judge tokens are ever spent on a
+                # draft that doesn't even pass its own checks (the review.sh doctrine: an LLM
+                # verdict is a model call — gate it behind the mechanical check).
+                with trace.span("iteration gate", run_type="tool",
+                                inputs={"command": config.gate.iteration}) as gate_span:
+                    with _heartbeat(tick, "iteration_gate"):
+                        gate = iteration_gate.check(repo)
+                    gate_span.outputs(passed=gate.passed, feedback=gate.feedback or None)
+                tick.info("gate.iteration", passed=gate.passed)
 
-                # Continuous review (Ch 8): review the fresh commit before it can count as done. A
-                # clean review is a precondition for the done-check below; a failing one feeds back so
-                # the agent fixes it next tick, while the producing context is fresh (roborev loop).
-                # Only when HEAD advanced this tick — no new diff means nothing new to review. This
-                # fires whether loopkit committed OR the agent self-committed (advanced). None => v1.
+                # Continuous review (Ch 8): a clean review of the CURRENT HEAD is a precondition
+                # for everything downstream (acceptance, DONE); a failing one feeds back so the
+                # agent fixes it while the producing context is fresh (roborev loop). Verdicts are
+                # STICKY per HEAD: an unchanged HEAD re-uses its verdict for free — so a rejected
+                # commit stays rejected on idle ticks (no re-bill, no reject-then-idle escape) and
+                # an approved HEAD is never re-reviewed. Infra failure is not a verdict: a judge
+                # that cannot decide (ReviewUnavailable) halts the run rather than feeding "the
+                # judge is broken" to the agent as a phantom defect. None hook => v1 exactly.
                 review_ok = True
-                if review_hook is not None and advanced:
-                    with trace.span("review", run_type="tool") as review_span:
-                        review = review_hook.review(repo, commit_msg)
-                        review_span.outputs(passed=review.passed, feedback=review.feedback or None)
-                    tick.info("gate.review", passed=review.passed)
-                    if not review.passed:
-                        review_ok = False
-                        reason_full = secrets.redact(review.feedback or "")
-                        # Persist WHY review rejected, not just the pass/fail bit — otherwise the
-                        # judge's verdict is lost the moment it feeds back, and "did review catch the
-                        # real problem?" is unauditable after the run. Single-lined + tail-trimmed
-                        # (the verdict sits at the end of the judge output); the full text still rides
-                        # to the agent via `feedback` and to the trace span above.
-                        tick.info("gate.review.rejected",
-                                  reason=" ".join(reason_full.split())[-400:] or "(no detail returned)")
-                        feedback = ("A review of your last change found issues to fix before it can "
-                                    "be accepted:\n" + reason_full)
+                if review_hook is not None and gate.passed:
+                    head_now = durability.current_head(repo)
+                    if head_now == review_head:
+                        review_ok = review_last_ok
+                        if not review_ok:
+                            tick.info("gate.review", passed=False, sticky=True)
+                            feedback = review_last_feedback
+                    else:
+                        with trace.span("review", run_type="tool") as review_span:
+                            try:
+                                with _heartbeat(tick, "review"):
+                                    review = review_hook.review(repo, commit_msg)
+                            except ReviewUnavailable as exc:
+                                detail = secrets.redact(str(exc))
+                                tick.error("gate.review.unavailable", detail=detail[:200])
+                                review_span.outputs(unavailable=detail[:400])
+                                tick_span.outputs(halt="review_unavailable")
+                                return _terminal(_res(StopReason.REVIEW_UNAVAILABLE, i, cost,
+                                                      detail=detail[:400]))
+                            review_cost = float(getattr(review, "cost_usd", 0.0) or 0.0)
+                            review_span.outputs(passed=review.passed,
+                                                feedback=review.feedback or None)
+                            review_span.metadata(cost_usd=round(review_cost, 6))
+                        # Judge spend counts: fold it into the run cost NOW so the budget ceiling
+                        # (checked below, on state built after this) sees it the same tick.
+                        cost += review_cost
+                        review_head = head_now
+                        review_last_ok = review.passed
+                        tick.info("gate.review", passed=review.passed,
+                                  costUsd=round(review_cost, 4))
+                        if review.passed:
+                            review_rejects = 0
+                            review_last_feedback = None
+                        else:
+                            review_ok = False
+                            review_rejects += 1
+                            reason_full = secrets.redact(review.feedback or "")
+                            # Persist WHY review rejected, not just the pass/fail bit — otherwise
+                            # the judge's verdict is lost the moment it feeds back, and "did review
+                            # catch the real problem?" is unauditable after the run. Single-lined +
+                            # tail-trimmed (the verdict sits at the end of the judge output); the
+                            # full text still rides to the agent via `feedback` and to the span.
+                            tick.info("gate.review.rejected",
+                                      reason=" ".join(reason_full.split())[-400:]
+                                             or "(no detail returned)")
+                            feedback = ("A review of your last change found issues to fix before "
+                                        "it can be accepted:\n" + reason_full)
+                            review_last_feedback = feedback
 
-                # DONE next: the iteration gate, then the held-out acceptance gate (Ch 9). Skipped
-                # when the review failed, so unreviewed-but-green work can never be declared done.
+                # DONE next: the held-out acceptance gate (Ch 9), behind BOTH the green gate and a
+                # clean review — unreviewed-but-green work can never be declared done.
+                # Plan-driven backlog: with open checklist items the run is not finished, so skip
+                # the (expensive) whole-project acceptance gate and keep going — one item a tick.
+                plan_blocks = last_plan is not None and last_plan.blocks_done
                 if review_ok:
-                    with trace.span("iteration gate", run_type="tool",
-                                    inputs={"command": config.gate.iteration}) as gate_span:
-                        with _heartbeat(tick, "iteration_gate"):
-                            gate = iteration_gate.check(repo)
-                        gate_span.outputs(passed=gate.passed, feedback=gate.feedback or None)
-                    tick.info("gate.iteration", passed=gate.passed)
-                    # Plan-driven backlog: with open checklist items the run is not finished, so skip
-                    # the (expensive) whole-project acceptance gate and keep going — one item a tick.
-                    plan_blocks = last_plan is not None and last_plan.blocks_done
                     if gate.passed and not plan_blocks:
                         with trace.span("acceptance gate", run_type="tool",
                                         inputs={"command": config.gate.acceptance}) as acc_span:
@@ -385,8 +433,16 @@ def run_loop(config, agent: Agent, *, iteration_gate: Gate | None = None,
                     else:
                         feedback = secrets.redact(gate.feedback)
 
-                # Hard stops, in precedence order (budget > no-progress > plan-stall). Cap is the
-                # loop bound below.
+                # Snapshot AFTER review, so the budget ceiling sees this tick's judge spend and the
+                # review-stall stop sees this tick's rejection — building it earlier (as before the
+                # reorder) hid both until the following tick.
+                state = LoopState(iteration=i, cost_usd=cost, signature=signature,
+                                  signatures=signatures,
+                                  plan_dones=plan_dones if plan_file else None,
+                                  review_rejects=review_rejects)
+
+                # Hard stops, in precedence order (budget > no-progress > review-stall > plan-stall).
+                # Cap is the loop bound below.
                 reason = first_triggered(hard_stops, state)
                 if reason is not None:
                     detail = ""
