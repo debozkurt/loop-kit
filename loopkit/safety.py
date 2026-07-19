@@ -73,16 +73,39 @@ def preflight(config) -> Preflight:
     if config.gate.acceptance and not config.safety.protected_paths:
         problems.append("an acceptance gate is set but no protected_paths guard it; "
                         "the loop could optimize against the held-out checks")
+    # [review] criteria files are the judge's grading rubric — a repo-relative rubric the agent can
+    # edit lets a run tune its own grader (the verifier-hacking rule that guards the acceptance gate
+    # above, Ch 8/9). Paths outside the repo are exempt: they are not agent-committable, matching
+    # the trust model of out-of-repo oracle files.
+    for name in getattr(config.review, "criteria", None) or []:
+        rel = _repo_relative(name, repo)
+        if rel is not None and not _guarded(rel, config.safety.protected_paths):
+            problems.append(f"[review] criteria file {name!r} is not under safety.protected_paths; "
+                            "the agent could tune its own grader")
     return Preflight(not problems, problems)
+
+
+def _repo_relative(name: str, repo: Path) -> str | None:
+    """`name` as a repo-relative path, or None when it points outside the repo."""
+    path = Path(name)
+    if not path.is_absolute():
+        return name
+    try:
+        return str(path.resolve().relative_to(repo.resolve()))
+    except ValueError:
+        return None
+
+
+def _guarded(path: str, guards: list[str]) -> bool:
+    """True when `path` falls under any protected-path guard (same matching as the tick check)."""
+    for guard in guards:
+        g = guard.rstrip("/")
+        if path == g or path.startswith(g + "/") or fnmatch.fnmatch(path, guard):
+            return True
+    return False
 
 
 def protected_violations(config) -> list[str]:
     """Paths the working tree currently changes that fall under a protected path (Ch 9 + 16)."""
-    bad: list[str] = []
-    for path in durability.changed_paths(config.repo_path()):
-        for guard in config.safety.protected_paths:
-            g = guard.rstrip("/")
-            if path == g or path.startswith(g + "/") or fnmatch.fnmatch(path, guard):
-                bad.append(path)
-                break
-    return bad
+    return [path for path in durability.changed_paths(config.repo_path())
+            if _guarded(path, config.safety.protected_paths)]

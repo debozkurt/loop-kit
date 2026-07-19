@@ -66,6 +66,10 @@ class StopsConfig(BaseModel):
     # done-count). Coarser than no_progress_after because a plan item legitimately spans several
     # ticks. Keep it < max_iter so it can fire before the cap. Ignored off plan mode.
     plan_stall_after: int = Field(default=6, ge=1)
+    # Review only: halt after this many CONSECUTIVE fresh review rejections (an APPROVE resets).
+    # A reject loop bills two model calls per tick (agent + judge) and NoProgress can't see it —
+    # the agent keeps editing, so the signature keeps changing. Ignored when review is off.
+    review_stall_after: int = Field(default=4, ge=1)
 
 
 class SafetyConfig(BaseModel):
@@ -115,17 +119,25 @@ class TraceConfig(BaseModel):
 
 
 class ReviewDecision(NamedTuple):
-    """The resolved review outcome for ONE invocation: the command to run (``None`` = no review)
-    plus a short, human-readable ``reason``. The reason exists so every entry point can LOG *why*
-    review is on or off — the decision was previously invisible, which is exactly how review once
-    fired in zero of 28 batch runs behind a reassuring "default-on" banner. ``on`` is the boolean."""
+    """The resolved review outcome for ONE invocation: ``kind`` says WHAT runs (``"off"`` /
+    ``"command"`` — a shell judge in ``command`` / ``"default"`` — the built-in judge,
+    ``command`` is None), plus a short, human-readable ``reason``. The reason exists so every
+    entry point can LOG *why* review is on or off — the decision was previously invisible, which
+    is exactly how review once fired in zero of 28 batch runs behind a reassuring "default-on"
+    banner.
+
+    ``on`` derives from ``kind``, NOT from ``command`` — the built-in judge has no shell command,
+    and deriving on-ness from ``command`` would render the default judge as "off" at every call
+    site while it silently runs: precisely the invisible-decision bug class this type exists to
+    kill. ``kind`` has no default: any construction site must say what it means, loudly."""
 
     command: str | None
     reason: str
+    kind: str                              # "off" | "command" | "default"
 
     @property
     def on(self) -> bool:
-        return self.command is not None
+        return self.kind != "off"
 
 
 class ReviewConfig(BaseModel):
@@ -133,39 +145,50 @@ class ReviewConfig(BaseModel):
     review (exit 0) is a precondition for DONE, and a failing review's output feeds back so the agent
     self-corrects (the fix→re-review loop).
 
-    Two fields, distinct jobs. ``enabled`` (default True) is the master switch — set it false to turn
-    review OFF everywhere. ``command`` is the judge to run; set it to a custom judge, or leave it unset
-    to use the built-in default judge (planned — see docs/default-judge-design). Precedence when
+    ``enabled`` (default True) is the master switch — set it false to turn review OFF everywhere.
+    ``command`` is a custom judge shell command; leave it unset to run the **built-in default judge**
+    (extensions/judge.py — see docs/default-judge-design.md), so review is truly on-by-default: a
+    project that configures nothing still gets an adversarial review gating DONE. Precedence when
     enabled: an explicit override (``run --review`` / manifest ``review =``) wins, else ``command``,
-    else the built-in judge. ``--no-review`` disables for a single invocation.
-
-    (Today the built-in judge is not yet wired, so ``enabled=True`` + no ``command`` resolves to OFF
-    with a visible reason — `run` prints it and `doctor` shows it, so it is never a *silent* off. The
-    default-judge work flips that last branch to run a bundled judge, making review truly on-by-default.)"""
+    else the built-in judge. ``--no-review`` disables for a single invocation."""
 
     command: str | None = None            # the review/judge shell command; None = use the built-in judge (once wired)
     enabled: bool = True                  # master switch; false = review off everywhere
+    # Built-in judge identity (extensions/judge.py). Unset = inherit from [agent]: backend from
+    # `adapter`, model from `model` (same-vendor only — a cross-vendor backend override gets that
+    # backend's own default), use_api_key tri-state (None = inherit). `criteria` layers project
+    # rubric file(s) onto the bundled checklist; keep them under safety.protected_paths so the
+    # author can't tune its own grader.
+    backend: str | None = None            # judge backend override; None = [agent].adapter
+    model: str | None = None              # judge model override; None = [agent].model (same vendor)
+    args: list[str] = Field(default_factory=list)   # extra CLI flags for a CLI judge backend
+    use_api_key: bool | None = None       # claude-code billing override; None = [agent].use_api_key
+    criteria: list[str] = Field(default_factory=list)  # rubric files appended to the bundled prompt
 
     def decide(self, override: str | None = None, disabled: bool = False) -> ReviewDecision:
-        """Resolve the effective review command AND a reason. Precedence (unchanged from the original
+        """Resolve the effective review AND a reason. Precedence (unchanged from the original
         resolver): ``--no-review`` wins, then an explicit override (``--review`` / manifest ``review =``
         — deliberately strong enough to run even when ``enabled=false``), then the ``enabled`` gate,
-        then the configured ``command``."""
+        then the configured ``command``, and finally the **built-in default judge** — review is now
+        truly on-by-default: nothing configured still reviews."""
         # Reasons carry no on/off prefix — callers render the state (see cli run-line / batch log),
         # so the reason states only the cause.
         if disabled:
-            return ReviewDecision(None, "--no-review")
+            return ReviewDecision(None, "--no-review", "off")
         if override is not None:
-            return ReviewDecision(override, "explicit override (--review / manifest review=)")
+            return ReviewDecision(override, "explicit override (--review / manifest review=)",
+                                  "command")
         if not self.enabled:
-            return ReviewDecision(None, "disabled ([review] enabled = false)")
+            return ReviewDecision(None, "disabled ([review] enabled = false)", "off")
         if self.command is not None:
-            return ReviewDecision(self.command, "[review] command")
-        # TODO(default-judge): return the built-in judge here so on-by-default actually runs.
-        return ReviewDecision(None, "no [review] command configured (built-in judge not yet wired)")
+            return ReviewDecision(self.command, "[review] command", "command")
+        return ReviewDecision(None, "built-in judge ([review] command unset — on by default)",
+                              "default")
 
     def resolved(self, override: str | None = None, disabled: bool = False) -> str | None:
-        """Back-compat thin wrapper returning just the command; prefer ``decide()`` for the reason."""
+        """Back-compat thin wrapper returning just the shell command; prefer ``decide()``. NOTE:
+        the built-in default judge has no shell command, so this returns None for it — check
+        ``decide().on`` / ``decide().kind`` for on-ness, never this."""
         return self.decide(override=override, disabled=disabled).command
 
 

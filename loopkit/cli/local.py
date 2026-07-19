@@ -124,15 +124,20 @@ def doctor(config: Path = typer.Option(DEFAULT_CONFIG, "--config", "-c"),
     if gate:
         _doctor_gate_verdict(table, cfg)
 
-    # Continuous review (Ch 8): make the on/off decision apparent here, so a config that never wired
-    # a judge is caught at doctor time — not discovered later as a batch of unreviewed MRs.
+    # Continuous review (Ch 8): make the decision apparent here — WHICH judge gates DONE (custom
+    # command or the built-in default and its backend/model), or WHY review is off. On-by-default
+    # means a review model call per plausibly-done tick; doctor is where that spend is visible
+    # before a run starts.
     review = cfg.review.decide()
-    if review.on:
+    if review.kind == "default":
+        table.add_row("review", "[green]on[/]",
+                      escape(f"{_review_detail(review, cfg)} — a review model call per "
+                             "plausibly-done tick (--no-review opts out)"))
+        _doctor_judge(table, cfg)          # is the judge runnable here, and will its spend price?
+    elif review.on:
         table.add_row("review", "[green]on[/]", escape(review.command))
     else:
-        table.add_row("review", "[yellow]off[/]",
-                      escape("no [review] command — set one (e.g. an adversarial LLM judge) to gate "
-                             "DONE on a clean review; runs by default once set (--no-review opts out)"))
+        table.add_row("review", "[yellow]off[/]", escape(review.reason))
 
     # Tracing (Ch 14-15): full-tree LangSmith observability, auto-on when langsmith + a key present.
     trace.configure(cfg.trace)
@@ -148,6 +153,17 @@ def doctor(config: Path = typer.Option(DEFAULT_CONFIG, "--config", "-c"),
     console.print(table)
     if not pf.ok:
         raise typer.Exit(1)
+
+
+def _review_detail(decision, cfg: Config) -> str:
+    """The human-readable judge identity for a review decision: the shell command for
+    kind=="command", the resolved backend/model for the built-in default judge — so the run line
+    and doctor always say WHICH judge gates DONE, not just that one does."""
+    if decision.kind == "command":
+        return decision.command
+    from ..extensions.judge import resolve_judge
+    target = resolve_judge(cfg.review, cfg.agent)
+    return f"built-in judge: {target.backend}/{target.model or 'backend default'}"
 
 
 # Adapter binary / SDK / key for each adapter name, used by `doctor`.
@@ -196,6 +212,44 @@ def _doctor_agent(table: Table, cfg: Config) -> None:
             table.add_row("agent", "[yellow]no key[/]", f"{env} not set")
     else:
         table.add_row("agent", "[red]unknown[/]", f"unknown adapter {adapter!r}")
+
+
+def _doctor_judge(table: Table, cfg: Config) -> None:
+    """Is the built-in judge actually runnable here — and will its spend be priced?
+
+    Mirrors `_doctor_agent`, but for the JUDGE's resolved backend, which a `[review] backend`
+    override can point at a different binary and a different credential than the agent's. Also
+    flags an unpriced judge model: `estimate_cost` returns 0.0 for models missing from the price
+    table, so an unpriced judge spends invisibly to the budget ceiling (warn-and-run, by design).
+    """
+    from ..extensions.judge import resolve_judge
+    target = resolve_judge(cfg.review, cfg.agent)
+    if target.backend == "mock":
+        table.add_row("judge", "[green]ok[/]", "mock (auto-approve, no model call)")
+        return
+    if target.backend in _CLI_BINARIES:
+        binary = _CLI_BINARIES[target.backend]
+        found = shutil.which(binary)
+        status = "[green]ok[/]" if found else "[red]missing[/]"
+        detail = found or (f"{binary} not on PATH — the run halts REVIEW_UNAVAILABLE at the "
+                           f"first verdict")
+        if found and target.backend == "claude-code":
+            detail = f"{found} · {_claude_code_auth_note(cfg)}"
+    elif target.backend in _API_REQUIREMENTS:
+        pkg, env, extra = _API_REQUIREMENTS[target.backend]
+        have_sdk = importlib.util.find_spec(pkg) is not None
+        status = "[green]ok[/]" if have_sdk else "[red]missing[/]"
+        detail = (f"{target.backend} SDK present" if have_sdk
+                  else f"{pkg} SDK not installed (pip install 'loopkit[{extra}]')")
+    else:
+        table.add_row("judge", "[red]unknown[/]", f"unknown judge backend {target.backend!r}")
+        return
+    model = target.model or DEFAULT_MODELS.get(target.backend)
+    if pricing.known_model(model):
+        detail += f" · model {model}"
+    else:
+        detail += " · [yellow]model unpriced — judge spend won't count toward max_cost_usd[/]"
+    table.add_row("judge", status, detail)
 
 
 def _doctor_budget(table: Table, cfg: Config) -> None:
@@ -414,17 +468,32 @@ def run(config: Path = typer.Option(DEFAULT_CONFIG, "--config", "-c"),
         f"budget ${cfg.agent.max_cost_usd}"
         + (f" · issue #{issue_number}" if issue_number is not None else ""),
         title="loopkit run"))
-    # Review is opt-out: an explicit --review wins, else the configured [review] command runs by
-    # default (unless --no-review). Announce the decision up front so an accidentally-off review
-    # (the failure mode that let review fire in zero of 28 runs) is impossible to miss.
+    # Review is opt-out: an explicit --review wins, else the configured [review] command, else the
+    # BUILT-IN default judge (unless --no-review). Announce the decision up front so an
+    # accidentally-off review (the failure mode that let review fire in zero of 28 runs) is
+    # impossible to miss — and name the judge identity when the default runs, so on-by-default is
+    # never an anonymous spend.
     review_hook = None
     decision = cfg.review.decide(override=review, disabled=no_review)
     console.print(
         f"[bold]review:[/] {'[green]on[/]' if decision.on else '[yellow]off[/]'} — {decision.reason}"
-        + (f" [dim]· {decision.command}[/]" if decision.on else ""))
-    if decision.command:
+        + (f" [dim]· {escape(_review_detail(decision, cfg))}[/]" if decision.on else ""))
+    if decision.kind == "command":
         from ..extensions.review import ShellReviewHook
         review_hook = ShellReviewHook(decision.command)
+    elif decision.kind == "default":
+        from ..extensions.judge import DefaultReviewHook, resolve_judge
+        # Probe the judge binary NOW: with review behind the green gate, a missing backend would
+        # otherwise surface only at the first plausibly-done tick — after the agent has already
+        # billed real work — as a REVIEW_UNAVAILABLE halt.
+        target = resolve_judge(cfg.review, cfg.agent)
+        if target.backend in _CLI_BINARIES and shutil.which(_CLI_BINARIES[target.backend]) is None:
+            fail("review", f"judge backend '{_CLI_BINARIES[target.backend]}' not on PATH and review "
+                           "is on by default — fix PATH, set [review] backend/command, or pass "
+                           "--no-review.")
+        # Construct BEFORE run_loop: the hook captures the repo's pre-run HEAD as the diff fork point.
+        review_hook = DefaultReviewHook(cfg.review, cfg.agent, cfg.repo_path(), cfg.goal,
+                                        plan_file=cfg.plan.file)
     skills_registry = None
     if skills:
         from ..extensions.skills import FileSkillRegistry, ShellDistiller
@@ -497,6 +566,73 @@ def _goal_from_issue(repo: Path, number: int, provider: str) -> tuple[str, int]:
                     "is gh/glab installed + authenticated, and is the repo a github/gitlab remote?")
     task = issues.issue_to_task(issue)                    # reuse the shared goal builder
     return task["goal"], number
+
+
+@app.command()
+def review(config: Path = typer.Option(DEFAULT_CONFIG, "--config", "-c",
+                                       help="Config to derive the judge from; when the file is "
+                                            "missing, ad-hoc defaults apply (claude-code)."),
+           backend: str | None = typer.Option(None, "--backend",
+                                              help="Judge backend override (claude-code | codex | "
+                                                   "claude-api | openai-api)."),
+           model: str | None = typer.Option(None, "--model", help="Judge model override."),
+           criteria: list[Path] = typer.Option([], "--criteria",
+                                               help="Extra rubric file(s) layered onto the bundled "
+                                                    "checklist (repeatable)."),
+           base: str | None = typer.Option(None, "--base",
+                                           help="Diff base ref (default: the last commit)."),
+           goal: str | None = typer.Option(None, "--goal",
+                                           help="What the change was supposed to accomplish."),
+           repo: Path = typer.Option(Path("."), "--repo", help="Repository to review.")) -> None:
+    """Run the built-in judge ONCE on the repo's current change (exit 0 APPROVE · 1 REJECT ·
+    2 judge unavailable).
+
+    The same implementation the loop runs on every plausibly-done tick, standalone — for judging a
+    diff ad hoc, debugging a judge decision by hand, or wiring as an explicit `[review] command`
+    (`loopkit review` exits non-zero on problems, which is the ShellReviewHook contract).
+    """
+    from ..config import AgentConfig, ReviewConfig
+    from ..extensions.judge import resolve_judge, run_judge
+    from ..gate import ReviewUnavailable
+
+    if Path(config).is_file():
+        cfg = load_config(config)
+        review_cfg, agent_cfg, goal_text = cfg.review, cfg.agent, goal or cfg.goal
+    else:
+        # Ad hoc, no config: default the judge to claude-code — NOT AgentConfig's `mock` default,
+        # which would auto-approve everything and make the verb a rubber stamp.
+        review_cfg, agent_cfg = ReviewConfig(), AgentConfig(adapter="claude-code")
+        goal_text = goal or "Review this change for real defects."
+    overrides = {k: v for k, v in (("backend", backend), ("model", model)) if v is not None}
+    if criteria:
+        overrides["criteria"] = [str(f) for f in criteria]
+    if overrides:
+        review_cfg = review_cfg.model_copy(update=overrides)
+    target = resolve_judge(review_cfg, agent_cfg)
+    texts = []
+    for name in review_cfg.criteria:
+        path = Path(name) if Path(name).is_absolute() else Path(repo) / name
+        if not path.is_file():
+            err.print(f"[red]review[/] criteria file missing: {name} (fail-closed)")
+            raise typer.Exit(2)
+        texts.append(path.read_text(encoding="utf-8", errors="replace"))
+    console.print(f"[bold]judge:[/] {target.backend}/{target.model or 'backend default'} "
+                  f"· base {base or 'HEAD~1'}")
+    try:
+        verdict = run_judge(Path(repo), target=target, goal=goal_text,
+                            commit_message="(ad-hoc `loopkit review`)", base=base,
+                            extra_criteria=tuple(texts))
+    except ReviewUnavailable as exc:
+        err.print(f"[red]review unavailable[/] {escape(secrets.redact(str(exc)))}")
+        raise typer.Exit(2)
+    if verdict.raw:
+        console.print(escape(secrets.redact(verdict.raw)))
+    if verdict.passed:
+        console.print(f"[green]VERDICT: APPROVE[/] [dim]· cost ${verdict.cost_usd:.4f}[/]")
+        return
+    console.print(f"[red]VERDICT: REJECT[/] — {escape(secrets.redact(verdict.reason))} "
+                  f"[dim]· cost ${verdict.cost_usd:.4f}[/]")
+    raise typer.Exit(1)
 
 
 @app.command()

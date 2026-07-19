@@ -17,8 +17,9 @@ gate**, three hard stops, durable git state, and a blast-radius safety envelope.
 ```mermaid
 %%{init: {'theme':'base','themeVariables':{'background':'#1b1b1b','primaryColor':'#2b2b2b','primaryTextColor':'#e6e6e6','primaryBorderColor':'#5a5a5a','lineColor':'#8a8a8a','fontSize':'13px'}}}%%
 flowchart LR
-  P["prompt"] --> A["agent"] --> G["guard"] --> C["commit"] --> R["review"] --> I["iteration gate"] --> H["held-out acceptance"] --> D(["DONE"])
+  P["prompt"] --> A["agent"] --> G["guard"] --> C["commit"] --> I["iteration gate"] --> R["review"] --> H["held-out acceptance"] --> D(["DONE"])
   I -- "feedback" --> P
+  R -- "feedback" --> P
   H -- "feedback" --> P
   C --> S["hard stops<br/>budget · no-progress · cap"]
 ```
@@ -147,10 +148,13 @@ strategies share that base:
   best-of-N inflates the top score (the winner's curse), so the kept winner must pass a held-out
   gate it never competed on — Ch 9's lesson applied at the fleet scale.
 
-**Continuous review — `ReviewHook`.** After each commit, a review runs on the fresh diff; a
-clean review is a *precondition for done*. Green tests are not a clean diff — review catches what
-the gate doesn't encode (leftover debug, smells, security), and a failing review feeds its
-findings into the next tick so the agent fixes it while the producing context is fresh.
+**Continuous review — `ReviewHook`.** Behind every *green* iteration gate, a review judges the
+current change; a clean review is a *precondition for done*. Green tests are not a clean diff —
+review catches what the gate doesn't encode (leftover debug, smells, security, gamed tests), and a
+failing review feeds its findings into the next tick so the agent fixes it while the producing
+context is fresh. Verdicts are **sticky per commit**: an unchanged HEAD is never re-billed, and a
+rejected commit stays rejected until the agent actually changes something. With no hook configured
+the loop runs the **built-in default judge** (see `[review]` below) — review is on by default.
 
 **Skill write-back flywheel — `SkillRegistry`.** A solved run is distilled into a named skill,
 rendered back into future runs' prompts, so gains compound. Write-back is **gated, never
@@ -237,18 +241,31 @@ acceptance = "python -m pytest tests/holdout -q"  # held-out — run once before
 protected_paths = ["tests/"]                      # the loop may not touch these
 
 [review]
-command = "bash review-judge.sh"                  # adversarial judge run after each advancing tick
+# Nothing required — with no `command`, the BUILT-IN default judge reviews every plausibly-done
+# tick. Optional overrides:
+# command  = "bash review-judge.sh"   # custom judge instead (exit 0 clean / non-zero problems)
+# backend  = "codex"                  # judge with a different vendor than the coding agent
+# model    = "claude-haiku-4-5"       # cheaper (or stricter) judge model; default: the agent's
+# criteria = ["docs/rubric.md"]       # project rubric layered onto the bundled checklist
 ```
 
-**`[review]` is opt-OUT.** When enabled (`enabled = true`, the default), an adversarial review runs on
-**every** `run` and **every** `batch` task — a clean review (exit 0) is a precondition for DONE, a
-failing one feeds back so the agent self-corrects. This closes the failure mode where an opt-in gate is
-silently *forgotten* and half-fixes/gamed tests ship green. `command` names the judge (point it at an
-LLM judge whose wrapper exits non-zero on problems); leave it unset to use the **built-in default
-judge** (planned — see `docs/default-judge-design`). Turn review off everywhere with `enabled = false`,
-or for a single invocation with `--no-review`; an explicit `run --review <cmd>` (or a manifest
-`review =`) overrides the command. `run` prints the decision (`review: on/off — <reason>`) and
-`loopkit doctor` shows it, so an accidentally-off review is never silent.
+**`[review]` is on by default.** An adversarial review gates DONE on **every** `run` and **every**
+`batch` task — with **zero configuration**: no `command` means the **built-in default judge**
+(`loopkit/extensions/judge.py`, design: `docs/default-judge-design.md`) — a fresh clean-context,
+real-defects-only reviewer of the run's cumulative diff, run only behind a *green* iteration gate so
+no judge tokens are spent on a draft that fails its own checks. It blocks on correctness, security,
+incomplete fixes, gamed/trivially-passing tests, and unrequested contract breaks — style is advisory,
+never blocking. Backend/model derive from `[agent]` (`backend`/`model` override them — judge with
+haiku while coding with opus, or cross-vendor with codex for blind-spot diversity); `criteria` layers
+project rubric files onto the bundled checklist (keep them under `protected_paths`, or preflight
+objects — the agent must not tune its own grader). A judge that cannot run **halts** the run
+(`REVIEW_UNAVAILABLE` — infra failure is not a rejection), and N straight rejections stop it for a
+human (`REVIEW_STALL`, `stops.review_stall_after`). Judge spend counts toward `max_cost_usd`. Run it
+standalone with **`loopkit review`** (exit 0/1/2 — wireable as a `command` itself). Turn review off
+everywhere with `enabled = false`, or per invocation with `--no-review`; an explicit `run --review
+<cmd>` (or a manifest `review =`) overrides. `run` prints the decision (`review: on/off — <reason> ·
+<judge>`) and `loopkit doctor` probes the judge's binary/SDK and pricing, so a broken or
+silently-unpriced judge is caught before a run spends anything.
 
 Every other knob — `[stops]`, the optional second `regression` oracle, `[remote]` sync, `[trace]`,
 gate-stability preflight — is annotated in [`docs/CONTROL-FILES.md`](docs/CONTROL-FILES.md); the

@@ -452,19 +452,30 @@ def make_batch_runner(*, base_config: Config | None = None, open_pr: bool = Fals
                     tlog.info("task.validate_abort", exit=vproc.returncode)
                     return WorkerOutcome(task_id=task_id, branch=branch, reason=VALIDATE_ABORT,
                                          error=secrets.redact(detail) or "validate: non-zero exit")
-            # Review is opt-out: a manifest `review =` wins, else the task's (or base) config
-            # [review] command runs by default — unless --no-review. Log the decision + reason per
-            # task, so a batch that runs unreviewed shows WHY in its log instead of silently skipping.
+            # Review precedence per task: manifest `review =` > the task config's [review] command >
+            # a base-config [review] command > the BUILT-IN default judge — unless --no-review /
+            # enabled=false. The base-config hop matters because a per-task config doesn't inherit
+            # [defaults]: a batch owner who wired one custom judge for every task must keep it, not
+            # be silently repointed at the bundled default. Log the decision + reason per task, so a
+            # batch that runs unreviewed shows WHY in its log instead of silently skipping.
             decision = cfg.review.decide(override=task.get("review"), disabled=no_review)
-            if not decision.on and not no_review and base_config is not None:
-                base = base_config.review.decide()          # a base-config default covers every task
-                if base.on:
-                    decision = ReviewDecision(base.command, "base-config [review] command")
-            tlog.info("review", state="on" if decision.on else "off", reason=decision.reason)
+            if decision.kind == "default" and base_config is not None:
+                base = base_config.review.decide()
+                if base.kind == "command":
+                    decision = ReviewDecision(base.command, "base-config [review] command",
+                                              "command")
+            tlog.info("review", state="on" if decision.on else "off", reason=decision.reason,
+                      kind=decision.kind)
             review_hook = None
-            if decision.command:
+            if decision.kind == "command":
                 from .review import ShellReviewHook
                 review_hook = ShellReviewHook(decision.command)
+            elif decision.kind == "default":
+                # Construct BEFORE run_loop: the hook captures the scratch clone's pre-run HEAD as
+                # the diff fork point.
+                from .judge import DefaultReviewHook
+                review_hook = DefaultReviewHook(cfg.review, cfg.agent, cfg.repo_path(), cfg.goal,
+                                                plan_file=cfg.plan.file)
             agent = agent_factory(task) if agent_factory else build_agent(cfg.agent, executor=executor)
             from ..loop import run_loop
             result = run_loop(cfg, agent, review_hook=review_hook, executor=executor,
