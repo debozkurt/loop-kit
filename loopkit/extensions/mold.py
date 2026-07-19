@@ -152,6 +152,10 @@ class MoldDefaults(BaseModel):
     adapter: str | None = None            # emitted configs' agent (default: detect's pick)
     iteration: str | None = None          # emitted configs' iteration gate (default: detect's pick)
     max_cost_usd: float = 8.0             # per-task budget in emitted configs
+    max_iter: int = 12                    # → [stops].max_iter. A heavyweight-gate repo iterates
+    no_progress_after: int = 4            # → [stops].no_progress_after. slower than a hermetic one, so
+                                          # the emitted pace is a knob, not a constant (defaults = the
+                                          # prior hardcoded values, so unset behaviour is unchanged).
     # Emitted-config knobs a hand-tuned config would carry — mold must not silently drop them.
     agent_args: list[str] | None = None   # → [agent].args. None + claude-code adapter defaults to
                                           # ["--dangerously-skip-permissions"]: a headless `claude -p`
@@ -533,7 +537,8 @@ def _render_task_config(spec: MoldSpec, defaults: MoldDefaults, profile: RepoPro
         f"branch = {j(f'loopkit/{spec.id}')}\n\n"
         f"[agent]\nadapter      = {j(adapter)}\n{agent_args_line}max_cost_usd = {defaults.max_cost_usd}\n\n"
         f"[gate]\niteration  = {j(iteration)}\nacceptance = {j(acceptance)}\n\n"
-        f"[stops]\nmax_iter          = 12\nno_progress_after = 4\n\n"
+        f"[stops]\nmax_iter          = {defaults.max_iter}\n"
+        f"no_progress_after = {defaults.no_progress_after}\n\n"
         f"[safety]\nprotected_paths    = {j(protected)}\n"
         f"require_clean_tree = true\n"
         f"allow_branches     = [\"loopkit/*\"]\n"

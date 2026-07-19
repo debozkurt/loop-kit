@@ -16,6 +16,8 @@ is a judgment task a coding-agent copilot already does well, so we don't build a
 | [`templates/issue.loopkit.toml`](templates/issue.loopkit.toml) | a per-issue molded config skeleton |
 | [`templates/acceptance-dispatcher.sh`](templates/acceptance-dispatcher.sh) | the acceptance gate, chained (has-tests → held-out oracle) |
 | [`templates/acceptance-oracle.sh`](templates/acceptance-oracle.sh) | a held-out oracle runner skeleton (copy-in → run → remove) |
+| [`templates/acceptance-probe.sh`](templates/acceptance-probe.sh) | env-liveness probe skeleton — proves the runner is alive before fail-first is trusted |
+| [`templates/proposer.sh`](templates/proposer.sh) | reference `ShellProposer` for unattended `mold-batch` — fills the oracle + probe via a headless agent (copy + edit the one per-repo gate block) |
 | [`templates/judge-rubric.md`](templates/judge-rubric.md) | per-issue finding-specific REJECT criteria for the review hook |
 | [`templates/worktree.sh`](templates/worktree.sh) | isolate one issue's run on a fresh base (the batch/queue shape) |
 

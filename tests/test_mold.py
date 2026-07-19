@@ -564,6 +564,15 @@ def test_emit_defaults_headless_perms_flag_for_claude_code():
     assert "args         =" not in _render(MoldSpec(id="F-1", goal="g", agent_args=[]))
 
 
+def test_emit_stops_default_unchanged_and_overridable():
+    # Defaults keep the prior hardcoded pace (no behaviour change), but a heavyweight-gate repo can
+    # slow it via [defaults] — stops are a knob now, not a constant.
+    assert "max_iter          = 12\nno_progress_after = 4" in _render(MoldSpec(id="F-1", goal="g"))
+    slow = _render(MoldSpec(id="F-1", goal="g"),
+                   defaults=MoldDefaults(max_iter=30, no_progress_after=8))
+    assert "max_iter          = 30\nno_progress_after = 8" in slow
+
+
 def test_emit_pr_base_is_default_branch_never_silently_main():
     cfg = _render(MoldSpec(id="F-1", goal="g"))
     assert '[remote]\npr_base = "develop"' in cfg          # detect's default branch, not "main"
@@ -690,6 +699,30 @@ def test_state_written_incrementally_per_task(tmp_path):
                proposer=ShellProposer(_proposer_script(tmp_path)), run_gate=watcher)
     assert 1 in seen                                      # 'a' was persisted before 'b' ran (incremental)
     assert set(json.loads((out / "state.json").read_text())["tasks"]) == {"a", "b"}
+
+
+def test_reference_proposer_template_molds_a_task(tmp_path, monkeypatch):
+    # The shipped examples/molding/templates/proposer.sh is what a new repo copies — prove it actually
+    # drives a task to VERIFIED (fills run.sh + probe.sh, passes its own validation + the synth-gate),
+    # not just that it parses. A fake `claude` on PATH stands in for the headless agent (no tokens).
+    template = Path(__file__).resolve().parents[1] / "examples/molding/templates/proposer.sh"
+    assert template.is_file(), "reference proposer template missing"
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    (bindir / "claude").write_text(
+        "#!/usr/bin/env bash\n"
+        "cat >/dev/null\n"                                # consume the prompt on stdin
+        "printf '#!/usr/bin/env bash\\nexit 1\\n' > \"$MOLD_ORACLE_DIR/run.sh\"\n"   # fails first
+        "printf '#!/usr/bin/env bash\\ntrue\\n' > \"$MOLD_PROBE_FILE\"\n"            # env alive
+        "echo 'PROPOSED: reference'\n")
+    (bindir / "claude").chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bindir}:{__import__('os').environ['PATH']}")
+
+    repo = _seed_repo(tmp_path / "repo")
+    m = load_mold_manifest(_mold_manifest(tmp_path, '[[task]]\nid = "a"\ngoal = "x"\n', repo))
+    result = mold_batch(m, tmp_path / "out", level="oracle", timestamp=TS,
+                        proposer=ShellProposer(f"bash {template}"))
+    assert result.rows[0].status == VERIFIED             # the canonical template molds end-to-end
 
 
 def test_proposer_timeout_default_and_override():
