@@ -145,6 +145,16 @@ class ReviewConfig(BaseModel):
 
     command: str | None = None            # the review/judge shell command; None = use the built-in judge (once wired)
     enabled: bool = True                  # master switch; false = review off everywhere
+    # Built-in judge identity (extensions/judge.py). Unset = inherit from [agent]: backend from
+    # `adapter`, model from `model` (same-vendor only — a cross-vendor backend override gets that
+    # backend's own default), use_api_key tri-state (None = inherit). `criteria` layers project
+    # rubric file(s) onto the bundled checklist; keep them under safety.protected_paths so the
+    # author can't tune its own grader.
+    backend: str | None = None            # judge backend override; None = [agent].adapter
+    model: str | None = None              # judge model override; None = [agent].model (same vendor)
+    args: list[str] = Field(default_factory=list)   # extra CLI flags for a CLI judge backend
+    use_api_key: bool | None = None       # claude-code billing override; None = [agent].use_api_key
+    criteria: list[str] = Field(default_factory=list)  # rubric files appended to the bundled prompt
 
     def decide(self, override: str | None = None, disabled: bool = False) -> ReviewDecision:
         """Resolve the effective review command AND a reason. Precedence (unchanged from the original

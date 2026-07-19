@@ -21,10 +21,27 @@ if TYPE_CHECKING:                                  # typing-only: avoids a gate�
 class GateResult:
     passed: bool
     feedback: str | None = None    # diagnostics on failure, to feed into the next tick
+    # Dollar cost of producing this result, when the check itself billed a model call (the built-in
+    # review judge does; shell gates don't). Additive + 0.0-default so every existing construction
+    # site and duck-typed hook is untouched; the loop folds it into the run's cost so the budget
+    # ceiling sees judge spend the same tick it happens.
+    cost_usd: float = 0.0
 
 
 class Gate(Protocol):
     def check(self, workspace: Path) -> GateResult: ...
+
+
+class ReviewUnavailable(RuntimeError):
+    """The review judge could not render a verdict — infrastructure failure, NOT a rejection.
+
+    Raised for a missing/unauthenticated backend binary, an SDK/key problem, a timeout, or output
+    with no parseable verdict. Deliberately distinct from a REJECT verdict: a rejection feeds back
+    to the agent as something to fix, while this halts the run (StopReason.REVIEW_UNAVAILABLE) —
+    feeding "the judge is broken" to the coding agent would burn the iteration cap on a phantom
+    defect, at two model calls a tick. Defined in core (not extensions/) so the loop can catch it
+    without a runtime dependency on the extension that raises it.
+    """
 
 
 class ShellGate:
