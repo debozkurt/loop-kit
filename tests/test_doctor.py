@@ -68,3 +68,22 @@ def test_doctor_no_gate_skips_running_the_gate(git_repo: Path):
     p = _doctor_config(git_repo, "loopkit-no-such-cmd-xyz")
     out = _norm(runner.invoke(app, ["doctor", "-c", str(p), "--no-gate"]).output)
     assert "gate verdict" not in out and "looks broken" not in out
+
+
+def test_doctor_review_default_shows_builtin_judge_and_probe(git_repo: Path):
+    # Review on-by-default: with no [review] command the row names the BUILT-IN judge (never a
+    # bare "on"), warns that it bills a model call, and a judge row probes the resolved backend —
+    # a mock agent derives the mock judge, which needs nothing.
+    p = _doctor_config(git_repo, "false")
+    out = _norm(runner.invoke(app, ["doctor", "-c", str(p)]).output)
+    assert "built-in judge" in out and "mock" in out
+    assert "model call" in out                     # the per-tick spend is announced, never silent
+    assert "auto-approve" in out                   # the judge probe row for the mock backend
+
+
+def test_doctor_custom_review_command_shows_the_command(git_repo: Path):
+    p = _doctor_config(git_repo, "false")
+    toml = p.read_text() + '\n[review]\ncommand = "bash my-judge.sh"\n'
+    p.write_text(toml)
+    out = _norm(runner.invoke(app, ["doctor", "-c", str(p)]).output)
+    assert "my-judge.sh" in out and "built-in judge" not in out

@@ -313,3 +313,36 @@ def test_hook_criteria_file_rides_into_prompt(git_repo: Path):
 
 def test_gate_result_cost_defaults_to_zero():
     assert GateResult(True).cost_usd == 0.0                      # additive field, nothing breaks
+
+
+# ---------------------------------------------------------------- preflight — grader integrity
+
+def _preflight_config(repo: Path, criteria: list[str], protected: list[str]):
+    from loopkit.config import Config, GateConfig, SafetyConfig
+    return Config(goal="g", repo=str(repo), branch="loopkit/test",
+                  gate=GateConfig(iteration="true"),
+                  review=ReviewConfig(criteria=criteria),
+                  safety=SafetyConfig(protected_paths=protected))
+
+
+def test_preflight_flags_unprotected_criteria(git_repo: Path):
+    # A repo-relative rubric the agent can edit = the agent can tune its own grader. Same
+    # verifier-hacking rule that guards the acceptance gate; same consequence (preflight problem).
+    from loopkit.safety import preflight
+    pf = preflight(_preflight_config(git_repo, ["rubric/judge.md"], []))
+    assert not pf.ok and any("tune its own grader" in p for p in pf.problems)
+
+
+def test_preflight_accepts_protected_criteria(git_repo: Path):
+    from loopkit.safety import preflight
+    pf = preflight(_preflight_config(git_repo, ["rubric/judge.md"], ["rubric/"]))
+    assert pf.ok
+
+
+def test_preflight_exempts_criteria_outside_the_repo(git_repo: Path, tmp_path: Path):
+    # An absolute path outside the repo isn't agent-committable — the guard model is repo-scoped,
+    # matching how out-of-repo oracle files are trusted (mold's acceptance/ dir).
+    from loopkit.safety import preflight
+    outside = tmp_path / "elsewhere" / "rubric.md"
+    pf = preflight(_preflight_config(git_repo, [str(outside)], []))
+    assert pf.ok

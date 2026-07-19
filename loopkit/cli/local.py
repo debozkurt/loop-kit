@@ -133,6 +133,7 @@ def doctor(config: Path = typer.Option(DEFAULT_CONFIG, "--config", "-c"),
         table.add_row("review", "[green]on[/]",
                       escape(f"{_review_detail(review, cfg)} — a review model call per "
                              "plausibly-done tick (--no-review opts out)"))
+        _doctor_judge(table, cfg)          # is the judge runnable here, and will its spend price?
     elif review.on:
         table.add_row("review", "[green]on[/]", escape(review.command))
     else:
@@ -211,6 +212,44 @@ def _doctor_agent(table: Table, cfg: Config) -> None:
             table.add_row("agent", "[yellow]no key[/]", f"{env} not set")
     else:
         table.add_row("agent", "[red]unknown[/]", f"unknown adapter {adapter!r}")
+
+
+def _doctor_judge(table: Table, cfg: Config) -> None:
+    """Is the built-in judge actually runnable here — and will its spend be priced?
+
+    Mirrors `_doctor_agent`, but for the JUDGE's resolved backend, which a `[review] backend`
+    override can point at a different binary and a different credential than the agent's. Also
+    flags an unpriced judge model: `estimate_cost` returns 0.0 for models missing from the price
+    table, so an unpriced judge spends invisibly to the budget ceiling (warn-and-run, by design).
+    """
+    from ..extensions.judge import resolve_judge
+    target = resolve_judge(cfg.review, cfg.agent)
+    if target.backend == "mock":
+        table.add_row("judge", "[green]ok[/]", "mock (auto-approve, no model call)")
+        return
+    if target.backend in _CLI_BINARIES:
+        binary = _CLI_BINARIES[target.backend]
+        found = shutil.which(binary)
+        status = "[green]ok[/]" if found else "[red]missing[/]"
+        detail = found or (f"{binary} not on PATH — the run halts REVIEW_UNAVAILABLE at the "
+                           f"first verdict")
+        if found and target.backend == "claude-code":
+            detail = f"{found} · {_claude_code_auth_note(cfg)}"
+    elif target.backend in _API_REQUIREMENTS:
+        pkg, env, extra = _API_REQUIREMENTS[target.backend]
+        have_sdk = importlib.util.find_spec(pkg) is not None
+        status = "[green]ok[/]" if have_sdk else "[red]missing[/]"
+        detail = (f"{target.backend} SDK present" if have_sdk
+                  else f"{pkg} SDK not installed (pip install 'loopkit[{extra}]')")
+    else:
+        table.add_row("judge", "[red]unknown[/]", f"unknown judge backend {target.backend!r}")
+        return
+    model = target.model or DEFAULT_MODELS.get(target.backend)
+    if pricing.known_model(model):
+        detail += f" · model {model}"
+    else:
+        detail += " · [yellow]model unpriced — judge spend won't count toward max_cost_usd[/]"
+    table.add_row("judge", status, detail)
 
 
 def _doctor_budget(table: Table, cfg: Config) -> None:
@@ -443,8 +482,16 @@ def run(config: Path = typer.Option(DEFAULT_CONFIG, "--config", "-c"),
         from ..extensions.review import ShellReviewHook
         review_hook = ShellReviewHook(decision.command)
     elif decision.kind == "default":
+        from ..extensions.judge import DefaultReviewHook, resolve_judge
+        # Probe the judge binary NOW: with review behind the green gate, a missing backend would
+        # otherwise surface only at the first plausibly-done tick — after the agent has already
+        # billed real work — as a REVIEW_UNAVAILABLE halt.
+        target = resolve_judge(cfg.review, cfg.agent)
+        if target.backend in _CLI_BINARIES and shutil.which(_CLI_BINARIES[target.backend]) is None:
+            fail("review", f"judge backend '{_CLI_BINARIES[target.backend]}' not on PATH and review "
+                           "is on by default — fix PATH, set [review] backend/command, or pass "
+                           "--no-review.")
         # Construct BEFORE run_loop: the hook captures the repo's pre-run HEAD as the diff fork point.
-        from ..extensions.judge import DefaultReviewHook
         review_hook = DefaultReviewHook(cfg.review, cfg.agent, cfg.repo_path(), cfg.goal,
                                         plan_file=cfg.plan.file)
     skills_registry = None
