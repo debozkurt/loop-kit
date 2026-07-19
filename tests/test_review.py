@@ -10,7 +10,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from loopkit.agent import MockAgent
-from loopkit.config import AgentConfig, Config, GateConfig, StopsConfig
+from loopkit.config import AgentConfig, Config, GateConfig, ReviewConfig, StopsConfig
 from loopkit.extensions.review import CallableReviewHook, ShellReviewHook
 from loopkit.gate import CallableGate, GateResult
 from loopkit.loop import run_loop
@@ -116,6 +116,23 @@ def test_review_runs_when_agent_self_commits(git_repo: Path):
                       iteration_gate=gate, acceptance_gate=gate, review_hook=CountingReview())
     assert result.reason is StopReason.DONE
     assert len(seen) == 1          # review fired despite loopkit's own commit being a no-op
+
+
+def test_review_config_resolution():
+    # No default command: nothing runs unless an explicit override (CLI --review / manifest) is given.
+    off = ReviewConfig()
+    assert off.resolved() is None
+    assert off.resolved(override="cmd.sh") == "cmd.sh"
+    # Default command + enabled: runs BY DEFAULT (opt-out). Override wins; --no-review disables.
+    on = ReviewConfig(command="judge.sh")
+    assert on.resolved() == "judge.sh"                         # default-on
+    assert on.resolved(override="other.sh") == "other.sh"     # explicit override wins
+    assert on.resolved(disabled=True) is None                 # --no-review beats the default
+    assert on.resolved(override="other.sh", disabled=True) is None   # ...and beats an override too
+    # enabled=false disables the DEFAULT, but an explicit override still works.
+    disabled = ReviewConfig(command="judge.sh", enabled=False)
+    assert disabled.resolved() is None
+    assert disabled.resolved(override="explicit.sh") == "explicit.sh"
 
 
 def test_shell_review_hook_passes_clean_and_fails_dirty(tmp_path: Path):

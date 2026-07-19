@@ -50,3 +50,13 @@ forbid_branches = ["main", "master"]
 # pr_base  = "main"                        # the base branch the PR/MR targets
 # draft    = true                          # open it as a draft — a human reviews + merges
 # One-run alternative (no block needed): `loopkit run --open-pr` flips enabled+open_pr for a single run (the CI tier).
+
+# [review] — continuous adversarial review (Ch 8). Set `command` and it runs after EVERY advancing tick,
+# on every `run` AND every `batch` task, BY DEFAULT (opt-out): a clean review (exit 0) is a precondition
+# for DONE; a failing one's output feeds back so the agent fixes it next tick. This is the guard against
+# an opt-in gate being silently forgotten (the way half-fixes and gamed tests ship green). Point it at an
+# adversarial LLM judge whose wrapper exits non-zero when it finds problems. Disable per invocation with
+# `--no-review`, or here with `enabled = false`; `run --review <cmd>` / a manifest `review =` overrides it.
+# [review]
+# command = "bash review-judge.sh"           # the judge/review shell command — non-zero exit blocks DONE
+# enabled = true                             # false disables the default even when a command is set

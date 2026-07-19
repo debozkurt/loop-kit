@@ -66,6 +66,9 @@ def batch(tasks_file: Path = typer.Option(..., "--tasks", "-t",
           open_pr: bool = typer.Option(False, "--open-pr",
                                        help="Enable push + draft PR for every task (overrides each "
                                             "config's [remote]), exactly like `run --open-pr`."),
+          no_review: bool = typer.Option(False, "--no-review",
+                                         help="Disable the review gate for every task, even where a "
+                                              "[review] command / manifest review is configured."),
           dry_run: bool = typer.Option(False, "--dry-run",
                                        help="Resolve configs + goals and print the schedule; run nothing."),
           resume: bool = typer.Option(False, "--resume",
@@ -144,7 +147,8 @@ def batch(tasks_file: Path = typer.Option(..., "--tasks", "-t",
 
     # artifacts_dir = the manifest's own directory, so each task's durable `<task>.activity.jsonl`
     # lands next to the journal (a persistent location, not the rmtree'd per-task worktree).
-    runner = make_batch_runner(base_config=base_cfg, open_pr=open_pr, artifacts_dir=manifest_dir)
+    runner = make_batch_runner(base_config=base_cfg, open_pr=open_pr, artifacts_dir=manifest_dir,
+                               no_review=no_review)
     result: BatchResult = run_batch(specs, runner, jobs=jobs, defaults=manifest.defaults,
                                     timeout=timeout, journal=journal, preloaded=preloaded,
                                     on_finish=progress)
