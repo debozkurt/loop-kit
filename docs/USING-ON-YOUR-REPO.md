@@ -192,7 +192,8 @@ to start.
 # batch.toml — [defaults] + one [[task]] per piece of work
 [defaults]
 config = "base.loopkit.toml"        # tasks without their own config inherit this one
-review = "bash gate/llm-judge.sh"   # optional: a per-tick judge for EVERY task (run --review)
+review = "bash gate/llm-judge.sh"   # optional: REPLACE the built-in default judge for EVERY task
+                                    # (review is on by default — this swaps the judge, not enables it)
 
 [[task]]
 id = "clamp-limit"
@@ -247,7 +248,8 @@ before spending a token. Set `validate = ""` to opt a task out.
 
 Solid = the mechanical path every task takes. Dotted = optional or advisory: the proposer (skip it
 and FILL the skeletons by hand), the reliability report (skip it and route says "uncalibrated"),
-overlap (analysis, never a gate), the judge (add one when the diff deserves adversarial review),
+overlap (analysis, never a gate), the judge *override* (the built-in judge reviews every task by
+default; the dotted command swaps in your own),
 and the journal (always written; consulted only by `--resume`). The honest stops are first-class:
 a task the kit can't verify goes to `state.json` and retries next run — it never fakes judgment.
 
@@ -275,9 +277,10 @@ flowchart LR
 ```
 
 The core loop each task runs is the README's own diagram — prompt → agent → guard → commit →
-review → gates → DONE — unchanged; molding only *supplies* its quality policy: the blessed oracle
-becomes the held-out acceptance gate, the derived `! oracle` check guards entry, and the judge (if
-configured) rides the review hook with the molded goal as its rubric.
+iteration gate → review → acceptance → DONE — unchanged; molding only *supplies* its quality
+policy: the blessed oracle becomes the held-out acceptance gate, the derived `! oracle` check
+guards entry, and the review hook carries the built-in default judge (or a configured judge
+command, with the molded goal as its rubric).
 
 ### Which tasks will collide? (`loopkit overlap`)
 

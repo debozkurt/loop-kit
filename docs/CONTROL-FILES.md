@@ -27,7 +27,7 @@ branch = "loopkit/run"                                  # the loop's own branch 
 
 [agent]
 adapter      = "claude-code"     # mock | claude-code | codex | claude-api | openai-api
-max_cost_usd = 5.0               # budget ceiling (the loop halts here regardless of progress)
+max_cost_usd = 5.0               # budget ceiling (halts here regardless of progress; default 10.0)
 use_api_key  = false             # claude-code: false = bill your SUBSCRIPTION (an ambient
                                  # ANTHROPIC_API_KEY is withheld); true (or `run --api-key`) = bill the
                                  # API key. `loopkit doctor` prints which path is active before a run.
@@ -46,11 +46,13 @@ acceptance = "pytest tests/holdout -q"     # held-out — the honest "done" chec
 regression = "pytest tests/regression -q"  # optional second oracle — previously-passing stays green
 
 [stops]
-max_iter          = 20           # hard cap
+max_iter          = 20           # hard cap (default 30)
 no_progress_after = 3            # halt if N ticks change nothing
 plan_stall_after  = 6            # plan mode only: halt if N ticks complete no checklist item
                                  # (no_progress watches the git tree, which a churning plan-mode
                                  # agent keeps changing; this watches the done-count). Keep < max_iter.
+review_stall_after = 4           # halt after N consecutive review REJECTs (an APPROVE resets) —
+                                 # the judge keeps refusing, a human should look.
 
 [safety]
 protected_paths = ["tests/"]     # the loop may not touch these (so it can't game its gates)
@@ -60,9 +62,19 @@ gate_stability_runs = 0          # >=2 → run the iteration gate N× on the ini
                                  #        to start unless every run agrees (a flaky gate corrupts the
                                  #        stop oracle, Ch 9). 0/1 = skip. `run --check-gate N` overrides.
 
+[review]                         # adversarial review — ON BY DEFAULT, zero config needed
+# command  = "bash review.sh"    # unset → the BUILT-IN judge reviews every plausibly-done tick;
+                                 # set it only to replace that judge with your own (exit 0 = clean)
+# criteria = ["docs/rubric.md"]  # project rubric layered onto the bundled checklist — keep rubric
+                                 # files under protected_paths (the agent must not tune its grader)
+# enabled  = false               # the only all-off switch (per run: --no-review)
+
 [remote]                         # the outward edge — all off by default
 enabled = false                  # nothing pushes unless true
 open_pr = false
+
+# [trace]                        # optional LangSmith tracing — auto-on when the [trace] extra +
+# project = "my-project"         # a LangSmith key are present; clean no-op otherwise
 ```
 
 **Why a single file:** a typo becomes a clear validation error up front (pydantic), not a confusing
@@ -143,6 +155,10 @@ You don't have to use pytest or this layout — the gates are just shell command
 `gate.acceptance`). Any command that exits 0 on pass works: `npm test`, `go test ./...`, a linter, a
 custom script. The held-out discipline is what matters, not the tool.
 
+The gates aren't the only precondition for DONE: with review on (the default — see `[review]`
+above), a clean adversarial review of the cumulative diff is required too. The judge catches what
+the gates don't encode — gamed tests, leftover debug, security smells, unrequested contract breaks.
+
 ---
 
 ## `<skill>.md` — the write-back flywheel
@@ -171,7 +187,7 @@ skills dir like you'd curate docs: a bad skill is worse than no skill.
 ## Putting it together — the steering hierarchy
 
 ```
-loopkit.toml        →  the rules of the game (gates, stops, safety, remote)
+loopkit.toml        →  the rules of the game (gates, stops, safety, review, remote)
 PROMPT.md           →  THIS task          (changes per goal)
 CLAUDE.md/AGENTS.md →  EVERY task's rules  (stable per repo)
 tests/holdout/      →  what "done" means   (the honest grader)

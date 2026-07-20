@@ -11,7 +11,7 @@ adapter = "claude-code"                    # mock | claude-code | codex | claude
 # claude-code bills your SUBSCRIPTION by default (an ambient ANTHROPIC_API_KEY is withheld). Opt into
 # the billed API key with `run --api-key` or `use_api_key = true`. `loopkit doctor` shows which.
 # use_api_key = false
-max_cost_usd = 5.0                         # budget ceiling (Ch 14) — size for a few ticks (author + acceptance + a fix-tick), not one
+max_cost_usd = 5.0                         # budget ceiling (Ch 14; default 10.0) — size for a few ticks (author + acceptance + a fix-tick), not one
 max_tool_calls = 25
 # args = ["--dangerously-skip-permissions"]  # headless claude-code: the gates are the safety, not prompts
 
@@ -26,17 +26,18 @@ acceptance = "python -m pytest tests/holdout -q"   # the HELD-OUT gate (Ch 9) �
 # regression = "python -m pytest tests/seen -q"    # optional 2nd held-out oracle: don't break what worked
 
 [stops]
-max_iter = 12                              # hard iteration cap (Ch 13)
+max_iter = 12                              # hard iteration cap (Ch 13; default 30)
 no_progress_after = 3                      # halt if the tree hasn't changed for N ticks
-# gate_stability_runs = 5                  # preflight: run the iteration gate N× on the unchanged tree;
-                                           # refuse to start if the verdict isn't unanimous (a flaky gate
-                                           # corrupts every stop decision). Or per-run: `run --check-gate 5`.
+# review_stall_after = 4                   # halt after N consecutive review REJECTs (an APPROVE resets)
 
 [safety]
 protected_paths = ["tests/", "gate/"]      # the loop may NOT touch these — guards the VERIFIER (Ch 9, 16)
 require_clean_tree = true                  # refuse to start on uncommitted changes (durability needs it)
 allow_branches = ["loopkit/*"]
 forbid_branches = ["main", "master"]
+# gate_stability_runs = 5                  # preflight: run the iteration gate N× on the unchanged tree;
+                                           # refuse to start if the verdict isn't unanimous (a flaky gate
+                                           # corrupts every stop decision). Or per-run: `run --check-gate 5`.
 
 # [remote] — the OUTWARD edge (Ch 16), opt-in. After a run reaches DONE, push the loop's branch and
 # (optionally) open a draft PR/MR. OFF unless you uncomment AND set enabled = true — nothing leaves your
@@ -51,12 +52,21 @@ forbid_branches = ["main", "master"]
 # draft    = true                          # open it as a draft — a human reviews + merges
 # One-run alternative (no block needed): `loopkit run --open-pr` flips enabled+open_pr for a single run (the CI tier).
 
-# [review] — continuous adversarial review (Ch 8). Set `command` and it runs after EVERY advancing tick,
-# on every `run` AND every `batch` task, BY DEFAULT (opt-out): a clean review (exit 0) is a precondition
-# for DONE; a failing one's output feeds back so the agent fixes it next tick. This is the guard against
-# an opt-in gate being silently forgotten (the way half-fixes and gamed tests ship green). Point it at an
-# adversarial LLM judge whose wrapper exits non-zero when it finds problems. Disable per invocation with
-# `--no-review`, or here with `enabled = false`; `run --review <cmd>` / a manifest `review =` overrides it.
+# [review] — continuous adversarial review (Ch 8). ON BY DEFAULT with ZERO config: with no `command`,
+# the BUILT-IN judge reviews every plausibly-done tick (only behind a green iteration gate) and a clean
+# review is a precondition for DONE; a failing one's output feeds back so the agent fixes it next tick.
+# This is the guard against half-fixes and gamed tests shipping green. Judge spend counts toward
+# max_cost_usd. Disable per invocation with `--no-review`, or here with `enabled = false`;
+# `run --review <cmd>` / a manifest `review =` overrides.
 # [review]
-# command = "bash review-judge.sh"           # the judge/review shell command — non-zero exit blocks DONE
-# enabled = true                             # false disables the default even when a command is set
+# command  = "bash review-judge.sh"          # REPLACE the built-in judge with your own — non-zero exit blocks DONE
+# backend  = "codex"                         # judge with a different vendor than the coding agent (blind-spot diversity)
+# model    = "claude-haiku-4-5"              # cheaper (or stricter) judge model; default: the agent's
+# criteria = ["docs/rubric.md"]              # project rubric layered onto the bundled checklist — keep it under
+#                                            # protected_paths (the agent must not tune its own grader)
+# enabled  = true                            # false turns review off everywhere, built-in judge included
+
+# [trace] — optional LangSmith tracing (pip install 'loopkit[trace]'). Auto-on when the extra + a
+# LangSmith key are present; clean no-op otherwise.
+# [trace]
+# project = "my-project"                     # LangSmith project name (falls back to env, then "loopkit")

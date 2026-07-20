@@ -38,8 +38,9 @@ pip install -e ".[dev]"        # or: pip install -e .
 ```
 
 The core is just `typer + rich + pydantic`. Everything heavy is an optional extra, imported lazily:
-`[claude]`/`[openai]` (the API-adapter SDKs), `[trace]` (LangSmith tracing), `[fleet]` (Redis).
-`pip install loopkit` pulls none of them; `[agents]` = both API SDKs, `[all]` = everything.
+`[claude]`/`[openai]` (the API-adapter SDKs), `[trace]` (LangSmith tracing), `[fleet]` (Redis),
+`[cloud]` (kubernetes). `pip install loopkit` pulls none of them; `[agents]` = both API SDKs,
+`[all]` = everything.
 
 ## Quickstart — from zero to a merged fix
 
@@ -406,7 +407,9 @@ extend the image for your stack. See the Dockerfile.
 
 ## Command reference
 
-Everything `loopkit` exposes. Run any command with `--help` for the live version.
+The everyday commands. The **full surface** — including `detect`, `review`, `measure`, `route`,
+`synth-gate`, `batch`/`overlap`/`mold-batch`, `executor`, and the `loopkit cloud` tier — is tabulated
+in [`docs/AI-PRIMER.md`](docs/AI-PRIMER.md#command-surface); `loopkit --help` is the live version.
 
 ### Core — one loop
 
@@ -502,7 +505,7 @@ Nav and setup are in [Where to go](#where-to-go) above; these are the day-to-day
 ## Develop
 
 ```bash
-pip install -e ".[dev]"          # core + pytest + fakeredis + truststore;  add [fleet]/[claude]/[openai]/[trace] as needed
+pip install -e ".[dev]"          # core + pytest + fakeredis + truststore;  add [fleet]/[claude]/[openai]/[trace]/[cloud] as needed
 pytest -q                        # MockAgent + injected fakes; no agent binary, no SDK keys, no tokens
 ```
 

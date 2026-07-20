@@ -37,7 +37,7 @@ tick.progress phase=agent elapsedSec=20
 tick.progress phase=iteration_gate elapsedSec=40
 ```
 
-`phase` is `agent` / `iteration_gate` / `acceptance_gate` / `regression_gate`. Truly stuck = no new
+`phase` is `agent` / `iteration_gate` / `review` / `acceptance_gate` / `regression_gate`. Truly stuck = no new
 `[loopkit][agent]` lines **and** no heartbeat **and** no new commits for a long time → `Ctrl-C` (you
 lose at most the current tick; prior ticks are committed) and re-run to resume. From a second terminal,
 stay **read-only** — never mutate a live run's repo: `pgrep -lf 'claude -p'` (agent alive),
@@ -96,17 +96,16 @@ Same loop body in every tier; only *where you read it* differs:
   agent step. `agent.say`/`agent.think` carry the model's **thoughts verbatim** and `agent.tool` carries
   the **target file/command**, so these lines are **not** ship-safe by default — that's a deliberate
   operator trade for live, readable visibility (secrets are still redacted). To go back to payload-free
-  logs, pin `[agent] args = ["--output-format", "json"]` in `loopkit.toml` (or `--output-format json` on
-  `run`): that reverts claude-code to the quiet buffered path — you lose the live step stream but the
-  logs are shippable again.
+  logs, pin `[agent] args = ["--output-format", "json"]` in `loopkit.toml`: that reverts claude-code
+  to the quiet buffered path — you lose the live step stream but the logs are shippable again.
 - **Traces (optional, full detail):** install `loopkit[trace]` + set `LANGSMITH_API_KEY` and every run
   emits a span tree (run → tick → agent → llm/tool → gate) with the human-readable I/O + per-span cost.
   `doctor` shows whether tracing is on.
 - **Durable activity artifact (batch):** the raw event stream persisted to disk — see below.
 
 Key events to watch: `run.start` · `agent.invoke` · `agent.think`/`agent.say`/`agent.tool` ·
-`tick.progress` · `agent.done` · `tick.commit` · `gate.iteration`/`gate.acceptance` · `run.done` or
-`loop.halt reason=…`.
+`tick.progress` · `agent.done` · `tick.commit` · `gate.iteration`/`gate.review`/`gate.acceptance` ·
+`run.done` or `loop.halt reason=…`.
 
 ## The durable activity artifact (`loopkit batch`)
 

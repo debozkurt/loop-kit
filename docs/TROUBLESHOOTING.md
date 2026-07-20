@@ -80,6 +80,23 @@ defense (Ch 9): the loop may not edit its own grader.
   See [`OPERATING.md`](OPERATING.md) → "Never touch the working tree of a live run". No harm done (the
   tick was reverted, `main` untouched); just re-run.
 
+## `reason: review_unavailable` (the judge can't run)
+
+Review is **on by default**, and a judge that cannot run **halts the run** — an infra failure is not
+a verdict, so the loop refuses to declare DONE unreviewed rather than silently skipping the check.
+`loopkit doctor` → the judge row tells you why before you spend anything: judge binary not on PATH /
+SDK or key missing, or the judge model is unpriced (its spend couldn't count toward the budget).
+Fix the judge's setup, point `[review].backend`/`model` at one that works — or consciously turn
+review off (`--no-review`, or `[review] enabled = false`).
+
+## `reason: review_stall` (the judge keeps rejecting)
+
+The judge rejected `stops.review_stall_after` **consecutive fresh commits** (default 4; an APPROVE
+resets the count). Not a bug — the safety machinery concluding the agent isn't converging on a clean
+diff, so a human should look. Read the last review feedback in the log (`gate.review.rejected`), or
+re-run the judge standalone with `loopkit review` to see the current findings; then tighten the
+goal/prompt (or the `[review].criteria` rubric), or finish the contested part by hand and re-run.
+
 ## `preflight: working tree is dirty`
 
 `doctor`/`run` refuses to start on uncommitted changes — the loop commits every tick and can't tell its

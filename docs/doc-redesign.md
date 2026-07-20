@@ -103,6 +103,9 @@ also the densest truth-map for humans in a hurry — not a robots-only artifact.
   `how-to/` recipes.
 - Phase-2 gotcha worth keeping: the README/example-toml show *illustrative* values
   (`max_cost_usd = 5.0`, `max_iter = 12`) that differ from `config.py` defaults (10.0, 30) — any
-  generated config reference must source `config.py`, and `examples/gates/loopkit.example.toml`'s
-  `[review]` comment still predates the built-in default judge (fix in Phase 3's config unification).
+  generated config reference must source `config.py`. (A 2026-07-19 docs sweep annotated the code
+  defaults inline, fixed the example toml's stale pre-default-judge `[review]` block + a
+  `gate_stability_runs`-under-`[stops]` placement bug, and purged the review-as-opt-in framing from
+  CONTROL-FILES / USING / OPERATING / gates-README — including two diagrams that showed review
+  running *before* the iteration gate, contradicting `loop.py`.)
 - Convention reminder: loopkit design/state lives in this repo (not spacer memory); spacer keeps only a pointer.

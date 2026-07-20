@@ -14,7 +14,7 @@ references** (design records + current-phase resume doc).
 | Doc | When |
 |---|---|
 | [`USING-ON-YOUR-REPO.md`](USING-ON-YOUR-REPO.md) | point loopkit at your own repo, end to end |
-| [`../examples/`](../examples/) | the four runnable example dirs, mapped (walkthrough · demo-repo · gates · CI) |
+| [`../examples/`](../examples/) | the seven example dirs, mapped (walkthrough · demo-repo · gates · CI · molding · evolve · skills) |
 | [`../examples/walkthrough/`](../examples/walkthrough/) | **copy-this-run-it-see-DONE** on the bundled demo repo |
 | [`CONTROL-FILES.md`](CONTROL-FILES.md) | every `loopkit.toml` / `PROMPT.md` knob, annotated |
 | [`../examples/gates/`](../examples/gates/) | gates are *any shell command* — ready-to-copy two-oracle kits (test + docs + LLM-review) |

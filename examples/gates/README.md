@@ -46,8 +46,9 @@ acceptance = "python -m pytest tests/holdout -q"
 > **Determinism matters for the *iteration* gate.** It runs every tick, so a flaky verdict corrupts
 > every stop decision — an LLM-judged check therefore never belongs in the iteration gate. Put it
 > where its nondeterminism is harmless: the **acceptance** oracle for a one-shot certifier (run once),
-> or the **review hook** for per-tick feedback (`--review` — see "Gate vs. review hook" below). Probe
-> stability before trusting a gate: `loopkit run --check-gate 5`.
+> or the **review hook** for per-tick feedback (on by default via the built-in judge; `--review`
+> swaps in your own — see "Gate vs. review hook" below). Probe stability before trusting a gate:
+> `loopkit run --check-gate 5`.
 
 > **Calibrate a gate before you trust it.** Determinism isn't enough — a gate also has to *discriminate*.
 > Run it on a known-**good** tree (it must pass) and a deliberately-**broken** one (it must fail) before
@@ -108,19 +109,22 @@ differently:
 - As the **acceptance gate** (`acceptance = "bash gate/review.sh"`) — runs **once**, after the
   iteration gate passes, as the held-out oracle. Nondeterministic, so it belongs here, never as the
   per-tick iteration gate.
-- As the **review hook** (`run --review "bash gate/review.sh"`) — runs **after every tick's commit**,
-  *before* the gates. A non-zero verdict blocks DONE and its reasons feed back as the next tick's
-  input, so the agent fixes review findings while the producing context is still fresh.
+- As the **review hook** — runs on every tick whose **iteration gate is green** (no judge tokens are
+  spent on a draft that fails its own checks). A non-zero verdict blocks DONE and its reasons feed
+  back as the next tick's input, so the agent fixes review findings while the producing context is
+  still fresh. **This wiring is on by default**: with nothing configured, the built-in judge fills
+  it; `run --review "bash gate/review.sh"` (or `[review].command`) swaps in your own judge, and
+  `--no-review` / `[review] enabled = false` turns it off.
 
 ```mermaid
 %%{init: {'theme':'base','themeVariables':{'background':'#1b1b1b','primaryColor':'#2b2b2b','primaryTextColor':'#e6e6e6','primaryBorderColor':'#5a5a5a','lineColor':'#8a8a8a','fontSize':'13px'}}}%%
 flowchart LR
   P["prompt<br/>+ last feedback"] --> A["agent<br/>edits + commits"]
-  A --> RH["review hook<br/>--review · every tick"]
-  RH -- "REJECT" --> P
-  RH -- "clean" --> IG["iteration gate<br/>fast · seen"]
+  A --> IG["iteration gate<br/>fast · seen"]
   IG -- "fail" --> P
-  IG -- "pass" --> AG["acceptance gate<br/>held-out · unseen"]
+  IG -- "pass" --> RH["review hook<br/>on by default · green ticks"]
+  RH -- "REJECT" --> P
+  RH -- "clean" --> AG["acceptance gate<br/>held-out · unseen"]
   AG -- "fail" --> P
   AG -- "pass" --> D(["DONE"])
 ```
