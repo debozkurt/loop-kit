@@ -207,7 +207,12 @@ def _materialize(src: Path, dst: Path, *, mode: str) -> None:
     usually the working tree, not necessarily a committed ref.
     """
     if mode == "copy":
-        shutil.copytree(src, dst)
+        # symlinks=True is load-bearing, not tidiness: copytree's default DEREFERENCES links, which
+        # turns an in-tree venv's `bin/python` (a link to the interpreter) into a bare copy of that
+        # binary, severed from its `../lib/libpython*.dylib` — the copy then dies under dyld and every
+        # oracle run in the tree fails environmentally. Recreating links AS links also means a stale
+        # link in the source copies fine instead of aborting the whole materialization.
+        shutil.copytree(src, dst, symlinks=True)
     elif mode == "clone":
         proc = subprocess.run(["git", "clone", "--quiet", str(src), str(dst)],
                               capture_output=True, text=True)

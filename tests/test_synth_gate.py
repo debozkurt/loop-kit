@@ -17,7 +17,7 @@ from pathlib import Path
 import pytest
 
 from loopkit.extensions.synth_gate import (ENV_LIVE, FAIL_FIRST, PASS_ON_FIX, OracleVerdict,
-                                           oracle_signature, verify_oracle)
+                                           _materialize, oracle_signature, verify_oracle)
 from loopkit.gate import GateResult
 
 TS = "2026-07-10T00:00:00+00:00"          # a fixed timestamp (the verdict takes the clock as input)
@@ -114,6 +114,47 @@ def test_clone_mode_materializes_committed_state(git_repo: Path):
     verdict = verify_oracle("run oracle", git_repo, timestamp=TS, fix="touch FIXED", mode="clone",
                             run_gate=runner)
     assert verdict.blessed is True and [c.name for c in verdict.checks] == [FAIL_FIRST, PASS_ON_FIX]
+
+
+def test_copy_mode_preserves_symlinks_so_an_in_tree_venv_survives(tmp_path: Path):
+    # Regression from a real molding run: copytree's default DEREFERENCES links, so an in-tree venv's
+    # `bin/python` materialized as a bare copy of the interpreter, severed from its sibling libpython.
+    # Every oracle run in that tree then died under dyld, and the env probe (correctly) refused to
+    # bless — the whole task was unverifiable for a reason that was purely self-inflicted.
+    interpreter = tmp_path / "toolchain" / "bin" / "python3.12"
+    interpreter.parent.mkdir(parents=True)
+    interpreter.write_text("#!/bin/sh\necho real-interpreter\n")
+
+    src = tmp_path / "repo"
+    (src / ".venv" / "bin").mkdir(parents=True)
+    (src / ".venv" / "bin" / "python").symlink_to(interpreter)      # absolute, target outside the tree
+    (src / ".venv" / "bin" / "python3").symlink_to("python")        # relative, target inside bin/
+    (src / "a.txt").write_text("buggy")
+
+    dst = tmp_path / "copy"
+    _materialize(src, dst, mode="copy")
+
+    absolute, relative = dst / ".venv" / "bin" / "python", dst / ".venv" / "bin" / "python3"
+    assert absolute.is_symlink() and relative.is_symlink()          # links, NOT dereferenced binaries
+    assert absolute.readlink() == interpreter                       # still resolves to the toolchain
+    assert relative.readlink() == Path("python")                    # a relative link stays relative
+    assert (dst / "a.txt").read_text() == "buggy"                   # ordinary files still come along
+
+
+def test_copy_mode_tolerates_a_dangling_symlink(tmp_path: Path):
+    # A stale link in the source (a deleted venv target, a broken node_modules bin) is faithful state.
+    # Materialization must reproduce it rather than abort — otherwise one dead link in a workspace
+    # makes every task in that repo unmoldable.
+    src = tmp_path / "repo"
+    src.mkdir()
+    (src / "stale").symlink_to(tmp_path / "never-existed")
+    (src / "a.txt").write_text("buggy")
+
+    dst = tmp_path / "copy"
+    _materialize(src, dst, mode="copy")
+
+    assert (dst / "stale").is_symlink() and not (dst / "stale").exists()
+    assert (dst / "a.txt").read_text() == "buggy"
 
 
 def test_unknown_mode_raises(tmp_path: Path):
