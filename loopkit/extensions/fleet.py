@@ -581,6 +581,8 @@ def _grade(result: RunResult) -> tuple[float, bool]:
 
 def make_repo_runner(repo_source: str, *, gate_iteration: str, gate_acceptance: str,
                      protected_paths=("tests/",), adapter: str = "claude-code", max_iter: int = 8,
+                     agent_args: "list[str] | None" = None, model: str | None = None,
+                     use_api_key: bool = False,
                      mode: str = "clone", agent_factory: "Callable[[dict], Agent] | None" = None,
                      remote: RemoteConfig | None = None,
                      executor: "ToolExecutor | None" = None,
@@ -593,6 +595,12 @@ def make_repo_runner(repo_source: str, *, gate_iteration: str, gate_acceptance: 
     source are parameters instead of the pricing constants, and the goal comes from each task (an
     issue body, a CLI goal, …). The agent defaults to the configured adapter; pass `agent_factory`
     to script it (the demo does this for a token-free solve).
+
+    `agent_args` / `model` / `use_api_key` mirror the `[agent]` fields a single `run` uses. They are
+    here because dropping them silently measures a DIFFERENT harness than the one being reported on:
+    headless `claude-code` denies every Write/Edit without a permission flag in `args`, so a runner
+    that forgets them reports `pass^k = 0` for a goal a plain `run` solves — a wrong number, not a
+    missing one. Same failure class as a relative `repo` path, which this function already guards.
 
     `executor` is the Phase-6 seam: the cloud worker passes a `RemoteToolExecutor` so the agent's
     tool calls and the held-out gate run in the keyless executor sidecar (a different uid / PID
@@ -618,7 +626,8 @@ def make_repo_runner(repo_source: str, *, gate_iteration: str, gate_acceptance: 
             cfg = Config(
                 goal=task.get("goal") or "(no goal provided)", repo=str(repo), branch=branch,
                 gate=GateConfig(iteration=gate_iteration, acceptance=gate_acceptance),
-                agent=AgentConfig(adapter=adapter, max_cost_usd=5.0),
+                agent=AgentConfig(adapter=adapter, max_cost_usd=5.0, model=model,
+                                  args=list(agent_args or []), use_api_key=use_api_key),
                 stops=StopsConfig(max_iter=max_iter, no_progress_after=3),
                 safety=SafetyConfig(protected_paths=list(protected_paths), require_clean_tree=False,
                                     allow_branches=[f"{branch_prefix}/*"]),

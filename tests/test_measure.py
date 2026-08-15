@@ -220,3 +220,76 @@ def test_measure_cli_resolves_a_relative_repo(git_repo: Path, tmp_path: Path, mo
     assert report["successes"] == 3                                # all three clones resolved + solved
     assert report["pass_hat_k"]["1"] == 1.0
     assert all(o["reason"] != "error" for o in report["outcomes"])  # no swallowed clone failure
+
+
+# --- the measure CLI carries [agent] args into every trial (regression) ----------------------
+def test_measure_cli_passes_agent_args_into_trials(git_repo: Path, tmp_path: Path, monkeypatch):
+    """Regression: `measure` must build each trial's agent from the SAME `[agent]` block `run` uses.
+
+    Dropping `args` is not a missing number, it is a wrong one: headless `claude-code` denies every
+    Write/Edit without a permission flag, so a runner that forgets `args` reports pass^k = 0 for a
+    goal a plain `run` solves — and the report still prints a harness signature, so the number looks
+    trustworthy. Same failure class as the relative-repo bug above.
+
+    Asserted through the recorded harness rather than a live agent: the report's own contract is that
+    a number travels with the harness that produced it, so `args` belongs in the signature too.
+    """
+    import json
+    import subprocess
+
+    from typer.testing import CliRunner
+
+    from loopkit.cli import app
+
+    (git_repo / "loopkit.toml").write_text(
+        'goal = "agent args reach the trials"\nrepo = "."\nbranch = "loopkit/run"\n'
+        '[agent]\nadapter = "mock"\nargs = ["--permission-mode", "acceptEdits"]\n'
+        '[gate]\niteration = "true"\nacceptance = "true"\n'
+        '[safety]\nprotected_paths = []\n')
+    subprocess.run(["git", "add", "-A"], cwd=git_repo, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-qm", "cfg"], cwd=git_repo, check=True, capture_output=True)
+
+    nocreds = tmp_path / "nocreds"
+    nocreds.mkdir()
+    monkeypatch.setenv("LOOPKIT_CREDS_DIR", str(nocreds))
+    for var in ("LANGSMITH_API_KEY", "LANGSMITH_TRACING", "LANGCHAIN_API_KEY", "LANGCHAIN_TRACING_V2"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.chdir(git_repo)
+
+    out = tmp_path / "report.json"
+    result = CliRunner().invoke(app, ["measure", "-c", "loopkit.toml", "-n", "2", "--out", str(out)])
+    assert result.exit_code == 0, result.output
+    report = json.loads(out.read_text())
+    assert report["harness"]["params"]["agent_args"] == ["--permission-mode", "acceptEdits"]
+    assert report["successes"] == 2                                 # trials still run normally
+
+
+def test_make_repo_runner_builds_the_agent_with_configured_args(tmp_path: Path, monkeypatch):
+    """The sharper half of the contract: `args`/`model` must reach the AgentConfig the trial builds.
+
+    The CLI test above proves they reach the *report*; with a mock adapter they are inert, so it
+    cannot catch a runner that drops them on the floor. This captures the AgentConfig at build time,
+    which is the thing headless claude-code actually depends on.
+    """
+    from loopkit.extensions import fleet as fleet_mod
+    from loopkit.scenarios import demo_src
+
+    seen: dict = {}
+    real = fleet_mod.build_agent
+
+    def capture(agent_cfg, **kw):
+        seen["args"] = list(agent_cfg.args)
+        seen["model"] = agent_cfg.model
+        seen["adapter"] = agent_cfg.adapter
+        return real(agent_cfg, **kw)
+
+    monkeypatch.setattr(fleet_mod, "build_agent", capture)
+    runner = fleet_mod.make_repo_runner(
+        str(demo_src()), mode="copy", max_iter=1, adapter="mock",
+        agent_args=["--permission-mode", "acceptEdits"], model="claude-sonnet-5",
+        gate_iteration="true", gate_acceptance="true", protected_paths=("tests/",))
+    runner({"id": "t0", "goal": "anything"})
+
+    assert seen["args"] == ["--permission-mode", "acceptEdits"]     # the flag that unblocks edits
+    assert seen["model"] == "claude-sonnet-5"
+    assert seen["adapter"] == "mock"

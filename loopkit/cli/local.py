@@ -696,11 +696,17 @@ def measure(config: Path = typer.Option(DEFAULT_CONFIG, "--config", "-c"),
     # `git clone .` from the empty scratch dir and fail every trial. `run`/`doctor` use repo_path()
     # for the same reason — measure must match, or it silently reports pass^k=0 for a solvable goal.
     repo_src = str(cfg.repo_path())
+    # [agent] args/model/use_api_key ride along for the same reason repo_src is absolutised above:
+    # a trial that runs a different agent than `run` does is not measuring this harness. Headless
+    # claude-code needs a permission flag in args or every edit is denied, which would report
+    # pass^k = 0 for a goal `run` solves.
     runner = make_repo_runner(
         repo_src, mode=mode, adapter=cfg.agent.adapter, max_iter=cfg.stops.max_iter,
+        agent_args=list(cfg.agent.args), model=cfg.agent.model, use_api_key=cfg.agent.use_api_key,
         gate_iteration=cfg.gate.iteration, gate_acceptance=cfg.gate.acceptance,
         protected_paths=tuple(cfg.safety.protected_paths))   # remote stays off: trials never push
     harness_params = {"adapter": cfg.agent.adapter, "model": cfg.agent.model,
+                      "agent_args": list(cfg.agent.args),    # part of the harness, so part of its signature
                       "gate_iteration": cfg.gate.iteration, "gate_acceptance": cfg.gate.acceptance,
                       "gate_regression": cfg.gate.regression, "max_iter": cfg.stops.max_iter,
                       "protected_paths": sorted(cfg.safety.protected_paths)}
@@ -1012,9 +1018,11 @@ def _calibrate_report(cfg: Config, *, trials: int, mode: str, k: int | None, tim
     repo_src = str(cfg.repo_path())                       # absolute — each trial clones into its own scratch
     runner = make_repo_runner(
         repo_src, mode=mode, adapter=cfg.agent.adapter, max_iter=cfg.stops.max_iter,
+        agent_args=list(cfg.agent.args), model=cfg.agent.model, use_api_key=cfg.agent.use_api_key,
         gate_iteration=cfg.gate.iteration, gate_acceptance=cfg.gate.acceptance,
         protected_paths=tuple(cfg.safety.protected_paths))
     harness_params = {"adapter": cfg.agent.adapter, "model": cfg.agent.model,
+                      "agent_args": list(cfg.agent.args),    # part of the harness, so part of its signature
                       "gate_iteration": cfg.gate.iteration, "gate_acceptance": cfg.gate.acceptance,
                       "gate_regression": cfg.gate.regression, "max_iter": cfg.stops.max_iter,
                       "protected_paths": sorted(cfg.safety.protected_paths)}
