@@ -102,6 +102,7 @@ Same loop body in every tier; only *where you read it* differs:
   emits a span tree (run → tick → agent → llm/tool → gate) with the human-readable I/O + per-span cost.
   `doctor` shows whether tracing is on.
 - **Durable activity artifact (batch):** the raw event stream persisted to disk — see below.
+- **Per-tick artifact tree (`--dump-dir`):** what the loop *assembled*, tick by tick — see below.
 
 Key events to watch: `run.start` · `agent.invoke` · `agent.think`/`agent.say`/`agent.tool` ·
 `tick.progress` · `agent.done` · `tick.commit` · `gate.iteration`/`gate.review`/`gate.acceptance` ·
@@ -130,3 +131,32 @@ terminal output; this is the copy you can read tomorrow):
 - Same payload caveat as the live stream: it contains the agent's thoughts + tool I/O (secrets redacted),
   so treat it as sensitive. Inspect a single task: `jq -c 'select(.type=="tool_use") | .name' <task>.activity.jsonl`.
 - Single `loopkit run` does not write one (no manifest dir); it's a batch artifact.
+
+## The per-tick artifact tree (`loopkit run --dump-dir`)
+
+The activity artifact records what the *agent* did. This records what the *loop* did — the inputs it
+assembled and the verdicts it collected, one directory per tick:
+
+```text
+demo/run-01/
+  00-config/   config.json (effective, CLI overrides folded in) · PROMPT.md · CLAUDE.md · loopkit.toml
+  tick-01/     prompt.md · agent.md · diff.patch · gate.iteration.txt · feedback.md
+  tick-02/     …the same, plus prompt.diff
+  run.json     reason · iterations · cost_usd · overfit
+```
+
+- **`prompt.diff` is the point.** It diffs this tick's assembled prompt against the last one, so the
+  gate failure entering the next attempt is visible as a `+` block:
+
+  ```diff
+  +# Feedback from the last attempt (the gate failed — address this)
+  +tests/seen/test_pricing.py::test_large_order_is_discounted FAILED
+  ```
+
+  The always-on logs *cannot* show this — they carry `promptLen=1134` and never the text. That gap is
+  deliberate (payload-free logs), and this tree is the opt-in way to close it when you need to see it.
+- **Payloads on disk, by request only.** No path, no writes, no directory — every existing run is
+  byte-identical. Everything written is `secrets.redact`ed first; still treat a dumped tree as
+  sensitive, the same as the activity artifact.
+- Useful for a post-mortem ("which tick did the feedback stop being actionable?"), for reviewing what a
+  run was actually told, and for teaching — it makes the closed loop concrete rather than asserted.

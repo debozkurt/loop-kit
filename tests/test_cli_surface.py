@@ -70,9 +70,9 @@ EXPECTED: dict[str, list[str]] = {
     ],
     "review": ["backend", "base", "config", "criteria", "goal", "model", "repo"],
     "run": [
-        "adapter", "api_key", "branch", "check_gate", "config", "dry_run", "force", "from_event",
-        "from_issue", "max_iter", "no_review", "open_pr", "provider", "repo", "review", "sandbox",
-        "skills", "skills_distiller", "validate",
+        "adapter", "api_key", "branch", "check_gate", "config", "dry_run", "dump_dir", "force",
+        "from_event", "from_issue", "max_iter", "no_review", "open_pr", "provider", "repo", "review",
+        "sandbox", "skills", "skills_distiller", "validate",
     ],
     "synth-gate": ["config", "fix", "isolate", "mode", "oracle", "out", "probe", "repo"],
 }

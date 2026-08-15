@@ -16,12 +16,14 @@ adapter's `llm`/`tool` spans nest under the `agent` span automatically via LangS
 """
 from __future__ import annotations
 
+import difflib
 import json
 import threading
 import time
 import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from . import durability, safety, secrets, trace
@@ -36,7 +38,6 @@ from .stops import (BudgetCeiling, LoopState, NoProgress, PlanStall, ReviewStall
 if TYPE_CHECKING:
     # Typing-only imports: the core never depends on an extension at runtime — the hook and the
     # registry are duck-called. Both are opt-in (Ch 8, Ch 17), so passing None keeps v1 exact.
-    from pathlib import Path
     from .executor import ToolExecutor
     from .extensions.review import ReviewHook
     from .extensions.skills import SkillRegistry
@@ -111,6 +112,104 @@ def _make_run_id(repo) -> str:
     return f"{durability.state_signature(repo)[:8]}-{uuid.uuid4().hex[:4]}"
 
 
+class _DumpWriter:
+    """The per-tick artifact tree: what the loop actually assembled, tick by tick, on disk.
+
+    A None path is a silent no-op (every existing caller writes nothing extra). Given a path, each
+    tick lands as one directory:
+
+        00-config/  config.json (the EFFECTIVE config, CLI overrides folded in) + every anchor file
+        tick-01/    prompt.md · agent.md · diff.patch · gate.iteration.txt · feedback.md
+        tick-02/    the same, plus prompt.diff — what the last tick's feedback added to this prompt
+        run.json    the terminal, iterations, cost
+
+    `prompt.diff` is the reason this exists. The whole control-system claim is that a gate failure
+    becomes the next tick's input, and the always-on logs deliberately cannot show it — they carry
+    `promptLen=1134` and never the text (log.py). The trace has it, but reading a diff of two prompts
+    is what makes "the loop closed" legible. So this is a **third, explicitly opt-in artifact layer**,
+    peer to `<task>.activity.jsonl`: payloads on disk because the operator asked for them by passing a
+    path, never by default. Everything written here goes through `secrets.redact` first — gate output
+    is attacker-influenced and a dumped tree gets shared.
+    """
+
+    def __init__(self, path: "Path | None", config) -> None:
+        self._root = path
+        self._prev_prompt: str | None = None
+        if path is None:
+            return
+        cfg = path / "00-config"
+        cfg.mkdir(parents=True, exist_ok=True)
+        (cfg / "config.json").write_text(config.model_dump_json(indent=2), encoding="utf-8")
+        repo = config.repo_path()
+        # The anchors ARE the durable context (Ch 4-5), so a reader can see what every tick rebuilt
+        # from. Copied by basename: a flat 00-config/ reads better than a mirrored tree, and anchors
+        # are few. An anchor that resolves to a directory is skipped — build_prompt expands it, and
+        # the expansion is already visible verbatim in each tick's prompt.md.
+        for rel in list(config.prompt.anchors) + ["loopkit.toml"]:
+            src = repo / rel
+            if src.is_file():
+                (cfg / Path(rel).name).write_text(
+                    secrets.redact(src.read_text(encoding="utf-8", errors="replace")),
+                    encoding="utf-8")
+
+    def _tick_dir(self, i: int) -> "Path | None":
+        if self._root is None:
+            return None
+        d = self._root / f"tick-{i:02d}"
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    def _write(self, i: int, name: str, text: str) -> None:
+        d = self._tick_dir(i)
+        if d is not None:
+            d.joinpath(name).write_text(secrets.redact(text), encoding="utf-8")
+
+    def prompt(self, i: int, text: str) -> None:
+        """The assembled prompt, verbatim — plus its diff against the last tick's."""
+        if self._root is None:
+            return
+        self._write(i, "prompt.md", text)
+        if self._prev_prompt is not None:
+            diff = "".join(difflib.unified_diff(
+                self._prev_prompt.splitlines(keepends=True), text.splitlines(keepends=True),
+                fromfile=f"tick-{i - 1:02d}/prompt.md", tofile=f"tick-{i:02d}/prompt.md"))
+            self._write(i, "prompt.diff", diff or "(prompt unchanged from the previous tick)\n")
+        self._prev_prompt = text
+
+    def agent(self, i: int, result) -> None:
+        self._write(i, "agent.md", f"ok: {result.ok}\ncost_usd: {result.cost_usd}\n\n"
+                                   f"## summary\n{result.summary}\n")
+
+    def gate(self, i: int, name: str, result) -> None:
+        verdict = "PASS" if result.passed else "FAIL"
+        self._write(i, f"gate.{name}.txt",
+                    f"{verdict}\n\n{result.feedback or '(no output)'}\n")
+
+    def review(self, i: int, passed: bool, feedback: str | None) -> None:
+        self._write(i, "review.md", f"{'APPROVE' if passed else 'REJECT'}\n\n"
+                                    f"{feedback or '(no findings returned)'}\n")
+
+    def commit(self, i: int, repo: "Path", committed: bool) -> None:
+        """What this tick actually changed. Written at commit time so it lands even on a tick that
+        goes on to terminate the run."""
+        if self._root is not None:
+            self._write(i, "diff.patch",
+                        durability.head_patch(repo) if committed else "(no commit this tick)\n")
+
+    def feedback(self, i: int, text: str | None) -> None:
+        """The exact string that becomes the next tick's input — the closed loop, on disk. Pair it
+        with the next tick's `prompt.diff` to see it arrive."""
+        if self._root is not None:
+            self._write(i, "feedback.md", text or "(none — nothing carried forward)\n")
+
+    def run_end(self, result) -> None:
+        if self._root is not None:
+            self._root.joinpath("run.json").write_text(
+                json.dumps({"reason": result.reason.value, "iterations": result.iterations,
+                            "cost_usd": round(result.cost_usd, 6), "overfit": result.overfit},
+                           indent=2), encoding="utf-8")
+
+
 class _ActivityWriter:
     """The durable per-run activity artifact: the agent's raw event stream + loopkit tick markers,
     one JSON object per line, written as they happen. A None path is a silent no-op (a single `run`
@@ -161,7 +260,8 @@ def run_loop(config, agent: Agent, *, iteration_gate: Gate | None = None,
              skills: "SkillRegistry | None" = None, dry_run: bool = False,
              trace_metadata: dict | None = None,
              executor: "ToolExecutor | None" = None,
-             activity_path: "Path | None" = None) -> RunResult:
+             activity_path: "Path | None" = None,
+             dump_path: "Path | None" = None) -> RunResult:
     """Drive the agent toward `config.goal` until a terminal is reached. Returns the terminal.
 
     `trace_metadata` is merged onto the top-level trace span — the fleet worker passes the task id
@@ -176,6 +276,10 @@ def run_loop(config, agent: Agent, *, iteration_gate: Gate | None = None,
     `activity_path` turns on the durable per-run activity artifact (the agent's raw event stream +
     tick markers, one JSON object per line). None (single runs) ⇒ off; the batch runner points it at
     `<manifest_dir>/<task>.activity.jsonl` — next to the journal, so it survives the rmtree'd worktree.
+
+    `dump_path` turns on the per-tick artifact tree (`_DumpWriter`): the assembled prompt, its diff
+    against the previous tick, each gate's verdict + output, and the feedback carried forward. None ⇒
+    off. Opt-in because it writes payloads to disk; teaching, review, and post-mortems are the point.
     """
     repo = config.repo_path()
     run_id = _make_run_id(repo)             # unique per run (see _make_run_id) — not just the state sig
@@ -183,6 +287,8 @@ def run_loop(config, agent: Agent, *, iteration_gate: Gate | None = None,
     # Durable activity artifact, written as events happen (flushed per line, so a hung tick still
     # leaves a partial trail). None path ⇒ a silent no-op — exact prior behavior.
     activity = _ActivityWriter(activity_path, run_id, config.branch)
+    # Per-tick artifact tree. None path ⇒ every call below is a no-op — exact prior behavior.
+    dump = _DumpWriter(dump_path, config)
 
     iteration_gate = iteration_gate or ShellGate(config.gate.iteration, executor=executor)
     acceptance_gate = acceptance_gate or (
@@ -246,8 +352,9 @@ def run_loop(config, agent: Agent, *, iteration_gate: Gate | None = None,
             return RunResult(reason, iterations, cost_usd, plan_open=po, plan_total=pt, **kw)
 
         def _terminal(result):
-            # Every terminal funnels here: finalize the durable artifact, then stamp the trace span.
+            # Every terminal funnels here: finalize the durable artifacts, then stamp the trace span.
             activity.close()
+            dump.run_end(result)
             return _finish(run_span, result)
 
         for i in range(1, config.stops.max_iter + 1):
@@ -259,6 +366,7 @@ def run_loop(config, agent: Agent, *, iteration_gate: Gate | None = None,
                 skills_text = skills.render() if skills is not None else None
                 prompt = build_prompt(config, feedback, skills_text)
                 tick.info("agent.invoke", promptLen=len(prompt), skillsLen=len(skills_text or ""))
+                dump.prompt(i, prompt)
 
                 # The agent span: the API adapter's llm/tool spans nest under it via contextvars,
                 # so a Claude/OpenAI tick shows every model call and tool call here; a CLI adapter
@@ -278,6 +386,7 @@ def run_loop(config, agent: Agent, *, iteration_gate: Gate | None = None,
                 cost += result.cost_usd
                 tick.info("agent.done", ok=result.ok, costUsd=round(result.cost_usd, 4),
                           summary=result.summary)
+                dump.agent(i, result)
 
                 # Safety: the loop must never touch a protected path (Ch 9 + 16). Check before commit.
                 violations = safety.protected_violations(config)
@@ -297,6 +406,7 @@ def run_loop(config, agent: Agent, *, iteration_gate: Gate | None = None,
                 signature = durability.state_signature(repo)
                 signatures.append(signature)
                 tick.info("tick.commit", committed=committed, sig=signature)
+                dump.commit(i, repo, committed)
                 tick_span.metadata(committed=committed, cost_usd=round(cost, 6))
                 # Plan-driven backlog (Ch 4-5): read the checklist fresh each tick — it is the agent's
                 # durable working memory AND the loop's completion signal below. None-safe: no [plan].
@@ -316,6 +426,7 @@ def run_loop(config, agent: Agent, *, iteration_gate: Gate | None = None,
                         gate = iteration_gate.check(repo)
                     gate_span.outputs(passed=gate.passed, feedback=gate.feedback or None)
                 tick.info("gate.iteration", passed=gate.passed)
+                dump.gate(i, "iteration", gate)
 
                 # Continuous review (Ch 8): a clean review of the CURRENT HEAD is a precondition
                 # for everything downstream (acceptance, DONE); a failing one feeds back so the
@@ -363,6 +474,7 @@ def run_loop(config, agent: Agent, *, iteration_gate: Gate | None = None,
                         review_last_ok = review.passed
                         tick.info("gate.review", passed=review.passed,
                                   costUsd=round(review_cost, 4))
+                        dump.review(i, review.passed, review.feedback)
                         if review.passed:
                             review_rejects = 0
                             review_last_feedback = None
@@ -395,6 +507,7 @@ def run_loop(config, agent: Agent, *, iteration_gate: Gate | None = None,
                                 acc = acceptance_gate.check(repo)
                             acc_span.outputs(passed=acc.passed, feedback=acc.feedback or None)
                         tick.info("gate.acceptance", passed=acc.passed)
+                        dump.gate(i, "acceptance", acc)
                         if acc.passed:
                             # Second oracle (Ch 9): the fix works AND previously-passing behavior is
                             # preserved. AlwaysPass when no regression gate is configured (prior behavior).
@@ -404,6 +517,7 @@ def run_loop(config, agent: Agent, *, iteration_gate: Gate | None = None,
                                     reg = regression_gate.check(repo)
                                 reg_span.outputs(passed=reg.passed, feedback=reg.feedback or None)
                             tick.info("gate.regression", passed=reg.passed)
+                            dump.gate(i, "regression", reg)
                             if reg.passed:
                                 tick.info("run.done", iterations=i, costUsd=round(cost, 4))
                                 done = _res(StopReason.DONE, i, cost)
@@ -414,6 +528,7 @@ def run_loop(config, agent: Agent, *, iteration_gate: Gate | None = None,
                                     tick.info("skill.write_back", minted=minted is not None,
                                               name=minted.name if minted else "-")
                                 tick_span.outputs(result="done")
+                                dump.feedback(i, None)   # DONE carries nothing forward
                                 return _terminal(done)
                             # Regression: the target is fixed but previously-passing behavior broke.
                             tick.warn("gate.regression_failed", detail="acceptance_pass_regression_fail")
@@ -447,6 +562,8 @@ def run_loop(config, agent: Agent, *, iteration_gate: Gate | None = None,
                                   signatures=signatures,
                                   plan_dones=plan_dones if plan_file else None,
                                   review_rejects=review_rejects)
+
+                dump.feedback(i, feedback)
 
                 # Hard stops, in precedence order (budget > no-progress > review-stall > plan-stall).
                 # Cap is the loop bound below.

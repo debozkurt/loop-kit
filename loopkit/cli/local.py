@@ -336,6 +336,11 @@ def run(config: Path = typer.Option(DEFAULT_CONFIG, "--config", "-c"),
         open_pr: bool = typer.Option(False, "--open-pr",
                                      help="Enable push + draft PR for this run (overrides [remote]). CI tier."),
         dry_run: bool = typer.Option(False, "--dry-run", help="Run the control flow, skip the agent."),
+        dump_dir: str | None = typer.Option(None, "--dump-dir",
+                                            help="Write a per-tick artifact tree here: the assembled "
+                                                 "prompt, its diff against the last tick, every gate's "
+                                                 "output, and the feedback carried forward. Payloads "
+                                                 "on disk — for teaching, review, and post-mortems."),
         max_iter: int | None = typer.Option(None, "--max-iter", help="Override stops.max_iter."),
         check_gate: int | None = typer.Option(None, "--check-gate",
                                               help="Run the iteration gate N times on the initial tree "
@@ -499,8 +504,11 @@ def run(config: Path = typer.Option(DEFAULT_CONFIG, "--config", "-c"),
         from ..extensions.skills import FileSkillRegistry, ShellDistiller
         distiller = ShellDistiller(skills_distiller) if skills_distiller else None
         skills_registry = FileSkillRegistry(skills, distill=distiller)
-    result = run_loop(cfg, agent, dry_run=dry_run, review_hook=review_hook, skills=skills_registry)
+    result = run_loop(cfg, agent, dry_run=dry_run, review_hook=review_hook, skills=skills_registry,
+                      dump_path=Path(dump_dir) if dump_dir else None)
     _render(result)
+    if dump_dir:
+        console.print(f"[dim]artifacts[/] {dump_dir}/ — per-tick prompt, gates, and feedback")
     if result.plan_total:      # plan-driven backlog: show how much of the checklist landed
         console.print(f"[dim]checklist[/] {result.plan_total - result.plan_open}/{result.plan_total} "
                       f"items done")

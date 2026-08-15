@@ -180,6 +180,15 @@ Observability is deliberately split, and the split is the design:
   every tool call, and organized cost/usage/model metadata** on each span. A trace backend is the one
   controlled place payloads belong, so it does **not** weaken the never-log-payloads rule. This answers
   "what happened in *this* run, step by step, and what did each step cost."
+- **On-disk artifacts — opt-in, per run.** Two of them, each behind a path the operator passes:
+  `<task>.activity.jsonl` (the agent's raw event stream, `loopkit batch`) and the **`--dump-dir` tick
+  tree** (`_DumpWriter` in `loop.py`). The dump tree writes what the loop assembled — `prompt.md`,
+  `prompt.diff` against the previous tick, each gate's verdict + output, `feedback.md`, `diff.patch`,
+  and `00-config/` (effective config + the anchor files). These carry payloads *by design*, which is
+  why neither is ever on by default; everything written goes through `secrets.redact` first, because a
+  dumped tree gets shared and gate output is attacker-influenced. This answers "show me, in the loop's
+  own words, that the gate failure became the next prompt" — the one thing the payload-free logs
+  structurally cannot show (they carry `promptLen=1134`, never the text).
 
 ```mermaid
 %%{init: {'theme':'base','themeVariables':{'background':'#1b1b1b','primaryColor':'#2b2b2b','primaryTextColor':'#e6e6e6','primaryBorderColor':'#5a5a5a','lineColor':'#8a8a8a','fontSize':'13px'}}}%%

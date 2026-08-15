@@ -70,6 +70,15 @@ def state_signature(repo: Path) -> str:
     return digest.hexdigest()[:16]
 
 
+def head_patch(repo: Path) -> str:
+    """The patch HEAD introduced — what this tick actually changed, for the `--dump-dir` artifact.
+
+    Empty before the first commit (`git show` has no ref to resolve), so a caller can write the file
+    unconditionally without branching on repo age.
+    """
+    return _git(repo, "show", "--format=commit %H%n%s%n", "HEAD").stdout
+
+
 def commit_progress(repo: Path, message: str) -> bool:
     """Commit the working tree if it changed. Returns True iff a commit was made."""
     if is_clean(repo):
