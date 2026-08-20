@@ -11,7 +11,7 @@ quickstart.)
 - **Opt into the billed API key** with `loopkit run --api-key` (or `[agent] use_api_key = true`).
 - **`loopkit doctor` shows which one will pay** — check it before you spend.
 - **On a subscription the dollar budget can read `$0`**, so bound a run with **`--max-iter`**, not just
-  `max_cost_usd`.
+  `stops.max_cost_usd`.
 
 ## Which credential pays
 

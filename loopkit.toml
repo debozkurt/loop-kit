@@ -13,7 +13,6 @@ adapter = "claude-code"          # the Claude Code CLI (`claude -p … --output-
 # Headless CI has no human to approve tool use, so Claude Code must run non-interactively. loopkit's
 # safety is the gate + branch-only + protected paths + draft-PR review, NOT the agent's own prompts.
 args = ["--dangerously-skip-permissions"]
-max_cost_usd = 5.0               # budget ceiling (Ch 14) — bites on the real cost in claude's JSON
 max_tool_calls = 25
 
 [prompt]
@@ -25,6 +24,8 @@ anchors = ["PROMPT.md"]          # fixed context reloaded each tick (Ch 4-5)
 iteration = "python -m pytest -q"
 
 [stops]
+max_cost_usd = 5.0               # budget ceiling (Ch 14) — the FIRST stop checked; bites on the real
+                                 # cost in claude's JSON
 max_iter = 8                     # bound a first live run (Ch 13)
 no_progress_after = 3
 

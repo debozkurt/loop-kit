@@ -74,6 +74,28 @@ def test_budget_ceiling(git_repo: Path):
     assert result.iterations == 2
 
 
+def test_stops_budget_ceiling_wins_over_the_agent_one(git_repo: Path):
+    # The ceiling belongs with the other stops. `[agent] max_cost_usd` is the older home and is
+    # still read, so both can be present — and then `[stops]` decides, or the two homes would
+    # disagree silently about the one number that bounds spend.
+    behaviors = [_writes(f"f{i}.txt", str(i)) for i in range(10)]
+    cfg = _config(git_repo, agent=AgentConfig(max_cost_usd=99.0),
+                  stops=StopsConfig(max_cost_usd=1.0, max_iter=20, no_progress_after=99))
+    assert cfg.budget_ceiling_usd() == 1.0
+    result = run_loop(cfg, MockAgent(behaviors=behaviors, cost_per_tick=0.5),
+                      iteration_gate=CallableGate(lambda ws: False))
+    assert result.reason is StopReason.BUDGET_CEILING
+    assert result.iterations == 2                          # crosses $1.00 on tick 2, not $99.00
+
+
+def test_agent_budget_ceiling_still_honored(git_repo: Path):
+    # Back-compat: every loopkit.toml written before `[stops] max_cost_usd` existed must keep its
+    # ceiling. Unset in [stops] (None) means inherit, never "no ceiling".
+    cfg = _config(git_repo, agent=AgentConfig(max_cost_usd=2.5))
+    assert cfg.stops.max_cost_usd is None
+    assert cfg.budget_ceiling_usd() == 2.5
+
+
 def test_overfit_acceptance_blocks_done(git_repo: Path):
     # The iteration gate passes immediately, but the held-out acceptance gate never does:
     # not DONE, and overfit is flagged. This is the honest twin of gaming the gate (Ch 9).

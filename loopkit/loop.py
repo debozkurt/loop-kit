@@ -300,7 +300,7 @@ def run_loop(config, agent: Agent, *, iteration_gate: Gate | None = None,
         ShellGate(config.gate.regression, executor=executor) if config.gate.regression else AlwaysPass()
     )
     # Per-tick hard stops, in precedence order. The iteration cap is the loop's own bound.
-    hard_stops = [BudgetCeiling(config.agent.max_cost_usd),
+    hard_stops = [BudgetCeiling(config.budget_ceiling_usd()),
                   NoProgress(config.stops.no_progress_after)]
     # Review-loop bound (Ch 8): a reject loop bills agent + judge every tick and NoProgress can't
     # see it (the agent keeps editing → the signature keeps changing). Only when a hook is wired,
@@ -317,10 +317,10 @@ def run_loop(config, agent: Agent, *, iteration_gate: Gate | None = None,
     durability.ensure_branch(repo, config.branch)
     log.info("run.start", goalLen=len(config.goal), branch=config.branch,
              adapter=config.agent.adapter, maxIter=config.stops.max_iter,
-             budgetUsd=config.agent.max_cost_usd, dryRun=dry_run)
+             budgetUsd=config.budget_ceiling_usd(), dryRun=dry_run)
 
     run_meta = {"run_id": run_id, "adapter": config.agent.adapter, "model": config.agent.model,
-                "budget_usd": config.agent.max_cost_usd, "max_iter": config.stops.max_iter,
+                "budget_usd": config.budget_ceiling_usd(), "max_iter": config.stops.max_iter,
                 "dry_run": dry_run}
     if trace_metadata:
         run_meta.update(trace_metadata)

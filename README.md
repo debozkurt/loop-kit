@@ -276,11 +276,13 @@ branch = "loopkit/run"                            # never main/master
 
 [agent]
 adapter = "claude-code"                           # mock | claude-code | codex | claude-api | openai-api
-max_cost_usd = 5.0                                # budget ceiling — bites on real cost (see `doctor`)
 
 [gate]
 iteration  = "python -m pytest tests/seen -q"
 acceptance = "python -m pytest tests/holdout -q"  # held-out — run once before DONE
+
+[stops]
+max_cost_usd = 5.0                                # budget ceiling — the first stop checked (see `doctor`)
 
 [safety]
 protected_paths = ["tests/"]                      # the loop may not touch these
@@ -305,7 +307,7 @@ haiku while coding with opus, or cross-vendor with codex for blind-spot diversit
 project rubric files onto the bundled checklist (keep them under `protected_paths`, or preflight
 objects — the agent must not tune its own grader). A judge that cannot run **halts** the run
 (`REVIEW_UNAVAILABLE` — infra failure is not a rejection), and N straight rejections stop it for a
-human (`REVIEW_STALL`, `stops.review_stall_after`). Judge spend counts toward `max_cost_usd`. Run it
+human (`REVIEW_STALL`, `stops.review_stall_after`). Judge spend counts toward `stops.max_cost_usd`. Run it
 standalone with **`loopkit review`** (exit 0/1/2 — wireable as a `command` itself). Turn review off
 everywhere with `enabled = false`, or per invocation with `--no-review`; an explicit `run --review
 <cmd>` (or a manifest `review =`) overrides. `run` prints the decision (`review: on/off — <reason> ·

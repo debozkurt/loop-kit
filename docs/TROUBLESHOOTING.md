@@ -8,7 +8,7 @@ Real failure modes and what they mean. Most are loopkit's safety machinery worki
 `claude` reports `total_cost_usd` as 0 (usage is drawn from the plan, not billed per token), so the
 loop logs `$0`. The work was real; the dollar figure just isn't meaningful.
 
-- **Consequence:** the dollar budget ceiling (`max_cost_usd`) can't bite when the cost reads 0. **Bound
+- **Consequence:** the dollar budget ceiling (`stops.max_cost_usd`) can't bite when the cost reads 0. **Bound
   the run with `--max-iter`** instead.
 - **If you expected an API-billed number and got 0:** older loopkit builds also failed to parse the
   CLI's *array* output and read `$0` even on the API. Update loopkit (the parser now handles the array)

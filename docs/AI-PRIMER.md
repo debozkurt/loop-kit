@@ -31,7 +31,7 @@ Terminal reasons (`loopkit/stops.py`, `StopReason`):
 |---|---|
 | `done` | the held-out acceptance gate passed |
 | `safety_halt` | the agent touched a protected path — change reverted, run halted (mid-tick terminal) |
-| `budget_ceiling` | cumulative real cost reached `agent.max_cost_usd` (judge spend counts) |
+| `budget_ceiling` | cumulative real cost reached `stops.max_cost_usd` (judge spend counts) |
 | `no_progress` | tree signature unchanged for `stops.no_progress_after` ticks |
 | `review_stall` | `stops.review_stall_after` consecutive fresh review REJECTs — a human should look |
 | `plan_stall` | plan mode: the checklist done-count stopped advancing (`stops.plan_stall_after`) |
@@ -118,7 +118,7 @@ Extensions (`loopkit/extensions/`) — each attaches at a seam, `None`-safe:
   cross-vendor judge). `criteria` layers project rubric files onto the bundled checklist — keep
   them under `protected_paths` (the agent must not tune its own grader).
 - Judge cannot run ⇒ `review_unavailable` halt. N straight rejects ⇒ `review_stall`.
-  Judge spend counts toward `max_cost_usd`.
+  Judge spend counts toward `stops.max_cost_usd`.
 - Off-switches: `enabled = false` (everywhere), `--no-review` (per invocation); explicit
   `run --review <cmd>` / manifest `review =` overrides. `run` prints the decision;
   `doctor` probes the judge binary/SDK + pricing.
@@ -187,7 +187,6 @@ knob-by-knob guide: `CONTROL-FILES.md`.
 | | `branch` | `"loopkit/run"` | the run's branch; never `main`/`master` |
 | `[agent]` | `adapter` | `"mock"` | `mock` · `claude-code` · `codex` · `claude-api` · `openai-api` |
 | | `model` | none | provider default if unset |
-| | `max_cost_usd` | `10.0` | the budget ceiling; size for a few ticks, not one |
 | | `max_tool_calls` | `25` | per-tick tool-call cap (API adapters) |
 | | `args` | `[]` | extra CLI flags for CLI adapters |
 | | `use_api_key` | `false` | claude-code: bill the API key instead of the subscription |
@@ -196,7 +195,8 @@ knob-by-knob guide: `CONTROL-FILES.md`.
 | `[gate]` | `iteration` | *(required)* | fast, in-sample — runs every tick; any shell command: exit 0 pass, stdout = feedback |
 | | `acceptance` | none | held-out — run once before DONE |
 | | `regression` | none | optional second held-out oracle: don't break what worked |
-| `[stops]` | `max_iter` | `30` | hard iteration cap |
+| `[stops]` | `max_cost_usd` | `10.0` | the budget ceiling, first stop checked; size for a few ticks, not one. Falls back to `[agent] max_cost_usd` (its older home) when unset |
+| | `max_iter` | `30` | hard iteration cap |
 | | `no_progress_after` | `3` | halt after N unchanged-tree ticks |
 | | `plan_stall_after` | `6` | plan mode: halt after N ticks with no new done items |
 | | `review_stall_after` | `4` | halt after N consecutive fresh review rejects |

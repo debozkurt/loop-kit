@@ -18,7 +18,6 @@ branch = "loopkit/run"           # never main/master (Ch 16)
 
 [agent]
 adapter = "claude-code"          # mock | claude-code | codex | claude-api | openai-api
-max_cost_usd = 5.0               # budget ceiling (Ch 14) — bites on real cost (see `doctor`)
 
 [prompt]
 anchors = ["PROMPT.md"]          # fixed context reloaded each tick (Ch 4-5)
@@ -28,6 +27,8 @@ iteration = "python -m pytest tests/seen -q"      # fast, in-sample (Ch 6-7)
 acceptance = "python -m pytest tests/holdout -q"  # held-out, run once before done (Ch 9)
 
 [stops]
+max_cost_usd = 5.0               # budget ceiling (Ch 14) — the FIRST stop checked; bites on real
+                                 # cost (see `doctor`). Size for a few ticks, not one.
 max_iter = 20                    # Ch 13
 no_progress_after = 3
 
@@ -62,7 +63,6 @@ branch = "loopkit/plan"          # never main/master (Ch 16)
 
 [agent]
 adapter = "claude-code"          # mock | claude-code | codex | claude-api | openai-api
-max_cost_usd = 20.0              # a whole backlog costs more than one task — raise the ceiling (Ch 14)
 
 [prompt]
 anchors = ["PROMPT.md", "IMPLEMENTATION_PLAN.md"]   # the plan is an anchor the agent reads + maintains
@@ -75,6 +75,7 @@ iteration  = "python -m pytest -q"          # fast, per-tick: the item just fini
 acceptance = "python -m pytest tests/ -q"   # held-out, whole-project: the finished checklist must pass this
 
 [stops]
+max_cost_usd = 20.0              # a whole backlog costs more than one task — raise the ceiling (Ch 14)
 max_iter = 60                    # a backlog needs many more ticks than one task (Ch 13)
 no_progress_after = 4
 plan_stall_after = 8             # halt if no checklist item completes for 8 ticks (a wedged item

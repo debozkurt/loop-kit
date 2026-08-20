@@ -27,7 +27,6 @@ branch = "loopkit/run"                                  # the loop's own branch 
 
 [agent]
 adapter      = "claude-code"     # mock | claude-code | codex | claude-api | openai-api
-max_cost_usd = 5.0               # budget ceiling (halts here regardless of progress; default 10.0)
 use_api_key  = false             # claude-code: false = bill your SUBSCRIPTION (an ambient
                                  # ANTHROPIC_API_KEY is withheld); true (or `run --api-key`) = bill the
                                  # API key. `loopkit doctor` prints which path is active before a run.
@@ -46,6 +45,9 @@ acceptance = "pytest tests/holdout -q"     # held-out — the honest "done" chec
 regression = "pytest tests/regression -q"  # optional second oracle — previously-passing stays green
 
 [stops]
+max_cost_usd      = 5.0          # budget ceiling — halts here regardless of progress (default 10.0).
+                                 # First in stop precedence: spent money cannot be unspent. Older
+                                 # configs set it under [agent]; that still works, and this wins.
 max_iter          = 20           # hard cap (default 30)
 no_progress_after = 3            # halt if N ticks change nothing
 plan_stall_after  = 6            # plan mode only: halt if N ticks complete no checklist item

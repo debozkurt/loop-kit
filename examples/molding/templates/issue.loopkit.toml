@@ -10,7 +10,6 @@ branch = "loopkit/issue"          # per-issue: loopkit/issue-<N>; never main/mas
 
 [agent]
 adapter      = "claude-code"      # mock | claude-code | codex | claude-api | openai-api
-max_cost_usd = 8.0                # one issue's ceiling — raise for harder work (Ch 14)
 
 [prompt]
 anchors = ["PROMPT.md"]           # + "CLAUDE.md"/"AGENTS.md" if the repo has house rules
@@ -24,6 +23,7 @@ acceptance = "GATE_KEY=FILL_KEY bash gate/acceptance-dispatcher.sh"
 # regression = "python -m pytest tests/regression -q"
 
 [stops]
+max_cost_usd      = 8.0           # one issue's ceiling (Ch 14) — raise for harder work
 max_iter          = 12
 no_progress_after = 4
 

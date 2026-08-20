@@ -11,7 +11,6 @@ adapter = "claude-code"                    # mock | claude-code | codex | claude
 # claude-code bills your SUBSCRIPTION by default (an ambient ANTHROPIC_API_KEY is withheld). Opt into
 # the billed API key with `run --api-key` or `use_api_key = true`. `loopkit doctor` shows which.
 # use_api_key = false
-max_cost_usd = 5.0                         # budget ceiling (Ch 14; default 10.0) — size for a few ticks (author + acceptance + a fix-tick), not one
 max_tool_calls = 25
 # args = ["--dangerously-skip-permissions"]  # headless claude-code: the gates are the safety, not prompts
 
@@ -26,6 +25,8 @@ acceptance = "python -m pytest tests/holdout -q"   # the HELD-OUT gate (Ch 9) �
 # regression = "python -m pytest tests/seen -q"    # optional 2nd held-out oracle: don't break what worked
 
 [stops]
+max_cost_usd = 5.0                         # budget ceiling (Ch 14; default 10.0) — the FIRST stop checked, because spent money can't be unspent.
+                                           # Size for a few ticks (author + acceptance + a fix-tick), not one.
 max_iter = 12                              # hard iteration cap (Ch 13; default 30)
 no_progress_after = 3                      # halt if the tree hasn't changed for N ticks
 # review_stall_after = 4                   # halt after N consecutive review REJECTs (an APPROVE resets)

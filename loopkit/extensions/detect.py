@@ -378,7 +378,6 @@ branch = "loopkit/run"           # never main/master (Ch 16)
 
 [agent]
 adapter = {_toml_str(p.adapter)}          # detected: {adapter_ev}
-max_cost_usd = 5.0               # budget ceiling (Ch 14) — bites on real cost (see `doctor`)
 
 [prompt]
 anchors = ["PROMPT.md"]          # fixed context reloaded each tick (Ch 4-5)
@@ -389,6 +388,7 @@ anchors = ["PROMPT.md"]          # fixed context reloaded each tick (Ch 4-5)
 #                                    # verify it: `loopkit synth-gate '<oracle>' --fix <ref>` (exit 0 = real)
 
 [stops]
+max_cost_usd = 5.0               # budget ceiling (Ch 14) — the FIRST stop checked (see `doctor`)
 max_iter = 20                    # Ch 13
 no_progress_after = 3
 

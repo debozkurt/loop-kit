@@ -59,6 +59,12 @@ class GateConfig(BaseModel):
 class StopsConfig(BaseModel):
     """The hard stops that make the loop halt (Ch 13)."""
 
+    # The budget ceiling — a stop, and the FIRST one evaluated (stops.py), because money already
+    # spent cannot be unspent. It belongs here with the other stops. `[agent] max_cost_usd` is the
+    # older home and stays honored, so every existing loopkit.toml keeps working: None means inherit
+    # that value, and setting both makes this one win. Read it through `Config.budget_ceiling_usd()`
+    # rather than off either field, so the precedence lives in exactly one place.
+    max_cost_usd: float | None = Field(default=None, ge=0)
     max_iter: int = Field(default=30, ge=1)
     no_progress_after: int = Field(default=3, ge=1)
     # Plan-driven backlog only: halt if no checklist item completes for this many ticks (NoProgress
@@ -217,6 +223,16 @@ class Config(BaseModel):
 
     def repo_path(self) -> Path:
         return Path(self.repo).expanduser().resolve()
+
+    def budget_ceiling_usd(self) -> float:
+        """The dollar ceiling this run halts at — BUDGET_CEILING, first in stop precedence (Ch 14).
+
+        Two homes, one value. `[stops] max_cost_usd` is where the ceiling belongs (it is a stop);
+        `[agent] max_cost_usd` is where it used to live and is still read, so no existing config
+        breaks. `[stops]` wins when both are set.
+        """
+        ceiling = self.stops.max_cost_usd
+        return self.agent.max_cost_usd if ceiling is None else ceiling
 
 
 def load_config(path: str | Path) -> Config:

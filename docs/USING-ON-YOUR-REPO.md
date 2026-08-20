@@ -377,7 +377,7 @@ sharp edges in **Gotchas** below (gitignored files, clean-tree, gate `cwd`, shar
 - **Parallel runs that all edit one shared file conflict on merge.** If every run touches a common
   status/changelog/index file you get N-way conflicts. Have the agent confine changes to its own
   artifact and do the shared-file update in a single pass after merging.
-- **Size `max_cost_usd` for more than one tick.** A budget that barely covers a single author-tick
+- **Size `stops.max_cost_usd` for more than one tick.** A budget that barely covers a single author-tick
   can't iterate against gate feedback — leave room for the acceptance check plus at least one fix-tick.
   (The budget stop halts *starting a new tick*; it won't abort a candidate that reaches DONE mid-tick.)
 

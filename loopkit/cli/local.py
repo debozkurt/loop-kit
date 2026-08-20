@@ -255,7 +255,7 @@ def _doctor_judge(table: Table, cfg: Config) -> None:
 def _doctor_budget(table: Table, cfg: Config) -> None:
     """Will the budget ceiling actually bite? It only fires if the adapter reports a real cost."""
     adapter = cfg.agent.adapter
-    ceiling = f"ceiling ${cfg.agent.max_cost_usd}"
+    ceiling = f"ceiling ${cfg.budget_ceiling_usd()}"
     model = cfg.agent.model or DEFAULT_MODELS.get(adapter)
     if adapter == "mock":
         table.add_row("budget", "[green]ok[/]", f"mock charges per tick · {ceiling}")
@@ -470,7 +470,7 @@ def run(config: Path = typer.Option(DEFAULT_CONFIG, "--config", "-c"),
         fail("run", escape(str(exc)))
     console.print(Panel.fit(
         f"[bold]{cfg.goal}[/]\nrepo {cfg.repo} · branch {cfg.branch} · adapter {cfg.agent.adapter} · "
-        f"budget ${cfg.agent.max_cost_usd}"
+        f"budget ${cfg.budget_ceiling_usd()}"
         + (f" · issue #{issue_number}" if issue_number is not None else ""),
         title="loopkit run"))
     # Review is opt-out: an explicit --review wins, else the configured [review] command, else the
