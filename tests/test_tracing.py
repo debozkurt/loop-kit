@@ -91,6 +91,9 @@ class _FakeRun:
     def add_outputs(self, data):
         self.outputs.update(data)
 
+    def get_url(self):
+        return f"https://smith.example/o/org/projects/p/proj/r/{self.name.replace(' ', '-')}"
+
     def add_metadata(self, data):
         self.metadata.update(data)
 
@@ -120,6 +123,41 @@ def _install(monkeypatch) -> _FakeProvider:
 def _config(repo: Path) -> Config:
     return Config(goal="solve it", repo=str(repo), branch="loopkit/test",
                   gate=GateConfig(iteration="true"))
+
+
+def test_span_url_is_none_when_disabled():
+    # The disabled path must answer None rather than raise: callers log it unconditionally.
+    trace.set_enabled(False)
+    with trace.span("x") as span:
+        assert span.url() is None
+
+
+def test_span_url_survives_a_backend_that_cannot_resolve_it(monkeypatch):
+    # Resolving a URL can touch the network. A trace backend having a bad day must not take the run
+    # down with it — the whole module's contract is that observability never raises into the loop.
+    provider = _install(monkeypatch)
+
+    class _Broken:
+        def get_url(self):
+            raise RuntimeError("no tenant id: offline")
+
+    monkeypatch.setattr(provider, "_cm", lambda run: _noop_cm(_Broken()))
+    with trace.span("x") as span:
+        assert span.url() is None
+
+
+@contextmanager
+def _noop_cm(run):
+    yield run
+
+
+def test_run_loop_logs_the_trace_url(monkeypatch, git_repo: Path, capsys):
+    # The integration that matters: a traced run prints the link to its own trace, so the logs and
+    # the trace are joined by something you can click rather than a run id you have to search.
+    _install(monkeypatch)
+    run_loop(_config(git_repo), MockAgent(behaviors=[lambda ws: "noop"]),
+             iteration_gate=CallableGate(lambda ws: True))
+    assert "trace.url" in capsys.readouterr().err
 
 
 def test_run_loop_emits_full_tree(monkeypatch, git_repo: Path):

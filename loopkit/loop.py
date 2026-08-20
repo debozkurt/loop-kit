@@ -334,6 +334,12 @@ def run_loop(config, agent: Agent, *, iteration_gate: Gate | None = None,
     with trace.span("loopkit run", run_type="chain", tags=["loopkit"],
                     inputs={"goal": config.goal, "repo": str(repo), "branch": config.branch},
                     metadata=run_meta) as run_span:
+        # The one log line that connects the payload-free flight recorder to the trace holding the
+        # payloads. Without it the two halves of the observability story are joined only by a run id
+        # someone has to search for by hand. No-op (None) when tracing is off.
+        trace_url = run_span.url()
+        if trace_url:
+            log.info("trace.url", url=trace_url)
         cost = 0.0
         signatures = [durability.state_signature(repo)]
         feedback: str | None = None

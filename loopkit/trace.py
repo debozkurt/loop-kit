@@ -227,6 +227,19 @@ class _Span:
     def metadata(self, **fields: object) -> None:
         self._apply("add_metadata", _clean(fields))
 
+    def url(self) -> str | None:
+        """This span's URL in the trace backend, or None if it cannot be resolved.
+
+        A trace nobody can find is a trace nobody reads: the project view of a busy backend holds
+        hundreds of runs, and matching one by eye at 3am (or on stage) is exactly the failure this
+        avoids. Resolving may touch the network on first call, so it is best-effort and cached by
+        the SDK — and like every other recording call here, a failure is swallowed.
+        """
+        try:
+            return self._rt.get_url()
+        except Exception:   # noqa: BLE001 — observability never breaks the run it observes
+            return None
+
     def _error(self, message: str) -> None:
         try:
             self._rt.add_metadata({"error": message})
@@ -247,6 +260,7 @@ class _NoopSpan:
 
     def outputs(self, **fields: object) -> None: ...
     def metadata(self, **fields: object) -> None: ...
+    def url(self) -> str | None: return None
     def _error(self, message: str) -> None: ...
 
 
