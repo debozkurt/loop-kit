@@ -118,7 +118,8 @@ class _DumpWriter:
     A None path is a silent no-op (every existing caller writes nothing extra). Given a path, each
     tick lands as one directory:
 
-        00-config/  config.json (the EFFECTIVE config, CLI overrides folded in) + every anchor file
+        00-config/  config.json (the EFFECTIVE config, CLI overrides folded in), every anchor
+                    file, loopkit.toml, and every [review] criteria file (the judge's rubric)
         tick-01/    prompt.md · agent.md · diff.patch · gate.iteration.txt · feedback.md
         tick-02/    the same, plus prompt.diff — what the last tick's feedback added to this prompt
         run.json    the terminal, iterations, cost
@@ -145,7 +146,12 @@ class _DumpWriter:
         # from. Copied by basename: a flat 00-config/ reads better than a mirrored tree, and anchors
         # are few. An anchor that resolves to a directory is skipped — build_prompt expands it, and
         # the expansion is already visible verbatim in each tick's prompt.md.
-        for rel in list(config.prompt.anchors) + ["loopkit.toml"]:
+        # The [review] criteria files come too: the rubric is the standard a REJECT is measured
+        # against (Ch 8), and it is the one input the agent never sees, so a dumped tree without it
+        # cannot explain its own review.md. It also lives under a protected path, so it is not in
+        # any tick's diff.patch either.
+        criteria = list(getattr(config.review, "criteria", None) or [])
+        for rel in list(config.prompt.anchors) + ["loopkit.toml"] + criteria:
             src = repo / rel
             if src.is_file():
                 (cfg / Path(rel).name).write_text(

@@ -12,7 +12,7 @@ import json
 from pathlib import Path
 
 from loopkit.agent import MockAgent
-from loopkit.config import Config, GateConfig, PromptConfig, StopsConfig
+from loopkit.config import Config, GateConfig, PromptConfig, ReviewConfig, StopsConfig
 from loopkit.gate import CallableGate, GateResult
 from loopkit.loop import run_loop
 from loopkit.stops import StopReason
@@ -53,6 +53,21 @@ def test_dump_captures_config_and_anchors(git_repo: Path, tmp_path: Path):
     # The anchors are the durable context every tick rebuilds from — a reader needs them verbatim.
     assert "fix the thing" in (cfg / "PROMPT.md").read_text()
     assert (cfg / "loopkit.toml").is_file()
+
+
+def test_dump_captures_the_review_rubric(git_repo: Path, tmp_path: Path):
+    # review.md says REJECT; the rubric is the standard it was measured against, and the one input
+    # the agent never sees (protected path ⇒ absent from every diff.patch too). Without it the
+    # dumped tree cannot explain its own verdict.
+    (git_repo / "grading").mkdir()
+    (git_repo / "grading" / "review-criteria.md").write_text("# rubric\nreject without a worked example\n")
+    out = tmp_path / "run-01"
+    run_loop(_config(git_repo, review=ReviewConfig(enabled=True, criteria=["grading/review-criteria.md"])),
+             MockAgent(behaviors=[_writes("a.txt")]),
+             iteration_gate=CallableGate(lambda ws: True), dump_path=out)
+
+    rubric = out / "00-config" / "review-criteria.md"
+    assert "reject without a worked example" in rubric.read_text()
 
 
 def test_prompt_diff_shows_the_feedback_arriving(git_repo: Path, tmp_path: Path):
