@@ -1,0 +1,498 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Stop Prompting, Start Looping: Principles of Loop Engineering</title>
+<style>
+.loop{width:100%;height:100%;overflow:visible}
+.node rect{fill:#2b2b2b;stroke:#5a5a5a;stroke-width:1.6;
+  transition:fill .4s ease,stroke .4s ease,opacity .4s ease}
+.node text{fill:#e6e6e6;font-family:var(--sans);text-anchor:middle;
+  dominant-baseline:middle;transition:fill .4s ease}
+.node .t1{font-size:30px;font-weight:500}
+.node .t2{font-size:23px;fill:#a8a8a8}
+.node.terminal rect{stroke-dasharray:6 5}
+.node.stop .t1{font-size:25px}
+.node.stop .t2{font-size:20px}
+.node{opacity:1;transition:opacity .4s ease}
+.edge .ln{stroke:#8a8a8a;stroke-width:2.2;fill:none;transition:stroke .4s ease,opacity .4s ease}
+.edge marker path,marker path{fill:#8a8a8a}
+.edge{opacity:1;transition:opacity .4s ease}
+.elbl{fill:#a8a8a8;font-family:var(--sans);font-size:25px;text-anchor:middle;
+  transition:fill .4s ease,opacity .4s ease}
+
+/* trail = covered so far (cyan outline).  cur = the step being discussed (glow).
+   warn = the terminal box, amber.  everything else eases back but stays readable. */
+.focus .node,.focus .edge,.focus .elbl{opacity:.34}
+.focus .node.lit,.focus .node.cur,.focus .node.warn,
+.focus .edge.lit,.focus .edge.warn,.focus .elbl.lit,.focus .elbl.warn{opacity:1}
+
+.node.lit rect{stroke:#4ec9d9;stroke-width:2.4;fill:#1b2f34}
+.node.lit text{fill:#d6f4fa}
+.node.lit .t2{fill:#7fc9d6}
+
+.node.cur rect{stroke:#7fe2f0;stroke-width:3.6;fill:#27525d;
+  filter:drop-shadow(0 0 14px rgba(78,201,217,.55))}
+.node.cur text{fill:#ffffff;font-weight:600}
+.node.cur .t2{fill:#bfeef7;font-weight:400}
+
+.node.warn rect{stroke:#d9b46a;stroke-width:2.4;fill:#2e2717}
+.node.cur.warn rect{stroke-width:3.6;fill:#3a2f18;
+  filter:drop-shadow(0 0 14px rgba(217,180,106,.45))}
+.node.warn text{fill:#d8c79c}
+.node.cur.warn text{fill:#f7e8c6}
+.node.warn .t2{fill:#d9b46a}
+
+.edge.lit .ln{stroke:#4ec9d9;stroke-width:2.8}
+.elbl.lit{fill:#4ec9d9}
+.edge.warn .ln{stroke:#d9b46a;stroke-width:3}
+.elbl.warn{fill:#d9b46a}
+.edge.ants .ln{stroke:#4ec9d9;stroke-width:3.2;stroke-dasharray:10 12;
+  animation:ants .9s linear infinite}
+.edge.warn.ants .ln{stroke:#d9b46a}
+/* `cut` = this segment is never traversed, because the run already returned */
+.edge.cut .ln{stroke:#4f4f4f;stroke-width:2;stroke-dasharray:2 11;stroke-linecap:round}
+.focus .edge.cut{opacity:.5}
+@keyframes ants{to{stroke-dashoffset:-22}}
+
+:root{
+  --bg:#1b1b1b;--ink:#e6e6e6;--dim:#a8a8a8;--faint:#6f6f6f;--line:#3a3a3a;--accent:#4ec9d9;
+  --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%}
+body{background:var(--bg);color:var(--ink);font-family:var(--sans);
+  -webkit-font-smoothing:antialiased;overflow:hidden}
+.deck{height:100vh;width:100vw;position:relative}
+.slide{position:absolute;inset:0;display:none;flex-direction:column;
+  padding:3.4vh 3.6vw 3.2vh}
+.slide.active{display:flex}
+.slide.title{justify-content:center;align-items:center}
+.wrap{width:100%;max-width:1840px;margin:0 auto;display:flex;flex-direction:column;height:100%}
+.slide.title .wrap{height:auto}
+
+h1{font-size:clamp(2.8rem,5.2vw,4.3rem);line-height:1.04;margin:0 0 1.3rem;font-weight:700;
+  letter-spacing:-.015em}
+h2{font-size:clamp(1.85rem,2.75vw,2.5rem);line-height:1.15;margin:0;font-weight:650;
+  letter-spacing:-.01em;flex:0 0 auto}
+h2 .sep{color:var(--faint);font-weight:400;margin-right:.5rem}
+h2 .d{color:var(--dim);font-weight:400}
+.lead{font-size:clamp(1.35rem,2vw,1.75rem);color:var(--dim);max-width:58ch;line-height:1.4}
+.by{font-family:var(--mono);font-size:1.05rem;color:var(--dim);margin-top:2.2rem}
+
+/* Fixed height, and margin-bottom:auto pins the bullets to the bottom. The diagram is
+   therefore the SAME size and the bullet block sits on the SAME baseline on every
+   slide, nothing shifts when the bullet count changes. */
+.stage{flex:0 0 56vh;margin:1.7rem 0 auto;display:flex;align-items:center;
+  justify-content:center;overflow:hidden}
+.stage svg{width:100%;height:100%;max-height:100%;overflow:hidden}
+
+
+/* two side-by-side sections beneath */
+.under{flex:0 0 auto;display:grid;grid-template-columns:1.62fr 1fr;gap:2.6rem;
+  align-items:start;padding-top:.5rem;border-top:1px solid var(--line)}
+.bul{display:flex;flex-direction:column;gap:.15rem}
+.b{margin:0;font-size:clamp(1.12rem,1.35vw,1.4rem);line-height:1.44;color:var(--dim);
+  opacity:0;transform:translateY(6px);transition:opacity .3s ease,transform .3s ease}
+.b.on{opacity:1;transform:none}
+.b b{color:var(--ink);font-weight:640}
+.b code{font-family:var(--mono);font-size:.9em;background:#2b2b2b;padding:.06em .38em;
+  border-radius:4px;color:#dde6ee}
+.cons{opacity:0;transform:translateY(6px);transition:opacity .3s ease,transform .3s ease;
+  border-left:2px solid #b08a3e;padding-left:1.1rem}
+.cons.on{opacity:1;transform:none}
+.cons .lbl{display:block;font-family:var(--mono);font-size:.76rem;letter-spacing:.16em;
+  text-transform:uppercase;color:var(--dim);margin-bottom:.4rem}
+.cons p{margin:0;font-size:clamp(1.12rem,1.35vw,1.4rem);line-height:1.44;color:var(--dim)}
+.cons em{color:var(--ink);font-style:italic}
+
+/* The artifact line is the recurring take-home, not a footnote - it has to survive a washed-out
+   projector from the back row, so it reads at --dim like the bullets. Greyscale only. */
+.art{flex:0 0 auto;margin-top:.7rem;padding-top:.55rem;border-top:1px solid var(--line);
+  font-family:var(--mono);font-size:clamp(.9rem,1.05vw,1.12rem);color:var(--dim);
+  opacity:0;transition:opacity .3s ease;display:flex;gap:1.2rem;align-items:baseline}
+.art.on{opacity:1}
+.art b{color:#c8c8c8;font-weight:600;letter-spacing:.05em}
+
+/* The definition, stated once before anything is proved. Greyscale (no accent) so slide 2
+   carries no colored text; emphasis is weight, not hue. */
+.defn{margin:1rem 0 0;font-size:clamp(1.3rem,1.95vw,1.8rem);color:var(--ink);
+  line-height:1.35;max-width:84ch;flex:0 0 auto;font-weight:500}
+.defn em{color:#f2f2f2;font-style:normal;font-weight:700}
+/* on the map/overview the defn acts as the subheader, so it follows the grey scheme */
+.slide.map .defn{color:var(--dim)}
+.slide.map .defn em{color:var(--ink)}
+.slide.map .stage{flex:1 1 auto;margin:1.4rem 0 0;min-height:0}
+
+/* the five-question overview map (slide 2) and its all-lit reprise */
+.map{width:100%;height:100%;max-height:100%}
+.map text{font-family:var(--sans);text-anchor:middle}
+/* centrepiece slides (illustration + footer, no bullet column): grow the stage so the
+   illustration sits at optical centre instead of pinned to the top, footer at the base. */
+.slide.solo .stage{flex:1 1 auto;margin:1.6rem 0 0;min-height:0}
+.slide.solo .art{margin-top:auto}
+.map .pnl{fill:#232323;stroke:#3a3a3a;stroke-width:1.6}
+.map .q{fill:#e6e6e6;font-size:27px;font-weight:600}
+.map .rule{stroke:#3a3a3a;stroke-width:1.4}
+.map .chip{fill:#2b2b2b;stroke:#5a5a5a;stroke-width:1.6}
+.map .chip.lit{fill:#1b2f34;stroke:#4ec9d9;stroke-width:2.2}
+.map .ct{fill:#d6d6d6;font-size:25px}
+.map .ct.lit{fill:#d6f4fa}
+
+/* the two statement beats - the deck's only pattern interrupt */
+.slide.stmt{justify-content:center;align-items:flex-start}
+.stmt .wrap{height:auto;max-width:1500px}
+.stmt p{margin:0;font-size:clamp(2rem,3.5vw,3.3rem);line-height:1.2;letter-spacing:-.015em}
+.stmt p + p{margin-top:1.6rem}
+.stmt .hi{color:var(--ink);font-weight:680}
+.stmt .lo{color:#8f8f8f;font-weight:400}
+.slide.prime{justify-content:center;align-items:flex-start}
+.slide.prime .wrap{height:auto;max-width:1480px;display:flex;flex-direction:column;gap:1.5rem}
+.prime .eyb2{margin:0;font-family:var(--mono);font-size:.95rem;letter-spacing:.28em;text-transform:uppercase;color:var(--faint)}
+.prime .hook{margin:0;font-size:clamp(2.4rem,4.6vw,3.7rem);font-weight:680;line-height:1.04;letter-spacing:-.015em;color:var(--ink)}
+.pipe{margin:.3rem 0;font-family:var(--mono);font-size:clamp(1.05rem,1.65vw,1.5rem);color:var(--dim);display:flex;flex-wrap:wrap;align-items:center;gap:.65rem}
+.pipe i{color:var(--faint);font-style:normal}
+.pipe .gap{color:var(--accent);font-weight:700;font-size:1.25em;letter-spacing:.06em}
+/* beat 2 replaces the pipeline in place: both sit in .swap, one fades out, one fades in */
+.rv{opacity:0;transition:opacity .35s ease}
+.rv.on{opacity:1}
+.rvout{transition:opacity .35s ease}
+.rvout.out{opacity:0}
+.swap{position:relative;min-height:13.5rem;margin:.2rem 0}
+.swap>*{position:absolute;left:0;top:0;width:100%}
+.afterp{display:flex;flex-direction:column;gap:1.5rem;margin-top:3.2rem}
+/* the tension slide: title-style hook, vertically centered, reveal content beneath */
+.slide.easy{justify-content:center}
+.slide.easy .wrap{height:auto}
+.easy .hook{margin:0;font-size:clamp(2.8rem,5.2vw,4.3rem);font-weight:700;line-height:1.04;letter-spacing:-.015em;color:var(--ink)}
+.lead2{margin:0 0 .9rem;font-size:clamp(1.15rem,1.6vw,1.5rem);color:var(--dim)}
+.reqs{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:.55rem}
+.reqs li{font-size:clamp(1.15rem,1.55vw,1.45rem);color:var(--dim);line-height:1.3;padding-left:1.5rem;position:relative}
+.reqs li::before{content:"";position:absolute;left:.2rem;top:.6em;width:.4rem;height:.4rem;border-radius:50%;background:var(--faint)}
+.reqs li b{color:var(--ink);font-weight:640}
+.ask{margin:.6rem 0 0;font-size:clamp(1.6rem,2.7vw,2.3rem);font-weight:600;color:var(--accent);letter-spacing:-.01em}
+.prime.shift .wrap{gap:2.2rem}
+.prime .beat{margin:0;font-size:clamp(2.6rem,5.2vw,4.2rem);font-weight:300;line-height:1.02;letter-spacing:-.02em;color:var(--dim)}
+.prime .beat b{font-weight:700;color:var(--ink)}
+.prime .thesis{margin:.6rem 0 0;font-size:clamp(1.5rem,2.5vw,2.05rem);line-height:1.32;color:var(--dim);max-width:36ch}
+.prime .thesis .k{color:var(--ink);font-weight:600}
+
+/* "beyond one loop" - three signposts, one shared principle (slide 19) */
+.bey{width:100%;height:100%;max-height:100%}
+.bey text{font-family:var(--sans);text-anchor:middle}
+.bey .pnl{fill:#232323;stroke:#3a3a3a;stroke-width:1.6}
+.bey .ttl{fill:#e6e6e6;font-family:var(--mono);font-size:38px;font-weight:600}
+.bey .sub{fill:#9a9a9a;font-size:23px}
+.bey .rule{stroke:#3a3a3a;stroke-width:1.4}
+.bey .one{fill:#d6d6d6;font-size:27px}
+.bey .cap{fill:#a8a8a8;font-size:24px;font-weight:500}
+.bey .eyb{fill:#8f8f8f;font-family:var(--mono);font-size:20px;letter-spacing:3px}
+.bey .qn{fill:#cfcfcf;font-size:24px}
+.bey .th{fill:#e6e6e6;font-family:var(--mono);font-size:27px}
+.bey .td{fill:#d6d6d6;font-size:23px}
+.bey .td.b{font-weight:600;fill:#eaeaea}
+.bey .big{fill:#eaeaea;font-size:36px;font-weight:600}
+.bey .grid{stroke:#3a3a3a;stroke-width:1.4}
+.bey .box{fill:#2b2b2b;stroke:#5a5a5a;stroke-width:1.6}
+.bey .box.hl{fill:#1b2f34;stroke:#4ec9d9;stroke-width:2.4}
+.bey .bt{fill:#e6e6e6;font-size:23px}
+.bey .bt.hl{fill:#d6f4fa;font-weight:600}
+.bey .wire{stroke:#8a8a8a;stroke-width:2.2;fill:none}
+.bey .cl{fill:#9a9a9a;font-size:22px}
+.bey .vs{fill:#7d7d7d;font-family:var(--mono);font-size:19px}
+.bey .rpt{fill:#8f8f8f;font-family:var(--mono);font-size:19px}
+
+ul.big{margin:1.2rem 0 0;padding:0;list-style:none;max-width:86ch}
+ul.big li{font-size:clamp(1.2rem,1.6vw,1.5rem);color:var(--dim);line-height:1.45;
+  padding:.55rem 0 .55rem 1.7rem;position:relative}
+ul.big li b{color:var(--ink);font-weight:640}
+ul.big li::before{content:"";position:absolute;left:.1rem;top:1.05em;width:.4rem;height:.4rem;
+  border-radius:50%;background:var(--faint)}
+.note{border-left:3px solid var(--accent);padding:.4rem 0 .4rem 1.3rem;margin:2rem 0 0;
+  max-width:80ch}
+.note p{margin:0;font-size:clamp(1.15rem,1.45vw,1.4rem);color:var(--ink);line-height:1.45}
+
+/* closing slide: scannable codes. Dark-on-white panels, since inverted QR is unreliable
+   on phone cameras, and this is read from the back of the room. */
+/* both codes identical in size and treatment; flex-start so the panels align at the
+   top even though one card carries an extra caption line. */
+.final{display:flex;align-items:flex-start;justify-content:center;gap:5.5vw;margin-top:0;
+  flex-wrap:wrap}
+.qcard{display:flex;flex-direction:column;align-items:center;text-align:center}
+.qbox{background:#fff;border-radius:12px;padding:.9rem;line-height:0;
+  box-shadow:0 0 0 1px #3a3a3a;width:38vh;height:38vh}
+.qbox svg{display:block;width:100%;height:100%}
+.qlbl{margin:1.15rem 0 0;font-family:var(--mono);color:var(--ink);letter-spacing:.01em;
+  font-size:clamp(1.05rem,1.45vw,1.5rem)}
+.qsub{margin:.5rem 0 0;font-family:var(--mono);font-size:clamp(.9rem,1.05vw,1.15rem);
+  color:var(--dim)}
+.slide.close{justify-content:flex-start}
+.slide.close .wrap{height:100%}
+.slide.close .final{flex:1 1 auto;align-content:center}
+
+/* worktree drawing */
+.wt{width:100%;height:100%;max-height:100%}
+.wt .store{fill:#243238;stroke:var(--accent);stroke-width:2}
+.wt .dir{fill:#2b2b2b;stroke:#5a5a5a;stroke-width:1.6}
+.wt .wire{stroke:#8a8a8a;stroke-width:2.2;fill:none}
+.wt text{font-family:var(--sans);text-anchor:middle}
+.wt .s1{fill:#eafcff;font-size:34px;font-weight:600;font-family:var(--mono)}
+.wt .s2{fill:#8fd8e4;font-size:19px}
+.wt .d1{fill:#e6e6e6;font-size:26px;font-family:var(--mono)}
+.wt .d2{fill:#a8a8a8;font-size:22px;font-family:var(--mono)}
+.wt .d3{fill:#9a9a9a;font-size:21px}
+.wt .cap{fill:#9a9a9a;font-size:23px}
+.wt .w{fill:#a8a8a8;font-size:24px;text-anchor:start;font-family:var(--mono)}
+.wt .ok{fill:#1b2f34;stroke:#4ec9d9;stroke-width:2}
+.wt .hold{fill:#3a2f18;stroke:#d9b46a;stroke-width:2;stroke-dasharray:7 6}
+.wt .wait{stroke:#d9b46a;stroke-width:2;stroke-dasharray:6 6;fill:none}
+.wt .note{fill:#7fc9d6;font-size:19px;text-anchor:start}
+.wt .note2{fill:#d9b46a;font-size:19px;text-anchor:start}
+
+.bar{position:fixed;left:0;bottom:0;height:3px;background:var(--accent);width:0;
+  transition:width .3s ease;z-index:50}
+.hud{position:fixed;bottom:11px;right:18px;font-family:var(--mono);font-size:.72rem;
+  color:#4a4a4a;z-index:50}
+@media print{
+  @page{size:landscape;margin:0}
+  html,body{height:auto;overflow:visible}
+  body{-webkit-print-color-adjust:exact;print-color-adjust:exact}
+  .bar,.hud{display:none!important}
+  .deck{height:auto;position:static}
+  .slide{display:flex!important;position:relative;inset:auto;width:100vw;height:100vh;
+    overflow:hidden;break-after:page}
+  .b,.cons,.art{opacity:1!important;transform:none!important}
+}
+</style></head><body>
+<div class="bar" id="bar"></div>
+<div class="hud"><span id="cur">1</span>/<span id="tot">1</span></div>
+<template id="loopsvg"><svg viewBox="18 36 1972 682" class="loop" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerUnits="userSpaceOnUse" markerWidth="13" markerHeight="13" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+<g class="edge" id="e-goal-prompt"><path class="ln" d="M 205,101.0 C 250,101.0 250,156.0 300,156.0" fill="none" marker-end="url(#ah)"/></g>
+<g class="edge" id="e-anchors-prompt"><path class="ln" d="M 205,243.0 C 250,243.0 250,188.0 300,188.0" fill="none" marker-end="url(#ah)"/></g>
+<g class="edge" id="e-prompt-agent"><path class="ln" d="M 465,172.0 H 515" fill="none" marker-end="url(#ah)"/></g>
+<g class="edge" id="e-agent-guard"><path class="ln" d="M 680,172.0 H 730" fill="none" marker-end="url(#ah)"/></g>
+<g class="edge" id="e-guard-commit"><path class="ln" d="M 895,172.0 H 945" fill="none" marker-end="url(#ah)"/></g>
+<g class="edge" id="e-commit-iter"><path class="ln" d="M 1110,172.0 H 1160" fill="none" marker-end="url(#ah)"/></g>
+<g class="edge" id="e-iter-review"><path class="ln" d="M 1345,172.0 H 1395" fill="none" marker-end="url(#ah)"/></g>
+<text class="elbl" id="l-iter-review" x="1370" y="118">pass</text>
+<g class="edge" id="e-review-held"><path class="ln" d="M 1560,172.0 H 1610" fill="none" marker-end="url(#ah)"/></g>
+<text class="elbl" id="l-review-held" x="1585" y="118">pass</text>
+<g class="edge" id="e-held-done"><path class="ln" d="M 1805,172.0 H 1855" fill="none" marker-end="url(#ah)"/></g>
+<text class="elbl" id="l-held-done" x="1832" y="118">pass</text>
+<g class="edge" id="e-guard-safety"><path class="ln" d="M 812.5,209 V 296" fill="none" marker-end="url(#ah)"/></g>
+<text class="elbl" id="l-guard-safety" x="900" y="258">violation</text>
+<g class="edge" id="e-held-exhaust"><path class="ln" d="M 1398.0,536 V 584" fill="none" marker-end="url(#ah)"/></g>
+<text class="elbl" id="l-held-exhaust" x="1478" y="574">tripped</text>
+<g class="edge" id="e-iter-back"><path class="ln" d="M 1252.5,209 V 432 H 430 V 209" fill="none" marker-end="url(#ah)"/></g>
+<text class="elbl" id="l-iter-back" x="542" y="416">feedback</text>
+<g class="edge" id="e-review-back"><path class="ln" d="M 1477.5,209 V 484 H 374 V 209" fill="none" marker-end="url(#ah)"/></g>
+<text class="elbl" id="l-review-back" x="486" y="468">feedback</text>
+<g class="edge" id="e-held-back-a"><path class="ln" d="M 1707.5,209 V 536 H 1398.0" fill="none"/></g>
+<g class="edge" id="e-held-back-b"><path class="ln" d="M 1398.0,536 H 318 V 209" fill="none" marker-end="url(#ah)"/></g>
+<text class="elbl" id="l-held-back-b" x="430" y="520">feedback</text>
+<g class="node" id="n-goal"><rect x="40" y="64" width="165" height="74" rx="9"/>
+<text x="122.5" y="102.0" class="t1">goal</text>
+</g>
+<g class="node" id="n-anchors"><rect x="40" y="206" width="165" height="74" rx="9"/>
+<text x="122.5" y="244.0" class="t1">anchors</text>
+</g>
+<g class="node" id="n-prompt"><rect x="300" y="135" width="165" height="74" rx="9"/>
+<text x="382.5" y="173.0" class="t1">prompt</text>
+</g>
+<g class="node" id="n-agent"><rect x="515" y="135" width="165" height="74" rx="9"/>
+<text x="597.5" y="173.0" class="t1">agent</text>
+</g>
+<g class="node" id="n-guard"><rect x="730" y="135" width="165" height="74" rx="9"/>
+<text x="812.5" y="173.0" class="t1">guard</text>
+</g>
+<g class="node" id="n-commit"><rect x="945" y="135" width="165" height="74" rx="9"/>
+<text x="1027.5" y="173.0" class="t1">commit</text>
+</g>
+<g class="node" id="n-iter"><rect x="1160" y="135" width="185" height="74" rx="9"/>
+<text x="1252.5" y="173.0" class="t1">iteration gate</text>
+</g>
+<g class="node" id="n-review"><rect x="1395" y="135" width="165" height="74" rx="9"/>
+<text x="1477.5" y="173.0" class="t1">review</text>
+</g>
+<g class="node" id="n-held"><rect x="1610" y="135" width="195" height="74" rx="9"/>
+<text x="1707.5" y="173.0" class="t1">held-out gate</text>
+</g>
+<g class="node terminal" id="n-done"><rect x="1855" y="135" width="110" height="74" rx="37.0"/>
+<text x="1910.0" y="173.0" class="t1">DONE</text>
+</g>
+<g class="node terminal stop" id="n-safety"><rect x="688" y="296" width="262" height="70" rx="9"/>
+<text x="819.0" y="321.0" class="t1">safety halt</text>
+<text x="819.0" y="348.0" class="t2">halted · nothing lands</text>
+</g>
+<g class="node terminal stop" id="n-exhaust"><rect x="1222" y="584" width="352" height="70" rx="9"/>
+<text x="1398.0" y="609.0" class="t1">exhausted</text>
+<text x="1398.0" y="636.0" class="t2">budget · no-progress · cap</text>
+</g>
+</svg></template>
+<div class="deck" id="deck"><section class="slide title" data-steps='[{}]'><div class="wrap">
+<h1>Stop Prompting<br/>Start Looping</h1>
+<p class="lead">Principles of Loop Engineering</p>
+<p class="by">Derrick Bozkurt &middot; SRE Manager, RingCentral</p>
+</div></section>
+<section class="slide easy" data-steps='[{"show":1},{"show":2},{"show":3},{"show":4},{"show":5},{"show":6},{"show":7}]'><div class="wrap"><p class="hook">The prompt was the easy part.</p><div class="afterp"><div class="swap"><div class="pipe rvout step-2"><span>prompt</span><i>&rarr;</i><span>agent writes code</span><i>&rarr;</i><span class="gap">??</span><i>&rarr;</i><span>ship</span></div><div class="undecided"><p class="lead2 rv step-2">The prompt doesn&rsquo;t decide</p><ul class="reqs"><li class="rv step-2">is the change <b>safe</b>?</li><li class="rv step-3">did it <b>pass</b>?</li><li class="rv step-4">should it <b>retry</b>?</li><li class="rv step-5">should it <b>stop</b>?</li><li class="rv step-6">did it actually <b>solve the problem</b>?</li></ul></div></div><p class="ask rv step-7">So what controls the system?</p></div></div></section>
+<section class="slide prime shift" data-steps='[{}]'><div class="wrap"><p class="beat">Agent proposes.</p><p class="beat"><b>Loop decides.</b></p><p class="thesis">Intelligence generates the work. The <span class="k">control system</span> decides whether it counts.</p></div></section>
+<section class="slide map" data-steps='[{"show":1}]'><div class="wrap"><h2>Every Reliable Loop Answers Five Questions</h2><p class="defn">Building the control system <em>around</em> the model, not just the prompt inside it.</p><div class="stage"><svg viewBox="0 0 1900 466" class="map" xmlns="http://www.w3.org/2000/svg"><rect class="pnl" x="20" y="8" width="340" height="440" rx="12"/><text class="q" x="190" y="78">What is the</text><text class="q" x="190" y="110">system?</text><path class="rule" d="M 46,132 H 334"/><rect class="chip" x="50" y="158" width="280" height="54" rx="8"/><text class="ct" x="190" y="193">goal</text><rect class="chip" x="50" y="224" width="280" height="54" rx="8"/><text class="ct" x="190" y="259">anchors</text><rect class="chip" x="50" y="290" width="280" height="54" rx="8"/><text class="ct" x="190" y="325">prompt</text><rect class="chip" x="50" y="356" width="280" height="54" rx="8"/><text class="ct" x="190" y="391">agent</text><rect class="pnl" x="400" y="8" width="340" height="440" rx="12"/><text class="q" x="570" y="78">How does it</text><text class="q" x="570" y="110">govern itself?</text><path class="rule" d="M 426,132 H 714"/><rect class="chip" x="430" y="158" width="280" height="54" rx="8"/><text class="ct" x="570" y="193">guard</text><rect class="chip" x="430" y="224" width="280" height="54" rx="8"/><text class="ct" x="570" y="259">safety halt</text><rect class="chip" x="430" y="290" width="280" height="54" rx="8"/><text class="ct" x="570" y="325">commit</text><rect class="pnl" x="780" y="8" width="340" height="440" rx="12"/><text class="q" x="950" y="78">How does it know</text><text class="q" x="950" y="110">it's working?</text><path class="rule" d="M 806,132 H 1094"/><rect class="chip" x="810" y="158" width="280" height="54" rx="8"/><text class="ct" x="950" y="193">iteration gate</text><rect class="chip" x="810" y="224" width="280" height="54" rx="8"/><text class="ct" x="950" y="259">review</text><rect class="chip" x="810" y="290" width="280" height="54" rx="8"/><text class="ct" x="950" y="325">held-out gate</text><rect class="pnl" x="1160" y="8" width="340" height="440" rx="12"/><text class="q" x="1330" y="78">How does it</text><text class="q" x="1330" y="110">terminate?</text><path class="rule" d="M 1186,132 H 1474"/><rect class="chip" x="1190" y="158" width="280" height="54" rx="8"/><text class="ct" x="1330" y="193">done</text><rect class="chip" x="1190" y="224" width="280" height="54" rx="8"/><text class="ct" x="1330" y="259">exhausted</text><rect class="pnl" x="1540" y="8" width="340" height="440" rx="12"/><text class="q" x="1710" y="78">How does it</text><text class="q" x="1710" y="110">scale?</text><path class="rule" d="M 1566,132 H 1854"/><rect class="chip" x="1570" y="158" width="280" height="54" rx="8"/><text class="ct" x="1710" y="193">worktrees</text><rect class="chip" x="1570" y="224" width="280" height="54" rx="8"/><text class="ct" x="1710" y="259">running many</text></svg></div></div></section>
+<section class="slide" data-steps='[{"lit": ["e-goal-prompt"], "cur": ["n-goal"], "ants": ["e-goal-prompt"], "warn": [], "cut": [], "focus": true, "show": 1}, {"lit": ["e-goal-prompt"], "cur": ["n-goal"], "ants": ["e-goal-prompt"], "warn": [], "cut": [], "focus": true, "show": 2}, {"lit": ["e-goal-prompt"], "cur": ["n-goal"], "ants": ["e-goal-prompt"], "warn": [], "cut": [], "focus": true, "show": 3}, {"lit": ["e-goal-prompt"], "cur": ["n-goal"], "ants": ["e-goal-prompt"], "warn": [], "cut": [], "focus": true, "show": 4}]'><div class="wrap"><h2>Goal<span class="sep">:</span><span class="d">Define Done In Observable Terms</span></h2><div class="stage" data-stage></div><div class="under"><div class="bul"><p class="b step-1"><b>A goal is one sentence naming done:</b> not a plan, not a task list &mdash; the state the run must reach.</p><p class="b step-2"><b>Every tick rebuilds the prompt around it:</b> the context resets, the goal does not.</p><p class="b step-3"><b>The rest of the loop points back at it:</b> stops bound it, review judges it, done measures it.</p></div><div class="cons step-4"><span class="lbl">without it</span><p>The loop cannot tell <em>finished</em> from <em>stopped</em>. It ends when the agent runs out of things to say.</p></div></div><div class="art step-4"><b>loopkit.toml</b><span>goal = "&hellip; per PROMPT.md, including the bulk pricing rule."</span></div></div></section>
+<section class="slide" data-steps='[{"lit": ["n-goal", "e-goal-prompt", "e-anchors-prompt"], "cur": ["n-anchors"], "ants": ["e-goal-prompt", "e-anchors-prompt"], "warn": [], "cut": [], "focus": true, "show": 1}, {"lit": ["n-goal", "e-goal-prompt", "e-anchors-prompt"], "cur": ["n-anchors"], "ants": ["e-goal-prompt", "e-anchors-prompt"], "warn": [], "cut": [], "focus": true, "show": 2}, {"lit": ["n-goal", "e-goal-prompt", "e-anchors-prompt"], "cur": ["n-anchors"], "ants": ["e-goal-prompt", "e-anchors-prompt"], "warn": [], "cut": [], "focus": true, "show": 3}, {"lit": ["n-goal", "e-goal-prompt", "e-anchors-prompt"], "cur": ["n-anchors"], "ants": ["e-goal-prompt", "e-anchors-prompt"], "warn": [], "cut": [], "focus": true, "show": 4}]'><div class="wrap"><h2>Anchors<span class="sep">:</span><span class="d">The Context Rebuilt Every Tick</span></h2><div class="stage" data-stage></div><div class="under"><div class="bul"><p class="b step-1"><b>Anchors are ordinary files:</b> the task, the conventions, and the plan, versioned with the code.</p><p class="b step-2"><b>The loop rebuilds the prompt every tick:</b> goal, anchors, last feedback, rules. No history.</p><p class="b step-3"><b>Assume the session is lost:</b> a cold agent must resume from the files on disk alone.</p></div><div class="cons step-4"><span class="lbl">without it</span><p>State lives in the conversation. Nothing survives a restart, and what tick 3 learned is gone by tick 4.</p></div></div><div class="art step-4"><b>loopkit.toml</b><span>anchors = ["PROMPT.md", "CLAUDE.md"]</span></div></div></section>
+<section class="slide" data-steps='[{"lit": ["n-goal", "n-anchors", "e-goal-prompt", "e-anchors-prompt"], "cur": ["n-prompt"], "ants": ["e-goal-prompt", "e-anchors-prompt"], "warn": [], "cut": [], "focus": true, "show": 1}, {"lit": ["n-goal", "n-anchors", "e-goal-prompt", "e-anchors-prompt"], "cur": ["n-prompt"], "ants": ["e-goal-prompt", "e-anchors-prompt"], "warn": [], "cut": [], "focus": true, "show": 2}, {"lit": ["n-goal", "n-anchors", "e-goal-prompt", "e-anchors-prompt"], "cur": ["n-prompt"], "ants": ["e-goal-prompt", "e-anchors-prompt"], "warn": [], "cut": [], "focus": true, "show": 3}, {"lit": ["n-goal", "n-anchors", "e-goal-prompt", "e-anchors-prompt"], "cur": ["n-prompt"], "ants": ["e-goal-prompt", "e-anchors-prompt"], "warn": [], "cut": [], "focus": true, "show": 4}]'><div class="wrap"><h2>Prompt<span class="sep">:</span><span class="d">One Bounded Attempt</span></h2><div class="stage" data-stage></div><div class="under"><div class="bul"><p class="b step-1"><b>A tick is the unit of work:</b> one prompt, one attempt, one verdict, counted and capped.</p><p class="b step-2"><b>Give one bounded objective:</b> a small testable step makes progress and regression both visible.</p><p class="b step-3"><b>A fresh context beats a long one:</b> the loop discards history, so quality does not decay.</p></div><div class="cons step-4"><span class="lbl">without it</span><p>An unbounded tick gives you nothing to count, cap, retry, or resume.</p></div></div><div class="art step-4"><b>loopkit.toml</b><span>[stops]  max_iter = 8</span></div></div></section>
+<section class="slide" data-steps='[{"lit": ["n-goal", "n-anchors", "n-prompt", "e-goal-prompt", "e-anchors-prompt", "e-prompt-agent"], "cur": ["n-agent"], "ants": ["e-goal-prompt", "e-anchors-prompt", "e-prompt-agent"], "warn": [], "cut": [], "focus": true, "show": 1}, {"lit": ["n-goal", "n-anchors", "n-prompt", "e-goal-prompt", "e-anchors-prompt", "e-prompt-agent"], "cur": ["n-agent"], "ants": ["e-goal-prompt", "e-anchors-prompt", "e-prompt-agent"], "warn": [], "cut": [], "focus": true, "show": 2}, {"lit": ["n-goal", "n-anchors", "n-prompt", "e-goal-prompt", "e-anchors-prompt", "e-prompt-agent"], "cur": ["n-agent"], "ants": ["e-goal-prompt", "e-anchors-prompt", "e-prompt-agent"], "warn": [], "cut": [], "focus": true, "show": 3}, {"lit": ["n-goal", "n-anchors", "n-prompt", "e-goal-prompt", "e-anchors-prompt", "e-prompt-agent"], "cur": ["n-agent"], "ants": ["e-goal-prompt", "e-anchors-prompt", "e-prompt-agent"], "warn": [], "cut": [], "focus": true, "show": 4}]'><div class="wrap"><h2>Agent<span class="sep">:</span><span class="d">The Only Part That Proposes</span></h2><div class="stage" data-stage></div><div class="under"><div class="bul"><p class="b step-1"><b>The agent is a subroutine, not the system:</b> the loop around it decides whether a change counts.</p><p class="b step-2"><b>The agent&rsquo;s own &ldquo;done&rdquo; is not a signal:</b> a finished turn says nothing about a finished task.</p><p class="b step-3"><b>Check the agent can act before you judge it:</b> a blocked agent looks like a failing one.</p></div><div class="cons step-4"><span class="lbl">without it</span><p>The agent&rsquo;s own claim of &ldquo;done&rdquo; means its turn ended, not that the work met the goal.</p></div></div><div class="art step-4"><b>loopkit.toml</b><span>[agent]  adapter = "claude-code"</span></div></div></section>
+<section class="slide" data-steps='[{"lit": ["n-goal", "n-anchors", "n-prompt", "n-agent", "e-goal-prompt", "e-anchors-prompt", "e-prompt-agent", "e-agent-guard"], "cur": ["n-guard"], "ants": ["e-goal-prompt", "e-anchors-prompt", "e-prompt-agent", "e-agent-guard"], "warn": [], "cut": [], "focus": true, "show": 1}, {"lit": ["n-goal", "n-anchors", "n-prompt", "n-agent", "e-goal-prompt", "e-anchors-prompt", "e-prompt-agent", "e-agent-guard"], "cur": ["n-guard"], "ants": ["e-goal-prompt", "e-anchors-prompt", "e-prompt-agent", "e-agent-guard"], "warn": [], "cut": [], "focus": true, "show": 2}, {"lit": ["n-goal", "n-anchors", "n-prompt", "n-agent", "e-goal-prompt", "e-anchors-prompt", "e-prompt-agent", "e-agent-guard"], "cur": ["n-guard"], "ants": ["e-goal-prompt", "e-anchors-prompt", "e-prompt-agent", "e-agent-guard"], "warn": [], "cut": [], "focus": true, "show": 3}, {"lit": ["n-goal", "n-anchors", "n-prompt", "n-agent", "e-goal-prompt", "e-anchors-prompt", "e-prompt-agent", "e-agent-guard"], "cur": ["n-guard"], "ants": ["e-goal-prompt", "e-anchors-prompt", "e-prompt-agent", "e-agent-guard"], "warn": [], "cut": [], "focus": true, "show": 4}]'><div class="wrap"><h2>Guard<span class="sep">:</span><span class="d">Reject The Change Before It Lands</span></h2><div class="stage" data-stage></div><div class="under"><div class="bul"><p class="b step-1"><b>Preflight runs before tick one:</b> the loop refuses a dirty tree or a forbidden branch.</p><p class="b step-2"><b>The tick guard sits between agent and commit:</b> nothing unscreened ever reaches git history.</p><p class="b step-3"><b>It reads the diff, not the agent&rsquo;s summary:</b> what changed on disk is the only evidence.</p></div><div class="cons step-4"><span class="lbl">without it</span><p>Nothing screens the diff, so a bad tick commits exactly like a good one.</p></div></div><div class="art step-4"><b>loopkit.toml</b><span>[safety]  protected_paths = ["tests/", "grading/"]</span></div></div></section>
+<section class="slide" data-steps='[{"lit": ["n-goal", "n-anchors", "n-prompt", "n-agent", "n-guard", "e-goal-prompt", "e-anchors-prompt", "e-prompt-agent", "e-agent-guard"], "cur": ["n-safety"], "ants": ["e-goal-prompt", "e-anchors-prompt", "e-prompt-agent", "e-agent-guard", "e-guard-safety"], "warn": ["n-safety", "e-guard-safety"], "cut": [], "focus": true, "show": 1}, {"lit": ["n-goal", "n-anchors", "n-prompt", "n-agent", "n-guard", "e-goal-prompt", "e-anchors-prompt", "e-prompt-agent", "e-agent-guard"], "cur": ["n-safety"], "ants": ["e-goal-prompt", "e-anchors-prompt", "e-prompt-agent", "e-agent-guard", "e-guard-safety"], "warn": ["n-safety", "e-guard-safety"], "cut": [], "focus": true, "show": 2}, {"lit": ["n-goal", "n-anchors", "n-prompt", "n-agent", "n-guard", "e-goal-prompt", "e-anchors-prompt", "e-prompt-agent", "e-agent-guard"], "cur": ["n-safety"], "ants": ["e-goal-prompt", "e-anchors-prompt", "e-prompt-agent", "e-agent-guard", "e-guard-safety"], "warn": ["n-safety", "e-guard-safety"], "cut": [], "focus": true, "show": 3}, {"lit": ["n-goal", "n-anchors", "n-prompt", "n-agent", "n-guard", "e-goal-prompt", "e-anchors-prompt", "e-prompt-agent", "e-agent-guard"], "cur": ["n-safety"], "ants": ["e-goal-prompt", "e-anchors-prompt", "e-prompt-agent", "e-agent-guard", "e-guard-safety"], "warn": ["n-safety", "e-guard-safety"], "cut": [], "focus": true, "show": 4}]'><div class="wrap"><h2>Safety Halt<span class="sep">:</span><span class="d">Some Changes End The Run</span></h2><div class="stage" data-stage></div><div class="under"><div class="bul"><p class="b step-1"><b>It fires before the commit:</b> the loop reverts the tick, and nothing lands.</p><p class="b step-2"><b>This is policy, not quality:</b> there is no better attempt to ask for, so a person must look.</p><p class="b step-3"><b>Protect anything you would not merge unreviewed:</b> tests, CI config, migrations, and lockfiles.</p></div><div class="cons step-4"><span class="lbl">without it</span><p>A dangerous diff has no terminal state, so it commits like any other change.</p></div></div><div class="art step-4"><b>loopkit.toml</b><span>[safety]  protected_paths  ·  allow_branches  ·  require_clean_tree</span></div></div></section>
+<section class="slide" data-steps='[{"lit": ["n-goal", "n-anchors", "n-prompt", "n-agent", "n-guard", "e-goal-prompt", "e-anchors-prompt", "e-prompt-agent", "e-agent-guard", "e-guard-commit"], "cur": ["n-commit"], "ants": ["e-goal-prompt", "e-anchors-prompt", "e-prompt-agent", "e-agent-guard", "e-guard-commit"], "warn": [], "cut": [], "focus": true, "show": 1}, {"lit": ["n-goal", "n-anchors", "n-prompt", "n-agent", "n-guard", "e-goal-prompt", "e-anchors-prompt", "e-prompt-agent", "e-agent-guard", "e-guard-commit"], "cur": ["n-commit"], "ants": ["e-goal-prompt", "e-anchors-prompt", "e-prompt-agent", "e-agent-guard", "e-guard-commit"], "warn": [], "cut": [], "focus": true, "show": 2}, {"lit": ["n-goal", "n-anchors", "n-prompt", "n-agent", "n-guard", "e-goal-prompt", "e-anchors-prompt", "e-prompt-agent", "e-agent-guard", "e-guard-commit"], "cur": ["n-commit"], "ants": ["e-goal-prompt", "e-anchors-prompt", "e-prompt-agent", "e-agent-guard", "e-guard-commit"], "warn": [], "cut": [], "focus": true, "show": 3}, {"lit": ["n-goal", "n-anchors", "n-prompt", "n-agent", "n-guard", "e-goal-prompt", "e-anchors-prompt", "e-prompt-agent", "e-agent-guard", "e-guard-commit"], "cur": ["n-commit"], "ants": ["e-goal-prompt", "e-anchors-prompt", "e-prompt-agent", "e-agent-guard", "e-guard-commit"], "warn": [], "cut": [], "focus": true, "show": 4}]'><div class="wrap"><h2>Commit<span class="sep">:</span><span class="d">Make Safe Progress Durable</span></h2><div class="stage" data-stage></div><div class="under"><div class="bul"><p class="b step-1"><b>Commit every tick:</b> a crash then costs one tick, not the run, and the loop resumes from HEAD.</p><p class="b step-2"><b>Commit only what cleared the guard:</b> the loop checks safety before it makes progress durable.</p><p class="b step-3"><b>A commit is not done:</b> it preserves progress, and the gate decides completion.</p></div><div class="cons step-4"><span class="lbl">without it</span><p>A crash with no per-tick commit loses everything the run has done.</p></div></div><div class="art step-4"><b>git</b><span>one commit per tick, on the loop&rsquo;s own branch</span></div></div></section>
+<section class="slide" data-steps='[{"lit": ["n-goal", "n-anchors", "n-prompt", "n-agent", "n-guard", "n-commit", "e-goal-prompt", "e-anchors-prompt", "e-prompt-agent", "e-agent-guard", "e-guard-commit", "e-commit-iter", "e-iter-back"], "cur": ["n-iter"], "ants": ["e-goal-prompt", "e-anchors-prompt", "e-prompt-agent", "e-agent-guard", "e-guard-commit", "e-commit-iter", "e-iter-back"], "warn": [], "cut": [], "focus": true, "show": 1}, {"lit": ["n-goal", "n-anchors", "n-prompt", "n-agent", "n-guard", "n-commit", "e-goal-prompt", "e-anchors-prompt", "e-prompt-agent", "e-agent-guard", "e-guard-commit", "e-commit-iter", "e-iter-back"], "cur": ["n-iter"], "ants": ["e-goal-prompt", "e-anchors-prompt", "e-prompt-agent", "e-agent-guard", "e-guard-commit", "e-commit-iter", "e-iter-back"], "warn": [], "cut": [], "focus": true, "show": 2}, {"lit": ["n-goal", "n-anchors", "n-prompt", "n-agent", "n-guard", "n-commit", "e-goal-prompt", "e-anchors-prompt", "e-prompt-agent", "e-agent-guard", "e-guard-commit", "e-commit-iter", "e-iter-back"], "cur": ["n-iter"], "ants": ["e-goal-prompt", "e-anchors-prompt", "e-prompt-agent", "e-agent-guard", "e-guard-commit", "e-commit-iter", "e-iter-back"], "warn": [], "cut": [], "focus": true, "show": 3}, {"lit": ["n-goal", "n-anchors", "n-prompt", "n-agent", "n-guard", "n-commit", "e-goal-prompt", "e-anchors-prompt", "e-prompt-agent", "e-agent-guard", "e-guard-commit", "e-commit-iter", "e-iter-back"], "cur": ["n-iter"], "ants": ["e-goal-prompt", "e-anchors-prompt", "e-prompt-agent", "e-agent-guard", "e-guard-commit", "e-commit-iter", "e-iter-back"], "warn": [], "cut": [], "focus": true, "show": 4}]'><div class="wrap"><h2>Iteration Gate<span class="sep">:</span><span class="d">Fast Feedback On Every Tick</span></h2><div class="stage" data-stage></div><div class="under"><div class="bul"><p class="b step-1"><b>Run it every tick:</b> cheap enough to afford always, specific enough to guide the next attempt.</p><p class="b step-2"><b>Feed back the failure text, not just the verdict:</b> the diagnostics become the next prompt.</p><p class="b step-3"><b>Prove the gate is stable first:</b> two runs on one tree must agree, or every stop is corrupt.</p></div><div class="cons step-4"><span class="lbl">without it</span><p>With no error signal, the loop repeats the same attempt, quickly and without correction.</p></div></div><div class="art step-4"><b>loopkit.toml</b><span>[gate]  iteration = "python3 -m pytest tests/seen -q"</span></div></div></section>
+<section class="slide" data-steps='[{"lit": ["n-goal", "n-anchors", "n-prompt", "n-agent", "n-guard", "n-commit", "n-iter", "e-goal-prompt", "e-anchors-prompt", "e-prompt-agent", "e-agent-guard", "e-guard-commit", "e-commit-iter", "e-iter-back", "e-iter-review", "e-review-back"], "cur": ["n-review"], "ants": ["e-goal-prompt", "e-anchors-prompt", "e-prompt-agent", "e-agent-guard", "e-guard-commit", "e-commit-iter", "e-iter-review", "e-review-back"], "warn": [], "cut": [], "focus": true, "show": 1}, {"lit": ["n-goal", "n-anchors", "n-prompt", "n-agent", "n-guard", "n-commit", "n-iter", "e-goal-prompt", "e-anchors-prompt", "e-prompt-agent", "e-agent-guard", "e-guard-commit", "e-commit-iter", "e-iter-back", "e-iter-review", "e-review-back"], "cur": ["n-review"], "ants": ["e-goal-prompt", "e-anchors-prompt", "e-prompt-agent", "e-agent-guard", "e-guard-commit", "e-commit-iter", "e-iter-review", "e-review-back"], "warn": [], "cut": [], "focus": true, "show": 2}, {"lit": ["n-goal", "n-anchors", "n-prompt", "n-agent", "n-guard", "n-commit", "n-iter", "e-goal-prompt", "e-anchors-prompt", "e-prompt-agent", "e-agent-guard", "e-guard-commit", "e-commit-iter", "e-iter-back", "e-iter-review", "e-review-back"], "cur": ["n-review"], "ants": ["e-goal-prompt", "e-anchors-prompt", "e-prompt-agent", "e-agent-guard", "e-guard-commit", "e-commit-iter", "e-iter-review", "e-review-back"], "warn": [], "cut": [], "focus": true, "show": 3}, {"lit": ["n-goal", "n-anchors", "n-prompt", "n-agent", "n-guard", "n-commit", "n-iter", "e-goal-prompt", "e-anchors-prompt", "e-prompt-agent", "e-agent-guard", "e-guard-commit", "e-commit-iter", "e-iter-back", "e-iter-review", "e-review-back"], "cur": ["n-review"], "ants": ["e-goal-prompt", "e-anchors-prompt", "e-prompt-agent", "e-agent-guard", "e-guard-commit", "e-commit-iter", "e-iter-review", "e-review-back"], "warn": [], "cut": [], "focus": true, "show": 4}, {"lit": ["n-goal", "n-anchors", "n-prompt", "n-agent", "n-guard", "n-commit", "n-iter", "e-goal-prompt", "e-anchors-prompt", "e-prompt-agent", "e-agent-guard", "e-guard-commit", "e-commit-iter", "e-iter-back", "e-iter-review", "e-review-back"], "cur": ["n-review"], "ants": ["e-goal-prompt", "e-anchors-prompt", "e-prompt-agent", "e-agent-guard", "e-guard-commit", "e-commit-iter", "e-iter-review", "e-review-back"], "warn": [], "cut": [], "focus": true, "show": 5}]'><div class="wrap"><h2>Review<span class="sep">:</span><span class="d">Judgment The Iteration Gate Cannot Encode</span></h2><div class="stage" data-stage></div><div class="under"><div class="bul"><p class="b step-1"><b>Review what tests cannot express:</b> policy, structure, and intent live outside assertions.</p><p class="b step-2"><b>Never let the author grade the work:</b> independence comes from a fresh context, not a new model.</p><p class="b step-3"><b>A broken judge halts the run:</b> it is an infrastructure failure, never a rejection.</p><p class="b step-4"><b>Log whether the check ran:</b> a step that defaults to off never runs at all.</p></div><div class="cons step-5"><span class="lbl">without it</span><p>Anything a test cannot express goes unenforced. That is where the loop drifts first.</p></div></div><div class="art step-5"><b>loopkit.toml</b><span>[review]  enabled = true</span></div></div></section>
+<section class="slide" data-steps='[{"lit": ["n-goal", "n-anchors", "n-prompt", "n-agent", "n-guard", "n-commit", "n-iter", "n-review", "e-goal-prompt", "e-anchors-prompt", "e-prompt-agent", "e-agent-guard", "e-guard-commit", "e-commit-iter", "e-iter-back", "e-iter-review", "e-review-back", "e-review-held"], "cur": ["n-held"], "ants": ["e-goal-prompt", "e-anchors-prompt", "e-prompt-agent", "e-agent-guard", "e-guard-commit", "e-commit-iter", "e-iter-review", "e-review-held"], "warn": [], "cut": [], "focus": true, "show": 1}, {"lit": ["n-goal", "n-anchors", "n-prompt", "n-agent", "n-guard", "n-commit", "n-iter", "n-review", "e-goal-prompt", "e-anchors-prompt", "e-prompt-agent", "e-agent-guard", "e-guard-commit", "e-commit-iter", "e-iter-back", "e-iter-review", "e-review-back", "e-review-held"], "cur": ["n-held"], "ants": ["e-goal-prompt", "e-anchors-prompt", "e-prompt-agent", "e-agent-guard", "e-guard-commit", "e-commit-iter", "e-iter-review", "e-review-held"], "warn": [], "cut": [], "focus": true, "show": 2}, {"lit": ["n-goal", "n-anchors", "n-prompt", "n-agent", "n-guard", "n-commit", "n-iter", "n-review", "e-goal-prompt", "e-anchors-prompt", "e-prompt-agent", "e-agent-guard", "e-guard-commit", "e-commit-iter", "e-iter-back", "e-iter-review", "e-review-back", "e-review-held"], "cur": ["n-held"], "ants": ["e-goal-prompt", "e-anchors-prompt", "e-prompt-agent", "e-agent-guard", "e-guard-commit", "e-commit-iter", "e-iter-review", "e-review-held"], "warn": [], "cut": [], "focus": true, "show": 3}, {"lit": ["n-goal", "n-anchors", "n-prompt", "n-agent", "n-guard", "n-commit", "n-iter", "n-review", "e-goal-prompt", "e-anchors-prompt", "e-prompt-agent", "e-agent-guard", "e-guard-commit", "e-commit-iter", "e-iter-back", "e-iter-review", "e-review-back", "e-review-held"], "cur": ["n-held"], "ants": ["e-goal-prompt", "e-anchors-prompt", "e-prompt-agent", "e-agent-guard", "e-guard-commit", "e-commit-iter", "e-iter-review", "e-review-held"], "warn": [], "cut": [], "focus": true, "show": 4}, {"lit": ["n-goal", "n-anchors", "n-prompt", "n-agent", "n-guard", "n-commit", "n-iter", "n-review", "e-goal-prompt", "e-anchors-prompt", "e-prompt-agent", "e-agent-guard", "e-guard-commit", "e-commit-iter", "e-iter-back", "e-iter-review", "e-review-back", "e-review-held"], "cur": ["n-held"], "ants": ["e-goal-prompt", "e-anchors-prompt", "e-prompt-agent", "e-agent-guard", "e-guard-commit", "e-commit-iter", "e-iter-review", "e-review-held"], "warn": [], "cut": [], "focus": true, "show": 5}]'><div class="wrap"><h2>Held-Out Gate<span class="sep">:</span><span class="d">The Check It Never Optimizes Against</span></h2><div class="stage" data-stage></div><div class="under"><div class="bul"><p class="b step-1"><b>It comes from the failure you already have:</b> the bug report, the ticket, the incident.</p><p class="b step-2"><b>The iteration gate steers, the held-out gate decides:</b> two checks with two different jobs.</p><p class="b step-3"><b>The agent fits any check it can rerun:</b> passing is not the same as solving.</p><p class="b step-4"><b>Feed back the result, not the checks:</b> it learns what failed, never how it is graded.</p></div><div class="cons step-5"><span class="lbl">without it</span><p>Every pass looks the same. You cannot tell a solved problem from a fitted one.</p></div></div><div class="art step-5"><b>measured</b><span>10 runs  &middot;  the agent shipped a fitted answer in 7  &middot;  held-out caught 7 of 7</span></div></div></section>
+<section class="slide" data-steps='[{"lit": ["n-goal", "n-anchors", "n-prompt", "n-agent", "n-guard", "n-commit", "n-iter", "n-review", "e-goal-prompt", "e-anchors-prompt", "e-prompt-agent", "e-agent-guard", "e-guard-commit", "e-commit-iter", "e-iter-back", "e-iter-review", "e-review-back", "e-review-held", "n-held", "e-held-back-a"], "cur": ["n-exhaust"], "ants": ["e-goal-prompt", "e-anchors-prompt", "e-prompt-agent", "e-agent-guard", "e-guard-commit", "e-commit-iter", "e-iter-review", "e-review-held", "e-held-exhaust", "e-held-back-a"], "warn": ["n-exhaust", "e-held-exhaust", "e-held-back-a"], "cut": ["e-held-back-b"], "focus": true, "show": 1}, {"lit": ["n-goal", "n-anchors", "n-prompt", "n-agent", "n-guard", "n-commit", "n-iter", "n-review", "e-goal-prompt", "e-anchors-prompt", "e-prompt-agent", "e-agent-guard", "e-guard-commit", "e-commit-iter", "e-iter-back", "e-iter-review", "e-review-back", "e-review-held", "n-held", "e-held-back-a"], "cur": ["n-exhaust"], "ants": ["e-goal-prompt", "e-anchors-prompt", "e-prompt-agent", "e-agent-guard", "e-guard-commit", "e-commit-iter", "e-iter-review", "e-review-held", "e-held-exhaust", "e-held-back-a"], "warn": ["n-exhaust", "e-held-exhaust", "e-held-back-a"], "cut": ["e-held-back-b"], "focus": true, "show": 2}, {"lit": ["n-goal", "n-anchors", "n-prompt", "n-agent", "n-guard", "n-commit", "n-iter", "n-review", "e-goal-prompt", "e-anchors-prompt", "e-prompt-agent", "e-agent-guard", "e-guard-commit", "e-commit-iter", "e-iter-back", "e-iter-review", "e-review-back", "e-review-held", "n-held", "e-held-back-a"], "cur": ["n-exhaust"], "ants": ["e-goal-prompt", "e-anchors-prompt", "e-prompt-agent", "e-agent-guard", "e-guard-commit", "e-commit-iter", "e-iter-review", "e-review-held", "e-held-exhaust", "e-held-back-a"], "warn": ["n-exhaust", "e-held-exhaust", "e-held-back-a"], "cut": ["e-held-back-b"], "focus": true, "show": 3}, {"lit": ["n-goal", "n-anchors", "n-prompt", "n-agent", "n-guard", "n-commit", "n-iter", "n-review", "e-goal-prompt", "e-anchors-prompt", "e-prompt-agent", "e-agent-guard", "e-guard-commit", "e-commit-iter", "e-iter-back", "e-iter-review", "e-review-back", "e-review-held", "n-held", "e-held-back-a"], "cur": ["n-exhaust"], "ants": ["e-goal-prompt", "e-anchors-prompt", "e-prompt-agent", "e-agent-guard", "e-guard-commit", "e-commit-iter", "e-iter-review", "e-review-held", "e-held-exhaust", "e-held-back-a"], "warn": ["n-exhaust", "e-held-exhaust", "e-held-back-a"], "cut": ["e-held-back-b"], "focus": true, "show": 4}, {"lit": ["n-goal", "n-anchors", "n-prompt", "n-agent", "n-guard", "n-commit", "n-iter", "n-review", "e-goal-prompt", "e-anchors-prompt", "e-prompt-agent", "e-agent-guard", "e-guard-commit", "e-commit-iter", "e-iter-back", "e-iter-review", "e-review-back", "e-review-held", "n-held", "e-held-back-a"], "cur": ["n-exhaust"], "ants": ["e-goal-prompt", "e-anchors-prompt", "e-prompt-agent", "e-agent-guard", "e-guard-commit", "e-commit-iter", "e-iter-review", "e-review-held", "e-held-exhaust", "e-held-back-a"], "warn": ["n-exhaust", "e-held-exhaust", "e-held-back-a"], "cut": ["e-held-back-b"], "focus": true, "show": 5}]'><div class="wrap"><h2>Exhausted<span class="sep">:</span><span class="d">Cap, Budget, No Progress</span></h2><div class="stage" data-stage></div><div class="under"><div class="bul"><p class="b step-1"><b>Stops need an order, not a set:</b> budget first, because spent money cannot be unspent.</p><p class="b step-2"><b>Catch stuck early, not at the cap:</b> an unchanged tree for N ticks is a spinning loop.</p><p class="b step-3"><b>An agent that keeps editing never looks stuck:</b> count rejected reviews, not file edits.</p><p class="b step-4"><b>Record which stop fired:</b> done, halted, and exhausted each need a different answer.</p></div><div class="cons step-5"><span class="lbl">without it</span><p>A wedged loop spends the whole budget reaching the cap, and giving up reads like success.</p></div></div><div class="art step-5"><b>stop precedence</b><span>max_cost_usd  &rarr;  no_progress_after  &rarr;  review_stall_after  &rarr;  max_iter</span></div></div></section>
+<section class="slide" data-steps='[{"lit": ["n-goal", "n-anchors", "n-prompt", "n-agent", "n-guard", "n-commit", "n-iter", "n-review", "e-goal-prompt", "e-anchors-prompt", "e-prompt-agent", "e-agent-guard", "e-guard-commit", "e-commit-iter", "e-iter-back", "e-iter-review", "e-review-back", "e-review-held", "e-held-back-a", "e-held-back-b"], "cur": ["n-held"], "ants": ["e-goal-prompt", "e-anchors-prompt", "e-prompt-agent", "e-agent-guard", "e-guard-commit", "e-commit-iter", "e-iter-review", "e-review-held", "e-held-back-a", "e-held-back-b"], "warn": [], "cut": [], "focus": true, "show": 5}]'><div class="wrap"><h2>Held-Out Gate<span class="sep">:</span><span class="d">The Check It Never Optimizes Against</span></h2><div class="stage" data-stage></div><div class="under"><div class="bul"><p class="b step-1"><b>It comes from the failure you already have:</b> the bug report, the ticket, the incident.</p><p class="b step-2"><b>The iteration gate steers, the held-out gate decides:</b> two checks with two different jobs.</p><p class="b step-3"><b>The agent fits any check it can rerun:</b> passing is not the same as solving.</p><p class="b step-4"><b>Feed back the result, not the checks:</b> it learns what failed, never how it is graded.</p></div><div class="cons step-5"><span class="lbl">without it</span><p>Every pass looks the same. You cannot tell a solved problem from a fitted one.</p></div></div><div class="art step-5"><b>loopkit.toml</b><span>[gate]  acceptance = "python3 -m pytest tests/holdout -q"</span></div></div></section>
+<section class="slide" data-steps='[{"lit": ["n-goal", "n-anchors", "n-prompt", "n-agent", "n-guard", "n-commit", "n-iter", "n-review", "n-held", "e-goal-prompt", "e-anchors-prompt", "e-prompt-agent", "e-agent-guard", "e-guard-commit", "e-commit-iter", "e-iter-back", "e-iter-review", "e-review-back", "e-review-held", "e-held-back-a", "e-held-back-b", "e-held-done"], "cur": ["n-done"], "ants": ["e-goal-prompt", "e-anchors-prompt", "e-prompt-agent", "e-agent-guard", "e-guard-commit", "e-commit-iter", "e-iter-review", "e-review-held", "e-held-done"], "warn": [], "cut": [], "focus": true, "show": 1}, {"lit": ["n-goal", "n-anchors", "n-prompt", "n-agent", "n-guard", "n-commit", "n-iter", "n-review", "n-held", "e-goal-prompt", "e-anchors-prompt", "e-prompt-agent", "e-agent-guard", "e-guard-commit", "e-commit-iter", "e-iter-back", "e-iter-review", "e-review-back", "e-review-held", "e-held-back-a", "e-held-back-b", "e-held-done"], "cur": ["n-done"], "ants": ["e-goal-prompt", "e-anchors-prompt", "e-prompt-agent", "e-agent-guard", "e-guard-commit", "e-commit-iter", "e-iter-review", "e-review-held", "e-held-done"], "warn": [], "cut": [], "focus": true, "show": 2}, {"lit": ["n-goal", "n-anchors", "n-prompt", "n-agent", "n-guard", "n-commit", "n-iter", "n-review", "n-held", "e-goal-prompt", "e-anchors-prompt", "e-prompt-agent", "e-agent-guard", "e-guard-commit", "e-commit-iter", "e-iter-back", "e-iter-review", "e-review-back", "e-review-held", "e-held-back-a", "e-held-back-b", "e-held-done"], "cur": ["n-done"], "ants": ["e-goal-prompt", "e-anchors-prompt", "e-prompt-agent", "e-agent-guard", "e-guard-commit", "e-commit-iter", "e-iter-review", "e-review-held", "e-held-done"], "warn": [], "cut": [], "focus": true, "show": 3}, {"lit": ["n-goal", "n-anchors", "n-prompt", "n-agent", "n-guard", "n-commit", "n-iter", "n-review", "n-held", "e-goal-prompt", "e-anchors-prompt", "e-prompt-agent", "e-agent-guard", "e-guard-commit", "e-commit-iter", "e-iter-back", "e-iter-review", "e-review-back", "e-review-held", "e-held-back-a", "e-held-back-b", "e-held-done"], "cur": ["n-done"], "ants": ["e-goal-prompt", "e-anchors-prompt", "e-prompt-agent", "e-agent-guard", "e-guard-commit", "e-commit-iter", "e-iter-review", "e-review-held", "e-held-done"], "warn": [], "cut": [], "focus": true, "show": 4}]'><div class="wrap"><h2>Done<span class="sep">:</span><span class="d">Earned, Not Announced</span></h2><div class="stage" data-stage></div><div class="under"><div class="bul"><p class="b step-1"><b>Done is a verdict, not a feeling:</b> the held-out gate passed, and that is the entire claim.</p><p class="b step-2"><b>Verify the claim once, by hand:</b> read the diff and run the held-out gate yourself.</p><p class="b step-3"><b>A passing gate is not a shipped change:</b> check the branch and the PR, not the exit code.</p></div><div class="cons step-4"><span class="lbl">without it</span><p>If the loop decides its own completion, nothing outside it confirms whether the work is actually done.</p></div></div><div class="art step-4"><b>evidence</b><span>the branch, the diff, and the gate output, not the summary</span></div></div></section>
+<section class="slide" data-steps='[{"show": 1}, {"show": 2}, {"show": 3}, {"show": 4}]'><div class="wrap"><h2>Worktrees<span class="sep">:</span><span class="d">One Repository, Separate Working Directories</span></h2><div class="stage">
+<svg viewBox="0 0 1560 470" class="wt" xmlns="http://www.w3.org/2000/svg">
+  <rect class="store" x="560" y="14" width="440" height="104" rx="11"/>
+  <text class="s1" x="780" y="54">.git</text>
+  <text class="s2" x="780" y="90">one history &#183; one set of gates</text>
+
+  <path class="wire" d="M 780,118 V 168 H 200 V 214"/>
+  <path class="wire" d="M 780,118 V 214"/>
+  <path class="wire" d="M 780,118 V 168 H 1360 V 214"/>
+
+  <g class="wt-col"><rect class="dir" x="40" y="214" width="320" height="180" rx="11"/>
+    <text class="d1" x="200" y="262">work/task-1</text>
+    <text class="d2" x="200" y="304">branch  loopkit/task-1</text>
+    <text class="d3" x="200" y="352">one loop, alone in here</text></g>
+  <g class="wt-col"><rect class="dir" x="620" y="214" width="320" height="180" rx="11"/>
+    <text class="d1" x="780" y="262">work/task-2</text>
+    <text class="d2" x="780" y="304">branch  loopkit/task-2</text>
+    <text class="d3" x="780" y="352">one loop, alone in here</text></g>
+  <g class="wt-col"><rect class="dir" x="1200" y="214" width="320" height="180" rx="11"/>
+    <text class="d1" x="1360" y="262">work/task-3</text>
+    <text class="d2" x="1360" y="304">branch  loopkit/task-3</text>
+    <text class="d3" x="1360" y="352">one loop, alone in here</text></g>
+
+  <text class="cap" x="780" y="446">separate files &#183; separate branches &#183; shared history</text>
+</svg></div><div class="under"><div class="bul"><p class="b step-1"><b>One history, many working directories:</b> each checks out its own branch from one .git.</p><p class="b step-2"><b>One task, one branch, one directory:</b> two agents in one tree corrupt each other.</p><p class="b step-3"><b>An isolated workspace holds only tracked files:</b> you must reproduce everything else.</p></div><div class="cons step-4"><span class="lbl">without it</span><p>Parallelism without isolation adds conflicting edits, not throughput. A human still merges them.</p></div></div><div class="art step-4"><b>git</b><span>worktree add .work/task-1 loopkit/task-1</span></div></div></section>
+<section class="slide" data-steps='[{"show": 1}, {"show": 2}, {"show": 3}, {"show": 4}]'><div class="wrap"><h2>Running Many<span class="sep">:</span><span class="d">Batch, Serialize, Don't Trip</span></h2><div class="stage">
+<svg viewBox="0 0 1240 410" class="wt" xmlns="http://www.w3.org/2000/svg">
+  <text class="w" x="20" y="64">wave 1</text>
+  <g><rect class="ok" x="150" y="28" width="330" height="74" rx="10"/>
+     <text class="d1" x="315" y="58">task-1</text><text class="d2" x="315" y="86">auth.py</text></g>
+  <g><rect class="ok" x="505" y="28" width="330" height="74" rx="10"/>
+     <text class="d1" x="670" y="58">task-2</text><text class="d2" x="670" y="86">billing.py</text></g>
+  <g><rect class="ok" x="860" y="28" width="330" height="74" rx="10"/>
+     <text class="d1" x="1025" y="58">task-3</text><text class="d2" x="1025" y="86">search.py</text></g>
+
+  <text class="w" x="20" y="212">wave 2</text>
+  <g><rect class="hold" x="150" y="176" width="330" height="74" rx="10"/>
+     <text class="d1" x="315" y="206">task-4</text><text class="d2" x="315" y="234">auth.py</text></g>
+  <g><rect class="hold" x="505" y="176" width="330" height="74" rx="10"/>
+     <text class="d1" x="670" y="206">task-5</text><text class="d2" x="670" y="234">billing.py</text></g>
+  <path class="wait" d="M 315,102 V 176"/>
+  <path class="wait" d="M 670,102 V 176"/>
+
+  <text class="w" x="20" y="360">wave 3</text>
+  <g><rect class="hold" x="327" y="324" width="330" height="74" rx="10"/>
+     <text class="d1" x="492" y="354">task-6</text>
+     <text class="d2" x="492" y="382">auth.py &#183; billing.py</text></g>
+  <path class="wait" d="M 315,250 V 287 H 492 V 324"/>
+  <path class="wait" d="M 670,250 V 287 H 492 V 324"/>
+</svg></div><div class="under"><div class="bul"><p class="b step-1"><b>Batch by file overlap:</b> tasks that share no files start in the same wave.</p><p class="b step-2"><b>A shared file means waiting:</b> task-4 touches auth.py, so it runs after task-1 lands.</p><p class="b step-3"><b>Scale only what you can isolate and verify:</b> supervision cost grows with every loop.</p></div><div class="cons step-4"><span class="lbl">without it</span><p>Concurrency multiplies whatever one loop already does, including any gaps in its gates or guards.</p></div></div><div class="art step-4"><b>loopkit.toml</b><span>batch --tasks tasks.toml --jobs 3</span></div></div></section>
+<section class="slide solo" data-steps='[{"show":1},{"show":2}]'><div class="wrap"><h2>Beyond The Loop<span class="sep">:</span><span class="d">Scaling In Three Dimensions</span></h2><p class="defn">These aren’t new systems. They’re new ways of applying the same loop.</p><div class="stage"><svg viewBox="0 0 1860 600" class="bey" xmlns="http://www.w3.org/2000/svg"><defs><marker id="bah" viewBox="0 0 10 10" refX="9" refY="5" markerUnits="userSpaceOnUse" markerWidth="11" markerHeight="11" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#8a8a8a"/></marker></defs><rect class="pnl" x="20" y="10" width="580" height="580" rx="12"/><text class="eyb" x="310" y="60">MEASUREMENT</text><text class="ttl" x="310" y="104">PASS@K / PASS^K</text><text class="qn" x="310" y="140">capability vs reliability</text><path class="rule" d="M 50,164 H 570"/><rect class="pnl" x="640" y="10" width="580" height="580" rx="12"/><text class="eyb" x="930" y="60">SELECTION</text><text class="ttl" x="930" y="104">EVOLUTION</text><text class="qn" x="930" y="140">How does it improve?</text><path class="rule" d="M 670,164 H 1190"/><rect class="pnl" x="1260" y="10" width="580" height="580" rx="12"/><text class="eyb" x="1550" y="60">KNOWLEDGE</text><text class="ttl" x="1550" y="104">SKILLS</text><text class="qn" x="1550" y="140">How does it remember?</text><path class="rule" d="M 1290,164 H 1810"/><text class="th" x="182" y="284">pass@k</text><text class="th" x="438" y="284">pass^k</text><path class="grid" d="M 65,308 H 555"/><path class="grid" d="M 310,260 V 484"/><text class="big" x="182" y="380">any</text><text class="big" x="438" y="380">all</text><text class="td" x="182" y="418">of k attempts</text><text class="td" x="438" y="418">of k attempts</text><text class="cl" x="182" y="466">can it do this?</text><text class="cl" x="438" y="466">can I walk away?</text><rect class="box" x="740" y="272" width="380" height="46" rx="8"/><text class="bt" x="930" y="302">candidate loops</text><path class="wire" d="M 930,318 V 339" marker-end="url(#bah)"/><rect class="box" x="740" y="342" width="380" height="46" rx="8"/><text class="bt" x="930" y="372">held-out gate</text><path class="wire" d="M 930,388 V 409" marker-end="url(#bah)"/><rect class="box" x="740" y="412" width="380" height="46" rx="8"/><text class="bt" x="930" y="442">keep best</text><path class="wire" d="M 740,435 H 706 V 295 H 740" marker-end="url(#bah)"/><text class="rpt" x="698" y="370" text-anchor="middle" transform="rotate(-90 698 370)">repeat</text><rect class="box" x="1360" y="237" width="380" height="46" rx="8"/><text class="bt" x="1550" y="267">verified success</text><path class="wire" d="M 1550,283 V 304" marker-end="url(#bah)"/><rect class="box" x="1360" y="307" width="380" height="46" rx="8"/><text class="bt" x="1550" y="337">extract procedure</text><path class="wire" d="M 1550,353 V 374" marker-end="url(#bah)"/><rect class="box" x="1360" y="377" width="380" height="46" rx="8"/><text class="bt" x="1550" y="407">save skill</text><path class="wire" d="M 1550,423 V 444" marker-end="url(#bah)"/><rect class="box" x="1360" y="447" width="380" height="46" rx="8"/><text class="bt" x="1550" y="477">future loops inherit</text></svg></div><div class="art step-2"><b>measured</b><span>10 runs, 30% right each  &middot;  pass@10 97%  &middot;  pass^10 1 in 169,000  &middot;  with the gate, 100%</span></div></div></section>
+<section class="slide map" data-steps='[{"show":1},{"show":2},{"show":3},{"show":4}]'><div class="wrap"><h2>All Of It<span class="sep">:</span><span class="d">Five Questions, One Loop</span></h2><div class="stage"><svg viewBox="0 0 1900 466" class="map" xmlns="http://www.w3.org/2000/svg"><rect class="pnl" x="20" y="8" width="340" height="440" rx="12"/><text class="q" x="190" y="78">What is the</text><text class="q" x="190" y="110">system?</text><path class="rule" d="M 46,132 H 334"/><rect class="chip lit" x="50" y="158" width="280" height="54" rx="8"/><text class="ct lit" x="190" y="193">goal</text><rect class="chip lit" x="50" y="224" width="280" height="54" rx="8"/><text class="ct lit" x="190" y="259">anchors</text><rect class="chip lit" x="50" y="290" width="280" height="54" rx="8"/><text class="ct lit" x="190" y="325">prompt</text><rect class="chip lit" x="50" y="356" width="280" height="54" rx="8"/><text class="ct lit" x="190" y="391">agent</text><rect class="pnl" x="400" y="8" width="340" height="440" rx="12"/><text class="q" x="570" y="78">How does it</text><text class="q" x="570" y="110">govern itself?</text><path class="rule" d="M 426,132 H 714"/><rect class="chip lit" x="430" y="158" width="280" height="54" rx="8"/><text class="ct lit" x="570" y="193">guard</text><rect class="chip lit" x="430" y="224" width="280" height="54" rx="8"/><text class="ct lit" x="570" y="259">safety halt</text><rect class="chip lit" x="430" y="290" width="280" height="54" rx="8"/><text class="ct lit" x="570" y="325">commit</text><rect class="pnl" x="780" y="8" width="340" height="440" rx="12"/><text class="q" x="950" y="78">How does it know</text><text class="q" x="950" y="110">it's working?</text><path class="rule" d="M 806,132 H 1094"/><rect class="chip lit" x="810" y="158" width="280" height="54" rx="8"/><text class="ct lit" x="950" y="193">iteration gate</text><rect class="chip lit" x="810" y="224" width="280" height="54" rx="8"/><text class="ct lit" x="950" y="259">review</text><rect class="chip lit" x="810" y="290" width="280" height="54" rx="8"/><text class="ct lit" x="950" y="325">held-out gate</text><rect class="pnl" x="1160" y="8" width="340" height="440" rx="12"/><text class="q" x="1330" y="78">How does it</text><text class="q" x="1330" y="110">terminate?</text><path class="rule" d="M 1186,132 H 1474"/><rect class="chip lit" x="1190" y="158" width="280" height="54" rx="8"/><text class="ct lit" x="1330" y="193">done</text><rect class="chip lit" x="1190" y="224" width="280" height="54" rx="8"/><text class="ct lit" x="1330" y="259">exhausted</text><rect class="pnl" x="1540" y="8" width="340" height="440" rx="12"/><text class="q" x="1710" y="78">How does it</text><text class="q" x="1710" y="110">scale?</text><path class="rule" d="M 1566,132 H 1854"/><rect class="chip lit" x="1570" y="158" width="280" height="54" rx="8"/><text class="ct lit" x="1710" y="193">worktrees</text><rect class="chip lit" x="1570" y="224" width="280" height="54" rx="8"/><text class="ct lit" x="1710" y="259">running many</text></svg></div><div class="under"><div class="bul"><p class="b step-1"><b>Settle these before tick one:</b> the goal, the anchors, the gates, and the bounds.</p><p class="b step-2"><b>Every outcome is evidence:</b> a pass advances, a failure feeds the next prompt, a violation halts.</p><p class="b step-3"><b>Add them in order:</b> goal and gates first, then the stops, before the first unattended run.</p></div><div class="cons step-4"><span class="lbl">without it</span><p>The system around the model is the part you actually write.</p></div></div></div></section>
+<section class="slide stmt" data-steps='[{}]'><div class="wrap"><p class="lo">The future isn't better prompts.</p><p class="hi">It's better control systems.</p></div></section>
+<section class="slide title close" data-steps='[{}]'><div class="wrap">
+<h2>Where To Start<span class="sep">:</span><span class="d">Clone Loopkit, Mold To Your Repo</span></h2>
+<div class="final">
+<div class="qcard">
+<div class="qbox"><svg viewBox="0 0 35 35" xmlns="http://www.w3.org/2000/svg" shape-rendering="crispEdges" role="img" aria-label="QR code"><rect width="35" height="35" fill="#fff"/><path d="M3 3h7v1h-7zM11 3h2v1h-2zM15 3h2v1h-2zM21 3h1v1h-1zM25 3h7v1h-7zM3 4h1v1h-1zM9 4h1v1h-1zM12 4h4v1h-4zM17 4h1v1h-1zM19 4h3v1h-3zM25 4h1v1h-1zM31 4h1v1h-1zM3 5h1v1h-1zM5 5h3v1h-3zM9 5h1v1h-1zM11 5h1v1h-1zM13 5h1v1h-1zM16 5h5v1h-5zM23 5h1v1h-1zM25 5h1v1h-1zM27 5h3v1h-3zM31 5h1v1h-1zM3 6h1v1h-1zM5 6h3v1h-3zM9 6h1v1h-1zM12 6h1v1h-1zM14 6h1v1h-1zM18 6h1v1h-1zM20 6h2v1h-2zM25 6h1v1h-1zM27 6h3v1h-3zM31 6h1v1h-1zM3 7h1v1h-1zM5 7h3v1h-3zM9 7h1v1h-1zM12 7h1v1h-1zM15 7h3v1h-3zM25 7h1v1h-1zM27 7h3v1h-3zM31 7h1v1h-1zM3 8h1v1h-1zM9 8h1v1h-1zM11 8h5v1h-5zM19 8h2v1h-2zM23 8h1v1h-1zM25 8h1v1h-1zM31 8h1v1h-1zM3 9h7v1h-7zM11 9h1v1h-1zM13 9h1v1h-1zM15 9h1v1h-1zM17 9h1v1h-1zM19 9h1v1h-1zM21 9h1v1h-1zM23 9h1v1h-1zM25 9h7v1h-7zM12 10h2v1h-2zM18 10h1v1h-1zM23 10h1v1h-1zM3 11h1v1h-1zM5 11h1v1h-1zM9 11h2v1h-2zM12 11h1v1h-1zM14 11h1v1h-1zM16 11h2v1h-2zM19 11h1v1h-1zM22 11h2v1h-2zM26 11h1v1h-1zM29 11h1v1h-1zM31 11h1v1h-1zM5 12h1v1h-1zM7 12h1v1h-1zM12 12h2v1h-2zM16 12h1v1h-1zM18 12h3v1h-3zM22 12h5v1h-5zM30 12h2v1h-2zM3 13h2v1h-2zM6 13h4v1h-4zM11 13h3v1h-3zM15 13h1v1h-1zM18 13h1v1h-1zM21 13h3v1h-3zM25 13h5v1h-5zM31 13h1v1h-1zM3 14h1v1h-1zM5 14h2v1h-2zM11 14h2v1h-2zM14 14h1v1h-1zM16 14h1v1h-1zM19 14h1v1h-1zM21 14h1v1h-1zM23 14h2v1h-2zM27 14h2v1h-2zM3 15h8v1h-8zM12 15h1v1h-1zM16 15h1v1h-1zM19 15h1v1h-1zM22 15h2v1h-2zM25 15h2v1h-2zM31 15h1v1h-1zM4 16h2v1h-2zM7 16h1v1h-1zM13 16h2v1h-2zM18 16h1v1h-1zM21 16h3v1h-3zM25 16h2v1h-2zM30 16h2v1h-2zM3 17h2v1h-2zM7 17h5v1h-5zM13 17h1v1h-1zM16 17h5v1h-5zM22 17h1v1h-1zM24 17h4v1h-4zM31 17h1v1h-1zM3 18h2v1h-2zM6 18h2v1h-2zM14 18h1v1h-1zM17 18h1v1h-1zM21 18h3v1h-3zM25 18h2v1h-2zM3 19h1v1h-1zM7 19h1v1h-1zM9 19h3v1h-3zM13 19h2v1h-2zM16 19h3v1h-3zM23 19h3v1h-3zM31 19h1v1h-1zM8 20h1v1h-1zM10 20h1v1h-1zM12 20h1v1h-1zM14 20h1v1h-1zM16 20h4v1h-4zM21 20h2v1h-2zM25 20h2v1h-2zM29 20h3v1h-3zM3 21h4v1h-4zM8 21h3v1h-3zM13 21h1v1h-1zM15 21h1v1h-1zM18 21h1v1h-1zM21 21h2v1h-2zM27 21h2v1h-2zM31 21h1v1h-1zM6 22h1v1h-1zM10 22h1v1h-1zM12 22h1v1h-1zM14 22h1v1h-1zM16 22h1v1h-1zM18 22h2v1h-2zM23 22h1v1h-1zM25 22h1v1h-1zM27 22h1v1h-1zM3 23h2v1h-2zM8 23h2v1h-2zM11 23h1v1h-1zM13 23h1v1h-1zM16 23h1v1h-1zM19 23h1v1h-1zM23 23h6v1h-6zM30 23h1v1h-1zM11 24h1v1h-1zM15 24h1v1h-1zM18 24h2v1h-2zM21 24h1v1h-1zM23 24h1v1h-1zM27 24h3v1h-3zM31 24h1v1h-1zM3 25h7v1h-7zM11 25h1v1h-1zM16 25h3v1h-3zM20 25h1v1h-1zM23 25h1v1h-1zM25 25h1v1h-1zM27 25h1v1h-1zM31 25h1v1h-1zM3 26h1v1h-1zM9 26h1v1h-1zM12 26h1v1h-1zM14 26h2v1h-2zM17 26h3v1h-3zM22 26h2v1h-2zM27 26h1v1h-1zM30 26h1v1h-1zM3 27h1v1h-1zM5 27h3v1h-3zM9 27h1v1h-1zM12 27h1v1h-1zM16 27h2v1h-2zM19 27h1v1h-1zM21 27h8v1h-8zM31 27h1v1h-1zM3 28h1v1h-1zM5 28h3v1h-3zM9 28h1v1h-1zM12 28h1v1h-1zM15 28h1v1h-1zM17 28h4v1h-4zM22 28h3v1h-3zM27 28h3v1h-3zM31 28h1v1h-1zM3 29h1v1h-1zM5 29h3v1h-3zM9 29h1v1h-1zM11 29h2v1h-2zM14 29h2v1h-2zM18 29h2v1h-2zM24 29h1v1h-1zM27 29h1v1h-1zM30 29h2v1h-2zM3 30h1v1h-1zM9 30h1v1h-1zM13 30h4v1h-4zM19 30h1v1h-1zM21 30h1v1h-1zM23 30h1v1h-1zM26 30h3v1h-3zM3 31h7v1h-7zM11 31h4v1h-4zM19 31h1v1h-1zM23 31h1v1h-1zM27 31h2v1h-2zM31 31h1v1h-1z" fill="#000"/></svg></div>
+<p class="qlbl">github.com/debozkurt/loop-kit</p>
+</div>
+<div class="qcard">
+<div class="qbox"><svg viewBox="0 0 35 35" xmlns="http://www.w3.org/2000/svg" shape-rendering="crispEdges" role="img" aria-label="QR code"><rect width="35" height="35" fill="#fff"/><path d="M3 3h7v1h-7zM12 3h1v1h-1zM16 3h1v1h-1zM21 3h1v1h-1zM25 3h7v1h-7zM3 4h1v1h-1zM9 4h1v1h-1zM11 4h3v1h-3zM15 4h1v1h-1zM17 4h1v1h-1zM20 4h1v1h-1zM23 4h1v1h-1zM25 4h1v1h-1zM31 4h1v1h-1zM3 5h1v1h-1zM5 5h3v1h-3zM9 5h1v1h-1zM11 5h1v1h-1zM13 5h3v1h-3zM22 5h1v1h-1zM25 5h1v1h-1zM27 5h3v1h-3zM31 5h1v1h-1zM3 6h1v1h-1zM5 6h3v1h-3zM9 6h1v1h-1zM11 6h4v1h-4zM16 6h2v1h-2zM20 6h1v1h-1zM23 6h1v1h-1zM25 6h1v1h-1zM27 6h3v1h-3zM31 6h1v1h-1zM3 7h1v1h-1zM5 7h3v1h-3zM9 7h1v1h-1zM15 7h2v1h-2zM19 7h5v1h-5zM25 7h1v1h-1zM27 7h3v1h-3zM31 7h1v1h-1zM3 8h1v1h-1zM9 8h1v1h-1zM15 8h3v1h-3zM19 8h1v1h-1zM25 8h1v1h-1zM31 8h1v1h-1zM3 9h7v1h-7zM11 9h1v1h-1zM13 9h1v1h-1zM15 9h1v1h-1zM17 9h1v1h-1zM19 9h1v1h-1zM21 9h1v1h-1zM23 9h1v1h-1zM25 9h7v1h-7zM11 10h2v1h-2zM17 10h1v1h-1zM19 10h1v1h-1zM22 10h2v1h-2zM3 11h1v1h-1zM9 11h1v1h-1zM11 11h3v1h-3zM18 11h5v1h-5zM24 11h2v1h-2zM28 11h3v1h-3zM8 12h1v1h-1zM12 12h4v1h-4zM17 12h2v1h-2zM20 12h4v1h-4zM26 12h2v1h-2zM29 12h2v1h-2zM3 13h3v1h-3zM7 13h1v1h-1zM9 13h2v1h-2zM13 13h2v1h-2zM18 13h3v1h-3zM25 13h1v1h-1zM3 14h1v1h-1zM6 14h3v1h-3zM11 14h2v1h-2zM14 14h1v1h-1zM18 14h1v1h-1zM22 14h2v1h-2zM26 14h1v1h-1zM28 14h1v1h-1zM3 15h2v1h-2zM7 15h3v1h-3zM11 15h2v1h-2zM16 15h2v1h-2zM19 15h1v1h-1zM23 15h1v1h-1zM25 15h2v1h-2zM31 15h1v1h-1zM6 16h3v1h-3zM12 16h2v1h-2zM15 16h2v1h-2zM18 16h6v1h-6zM25 16h1v1h-1zM27 16h1v1h-1zM30 16h2v1h-2zM3 17h2v1h-2zM6 17h1v1h-1zM8 17h3v1h-3zM13 17h1v1h-1zM15 17h4v1h-4zM21 17h1v1h-1zM23 17h4v1h-4zM28 17h2v1h-2zM3 18h1v1h-1zM7 18h1v1h-1zM10 18h1v1h-1zM12 18h1v1h-1zM15 18h5v1h-5zM23 18h5v1h-5zM29 18h1v1h-1zM31 18h1v1h-1zM3 19h1v1h-1zM5 19h1v1h-1zM7 19h3v1h-3zM11 19h2v1h-2zM14 19h2v1h-2zM17 19h1v1h-1zM19 19h2v1h-2zM22 19h1v1h-1zM26 19h1v1h-1zM28 19h2v1h-2zM3 20h1v1h-1zM5 20h3v1h-3zM13 20h1v1h-1zM15 20h1v1h-1zM18 20h6v1h-6zM25 20h3v1h-3zM29 20h3v1h-3zM3 21h4v1h-4zM9 21h1v1h-1zM11 21h3v1h-3zM15 21h4v1h-4zM22 21h2v1h-2zM28 21h1v1h-1zM31 21h1v1h-1zM3 22h1v1h-1zM5 22h1v1h-1zM8 22h1v1h-1zM10 22h1v1h-1zM12 22h1v1h-1zM14 22h2v1h-2zM17 22h3v1h-3zM21 22h1v1h-1zM23 22h1v1h-1zM25 22h3v1h-3zM3 23h1v1h-1zM6 23h1v1h-1zM8 23h4v1h-4zM13 23h1v1h-1zM20 23h2v1h-2zM23 23h5v1h-5zM29 23h3v1h-3zM11 24h1v1h-1zM14 24h1v1h-1zM16 24h1v1h-1zM18 24h1v1h-1zM20 24h2v1h-2zM23 24h1v1h-1zM27 24h2v1h-2zM3 25h7v1h-7zM15 25h4v1h-4zM20 25h1v1h-1zM22 25h2v1h-2zM25 25h1v1h-1zM27 25h3v1h-3zM3 26h1v1h-1zM9 26h1v1h-1zM12 26h1v1h-1zM16 26h1v1h-1zM18 26h1v1h-1zM22 26h2v1h-2zM27 26h1v1h-1zM31 26h1v1h-1zM3 27h1v1h-1zM5 27h3v1h-3zM9 27h1v1h-1zM12 27h2v1h-2zM16 27h1v1h-1zM18 27h2v1h-2zM22 27h7v1h-7zM31 27h1v1h-1zM3 28h1v1h-1zM5 28h3v1h-3zM9 28h1v1h-1zM12 28h3v1h-3zM18 28h2v1h-2zM21 28h2v1h-2zM24 28h1v1h-1zM26 28h1v1h-1zM28 28h2v1h-2zM31 28h1v1h-1zM3 29h1v1h-1zM5 29h3v1h-3zM9 29h1v1h-1zM14 29h1v1h-1zM18 29h2v1h-2zM22 29h1v1h-1zM24 29h7v1h-7zM3 30h1v1h-1zM9 30h1v1h-1zM12 30h1v1h-1zM15 30h3v1h-3zM21 30h1v1h-1zM26 30h1v1h-1zM28 30h2v1h-2zM31 30h1v1h-1zM3 31h7v1h-7zM11 31h4v1h-4zM18 31h1v1h-1zM20 31h1v1h-1zM22 31h1v1h-1zM25 31h5v1h-5z" fill="#000"/></svg></div>
+<p class="qlbl">Derrick Bozkurt</p>
+<p class="qsub">RingCentral &middot; debozkurt@gmail.com</p>
+</div>
+</div>
+<div class="art step-0"><b>getting started</b><span>ask your coding agent to mold loopkit to your repo &mdash; config, both gates, safety envelope, for you to review</span></div>
+</div></section></div>
+<script>
+const slides=[...document.querySelectorAll('.slide')];
+const bar=document.getElementById('bar'),cur=document.getElementById('cur');
+document.getElementById('tot').textContent=slides.length;
+const tpl=document.getElementById('loopsvg');
+
+slides.forEach((s,si)=>{
+  const st=s.querySelector('[data-stage]');
+  if(!st) return;
+  st.appendChild(tpl.content.cloneNode(true));
+  const svg=st.querySelector('svg');
+  const mk=svg.querySelector('marker'),mid='ah'+si;   // unique per clone
+  if(mk){mk.id=mid;
+    svg.querySelectorAll('[marker-end]').forEach(p=>p.setAttribute('marker-end','url(#'+mid+')'));}
+});
+
+const steps=s=>{try{return JSON.parse(s.dataset.steps||'[{}]')}catch(e){return[{}]}};
+
+function paint(s,st){
+  const svg=s.querySelector('svg.loop');
+  if(svg){
+    svg.querySelectorAll('.node,.edge,.elbl')
+       .forEach(e=>e.classList.remove('lit','ants','cur','warn','cut'));
+    svg.classList.toggle('focus',!!st.focus);
+    (st.lit||[]).forEach(id=>svg.querySelector('#'+CSS.escape(id))?.classList.add('lit'));
+    (st.cur||[]).forEach(id=>svg.querySelector('#'+CSS.escape(id))?.classList.add('cur'));
+    (st.warn||[]).forEach(id=>svg.querySelector('#'+CSS.escape(id))?.classList.add('warn'));
+    (st.cut||[]).forEach(id=>svg.querySelector('#'+CSS.escape(id))?.classList.add('cut'));
+    (st.ants||[]).forEach(id=>{
+      // colour per edge, not per step: a warn branch can march amber while the
+      // primary path marches cyan on the same slide.
+      const w=(st.warn||[]).includes(id)?'warn':'lit';
+      svg.querySelector('#'+CSS.escape(id))?.classList.add(w,'ants');
+      svg.querySelector('#'+CSS.escape(id.replace(/^e-/,'l-')))?.classList.add(w);});
+  }
+  const n=st.show||0;
+  s.querySelectorAll('.b,.cons,.art,.rv').forEach(el=>{
+    const m=[...el.classList].find(c=>c.startsWith('step-'));
+    el.classList.toggle('on',(m?+m.slice(5):1)<=n);
+  });
+  // .rvout: shown until its step, then swapped out (the pipeline → list replace)
+  s.querySelectorAll('.rvout').forEach(el=>{
+    const m=[...el.classList].find(c=>c.startsWith('step-'));
+    el.classList.toggle('out',(m?+m.slice(5):99)<=n);
+  });
+}
+
+let i=0,j=0;
+function show(ni,nj){
+  i=Math.max(0,Math.min(slides.length-1,ni));
+  const st=steps(slides[i]);
+  j=Math.max(0,Math.min(st.length-1,nj));
+  slides.forEach((s,k)=>s.classList.toggle('active',k===i));
+  paint(slides[i],st[j]||{});
+  bar.style.width=((i+1)/slides.length*100)+'%';
+  cur.textContent=i+1;
+  history.replaceState(null,'','#'+(i+1)+(j?'.'+(j+1):''));
+}
+const next=()=>{const n=steps(slides[i]).length;
+  if(j<n-1)show(i,j+1);else if(i<slides.length-1)show(i+1,0);};
+const prev=()=>{if(j>0)show(i,j-1);
+  else if(i>0)show(i-1,steps(slides[i-1]).length-1);};
+
+addEventListener('keydown',e=>{
+  if(['ArrowRight','PageDown',' '].includes(e.key)){e.preventDefault();next()}
+  else if(['ArrowLeft','PageUp'].includes(e.key)){e.preventDefault();prev()}
+  else if(e.key==='ArrowDown'){e.preventDefault();show(i+1,0)}
+  else if(e.key==='ArrowUp'){e.preventDefault();show(i-1,0)}
+  else if(e.key==='Home')show(0,0);
+  else if(e.key==='End')show(slides.length-1,0);
+  else if(e.key==='f'||e.key==='F'){document.fullscreenElement?
+    document.exitFullscreen():document.documentElement.requestFullscreen()}
+});
+document.getElementById('deck').addEventListener('click',
+  e=>(e.clientX>innerWidth/2)?next():prev());
+const h=(location.hash||'').replace('#','').split('.');
+show(+h[0]>0?+h[0]-1:0,+h[1]>0?+h[1]-1:0);
+</script></body></html>
