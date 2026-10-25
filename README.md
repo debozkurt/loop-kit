@@ -53,6 +53,9 @@ The core is just `typer + rich + pydantic`. Everything heavy is an optional extr
 Five steps, real commands, in order. Do step 1 first (2 minutes, no config, no API key); it proves
 the install works and shows you what a run looks like before you point it at anything you care about.
 
+**Prerequisites:** Python 3.11+ and git. Step 1 uses the `claude-code` adapter, so it also needs the
+Claude Code CLI, installed and signed in. It runs on your Claude subscription and needs no API key.
+
 ### 1 · See a loop reach `DONE` (2 min, zero setup)
 
 Run it against the bundled demo repo — a tiny Python project with a planted bug its *visible* tests
