@@ -20,6 +20,8 @@ gate**, three hard stops, durable git state, and a blast-radius safety envelope.
 > chapters. If you're new to the ideas, read the manual for the concepts and the capstone; loopkit is
 > where you run them on real repositories.
 
+**Talk:** *Stop Prompting, Start Looping: Principles of Loop Engineering*, Commit Your Code 2026 ([agenda](https://www.commityourcode.com/agenda), [slides](https://debozkurt.github.io/loop-kit/docs/stop-prompting-start-looping.html)).
+
 ```mermaid
 %%{init: {'theme':'base','themeVariables':{'background':'#1b1b1b','primaryColor':'#2b2b2b','primaryTextColor':'#e6e6e6','primaryBorderColor':'#5a5a5a','lineColor':'#8a8a8a','fontSize':'13px'}}}%%
 flowchart LR
