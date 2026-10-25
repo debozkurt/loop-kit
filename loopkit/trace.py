@@ -120,11 +120,11 @@ _TRUSTSTORE_TRIED = False
 def _ensure_os_trust() -> None:
     """Route TLS verification through the OS trust store, once, when tracing turns on.
 
-    **Local-dev-only workaround.** On a corp dev network a TLS-intercepting proxy (Zscaler) presents
-    a corp-signed certificate that Python's bundled CAs don't trust ("certificate verify failed:
+    **Local-dev-only workaround.** A TLS-intercepting proxy presents its own certificate, which
+    Python's bundled CAs don't trust ("certificate verify failed:
     unable to get local issuer certificate"), so the LangSmith uploader silently drops every trace.
     `truststore` makes Python verify against the OS trust store (macOS keychain / Windows store),
-    which holds the corp root CA. It is a **dev-only dependency** (`loopkit[dev]`, never the prod
+    which holds the proxy's root CA. It is a **dev-only dependency** (`loopkit[dev]`, never the prod
     `[trace]` extra): prod talks to LangSmith over normal TLS with standard CAs and needs no
     interception workaround. This call injects truststore **only if it's importable**, so it
     self-activates in local dev and is a clean no-op in prod (truststore absent). It never disables

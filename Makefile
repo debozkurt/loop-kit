@@ -2,7 +2,7 @@
 #
 # The load-bearing safety property: KUBECONFIG points at a repo-local file, exported for ALL
 # recipes, so kind and kubectl read/write ONLY the loopkit cluster's credentials. The user's
-# ~/.kube/config (sre-agent / spacer / glip-bot / RingCentral / …) is never opened or merged.
+# ~/.kube/config (and every other cluster in it) is never opened or merged.
 # This is the mechanism the global kubectl-safety rule asks for, wired in so the flags can't be
 # forgotten.
 #

@@ -168,7 +168,7 @@ library + dev fleet.
 **Live bring-up checklist** (verified working — re-runnable; heavy on Colima):
 1. `make fleet-up` — creates the isolated `kind-loopkit` cluster against the repo-local
    `KUBECONFIG`; verifies nodes with the real kubectl binary. Confirm `~/.kube/config` untouched.
-2. **Side-load redis** (the kind node can't pull from Docker Hub here — corp CA / TLS):
+2. **Side-load redis** (the kind node can't pull from Docker Hub here — TLS interception):
    `export KUBECONFIG=$PWD/.kube/loopkit.yaml` then
    `docker save --platform linux/arm64 redis:7-alpine -o /tmp/r.tar && kind load image-archive /tmp/r.tar --name loopkit`.
    (The worker image's `custom_build` does this build+save+load itself; only redis needs the manual step.)

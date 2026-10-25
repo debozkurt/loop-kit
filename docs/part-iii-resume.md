@@ -211,7 +211,7 @@ Every load-bearing fork is decided. Detail + rationale live in the architecture 
 - **Tracing is auto-on but must stay a clean no-op.** `trace.py` activates only when `langsmith` +
   a LangSmith key are present; with neither it's a cheap no-op, so core code calls `trace.span(...)`
   unconditionally. Don't make any module hard-depend on `langsmith` — it's behind `[trace]`.
-- **Zscaler/corp-TLS is a *local-dev-only* concern.** Behind the corp proxy the LangSmith uploader
+- **TLS interception is a *local-dev-only* concern.** Behind an intercepting proxy the LangSmith uploader
   (and the SDKs) fail cert verification ("unable to get local issuer certificate"); `trace.py`
   injects `truststore` (OS trust store) **only if importable**, and `truststore` ships in
   `[dev]`, **never `[trace]`**. Prod uses normal TLS with standard CAs — never deploy the workaround.
@@ -257,7 +257,7 @@ Hardening (the 🟡 backlog, all post-v1):
 **Then live enablement (needs external resources):**
 
 1. **Push to a GitHub remote** → the `worker-image` workflow builds amd64 on Actions and pushes to
-   GHCR. (The corp Zscaler proxy blocks the *emulated* amd64 cross-build locally — a dev-only TLS
+   GHCR. (A TLS-intercepting proxy blocks the *emulated* amd64 cross-build locally — a dev-only TLS
    edge; Actions has no such proxy. Native build + in-container smoke already pass here.)
 2. **Provision a DOKS cluster** (`make cloud-provision` prints the `doctl` recipe; `make
    cloud-kubeconfig` writes the **repo-local** `.kube/loopkit-cloud.yaml`), then `make cloud-doctor`

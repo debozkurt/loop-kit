@@ -133,5 +133,5 @@ Fixed in current loopkit (the runner now resolves a relative `repo`). On an olde
 
 `doctor` → `tracing` row tells you why. It auto-activates only when **both** `loopkit[trace]` is
 installed **and** a `LANGSMITH_API_KEY` (or `LANGSMITH_TRACING`) is set — otherwise it's a clean no-op.
-Behind a corp TLS proxy the uploader may fail cert verification; that's a dev-only concern (loopkit
+Behind a TLS-intercepting proxy the uploader may fail cert verification; that's a dev-only concern (loopkit
 injects `truststore` if importable — it ships in `[dev]`, never `[trace]`).

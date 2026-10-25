@@ -6,13 +6,19 @@ and two gates; it drives a coding agent toward the goal, tick by tick, with the 
 an autonomous loop from running off a cliff: an external verification gate, a **held-out acceptance
 gate**, three hard stops, durable git state, and a blast-radius safety envelope.
 
+> **Status: v0.1.0, pre-release.** Stable: the single-loop core (`loopkit run`), both gates, the
+> hard stops, git-backed resume, and five adapters (`claude-code`, `codex`, `claude-api`,
+> `openai-api`, `mock`). Built but not yet run live: the cloud fleet (`loopkit cloud`); its deploy
+> workflow skips until its secrets are set. Install from this checkout: the `loopkit` package on
+> PyPI is unrelated.
+
 > **Paired with the manual.** loopkit is the reference implementation of the *Agentic Loops* manual —
 > a written course on self-governed coding loops
 > ([github.com/debozkurt/loop-guide](https://github.com/debozkurt/loop-guide)). The manual teaches
 > each concept against a minimal, stdlib-only harness; loopkit is those same patterns built out as a
 > product, and the chapter numbers throughout this README (and in `loopkit demo N`) map to its
 > chapters. If you're new to the ideas, read the manual for the concepts and the capstone; loopkit is
-> where you run them at production scale.
+> where you run them on real repositories.
 
 ```mermaid
 %%{init: {'theme':'base','themeVariables':{'background':'#1b1b1b','primaryColor':'#2b2b2b','primaryTextColor':'#e6e6e6','primaryBorderColor':'#5a5a5a','lineColor':'#8a8a8a','fontSize':'13px'}}}%%
@@ -39,7 +45,7 @@ pip install -e ".[dev]"        # or: pip install -e .
 
 The core is just `typer + rich + pydantic`. Everything heavy is an optional extra, imported lazily:
 `[claude]`/`[openai]` (the API-adapter SDKs), `[trace]` (LangSmith tracing), `[fleet]` (Redis),
-`[cloud]` (kubernetes). `pip install loopkit` pulls none of them; `[agents]` = both API SDKs,
+`[cloud]` (kubernetes). `pip install -e .` pulls none of them; `[agents]` = both API SDKs,
 `[all]` = everything.
 
 ## Quickstart — from zero to a merged fix
@@ -503,6 +509,14 @@ Nav and setup are in [Where to go](#where-to-go) above; these are the day-to-day
 - **[Operating a run](docs/OPERATING.md)** — tell a *silent* run from a hung one, never edit a live
   tree, how to resume, where output goes per tier.
 - **[Troubleshooting](docs/TROUBLESHOOTING.md)** — `cost: $0.00`, `rc=1`, `safety_halt`, flaky gate, …
+
+## Verification
+
+Every push to `main` and every pull request runs the suite on Python 3.11 and 3.12
+([`tests.yml`](.github/workflows/tests.yml)). At `298317b`: 589 passed, 23 skipped. The suite uses
+`MockAgent`, `fakeredis`, and injected fakes, so it needs no tokens, cluster, or Redis server.
+[`worker-image.yml`](.github/workflows/worker-image.yml) builds the worker image, smoke-tests it
+with full mock-adapter loops, and pushes it to `ghcr.io/debozkurt/loopkit-worker`.
 
 ## Develop
 

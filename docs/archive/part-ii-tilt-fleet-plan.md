@@ -28,7 +28,7 @@ Scoped interactively 2026-06-19. The decisions below were **locked**; execution 
 | Decision | Choice | Why |
 |---|---|---|
 | Build env | From `~/Documents/loopkit` (this repo's own Claude env) | loopkit memory + transcript stay with the project (the migration convention). |
-| Substrate | **Local kind cluster, fully isolated** (own cluster name + own kubeconfig) | Most realistic / best teaching value; Tilt is k8s-first. Isolation is non-negotiable — must never touch the sre-agent / spacer / glip-bot / RingCentral contexts. |
+| Substrate | **Local kind cluster, fully isolated** (own cluster name + own kubeconfig) | Most realistic / best teaching value; Tilt is k8s-first. Isolation is non-negotiable — must never touch any other kube context. |
 | Queue | **Redis** | Conventional fleet queue; itself just a container, only a thin Python client dep. |
 | Dashboard | Optional, v1-thin, deferrable | Read-only over Redis; build last or skip for the first green fleet. |
 
@@ -43,8 +43,8 @@ The global kubectl/context-safety rules apply in full. The fleet gets a cluster 
 collide** with any other cluster on this machine. The mechanism, in priority order:
 
 1. **Repo-local kubeconfig is the primary guarantee.** Point `KUBECONFIG` at a file inside the
-   repo and kind writes/reads ONLY there. The user's `~/.kube/config` (sre-agent, spacer,
-   glip-bot, RingCentral, …) is never opened, never merged, never at risk.
+   repo and kind writes/reads ONLY there. The user's `~/.kube/config` (and every other
+   cluster in it) is never opened, never merged, never at risk.
    ```
    export KUBECONFIG=$PWD/.kube/loopkit.yaml   # repo-local, gitignored
    ```
@@ -195,7 +195,7 @@ gate relocated — proven by `test_evolve_catches_selection_inflation_over_the_q
   --digests`. Fix (in the Tiltfile): a `custom_build` that flattens to one platform — `docker build`
   → `docker save --platform linux/arm64` → `kind load image-archive` — with `skips_local_docker`.
   redis (not a Tilt build target) is side-loaded the same way; the kind node also can't pull from
-  Docker Hub directly here (corp CA / TLS: `x509: certificate signed by unknown authority`), so the
+  Docker Hub directly here (TLS interception: `x509: certificate signed by unknown authority`), so the
   host pulls + side-loads. Still pin `allow_k8s_contexts('kind-loopkit')` + the `fail()` assertion.
 - **Port 6379 is taken by a local `redis-server` on this host.** Tilt forwards the cluster's redis
   to **localhost:16379**; `make fleet-run/evolve` pass `--redis-url redis://localhost:16379`. Never

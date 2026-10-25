@@ -29,7 +29,7 @@ cloud = ["kubernetes>=29"]                             # Part III: the loopkit c
 agents = ["anthropic>=0.40", "openai>=1.40"]          # both API adapters at once
 all = ["anthropic>=0.40", "openai>=1.40", "langsmith>=0.1", "redis>=5.0", "kubernetes>=29"]
 # truststore is a LOCAL-DEV-ONLY dep: it routes TLS through the OS trust store so the LangSmith
-# uploader (and the SDKs) work behind a corp TLS-intercepting proxy (Zscaler — corp root CA in the
+# uploader (and the SDKs) work behind a TLS-intercepting proxy (its root CA is in the OS
 # keychain, not in Python's bundled CAs). NEVER ship it to prod: prod talks to LangSmith over
 # normal TLS with standard CAs. trace.py injects truststore only if it's importable, so it
 # self-activates in dev and is a clean no-op in prod (where it isn't installed).

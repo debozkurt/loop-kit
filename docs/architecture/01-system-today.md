@@ -212,7 +212,7 @@ extra (`loopkit[trace]`) imported lazily, so importing `trace.py` never pulls it
 span the loop has open — no tracer object is threaded through the `Agent` contract. Cost on each span
 is exact, computed by `pricing.py` from native token usage — the same number that feeds the budget
 stop. The fleet inherits all of this: each worker runs `run_loop`, so its runs trace too (tagged by
-task id). *Dev-only sharp edge:* behind a corp TLS-intercepting proxy (Zscaler), the LangSmith
+task id). *Dev-only sharp edge:* behind a TLS-intercepting proxy, the LangSmith
 uploader needs the OS trust store — `trace.py` injects `truststore` if it's importable (a **dev-only**
 dependency; absent in prod, where standard TLS works).
 
