@@ -541,10 +541,10 @@ adapter matrix** (`claude-api`/`openai-api` + `codex` alongside `claude-code`), 
 **cost parsing** (`pricing.py`) so the budget stop bites, and a **full-tree LangSmith tracing** layer
 (`trace.py`, auto-on, verified live).
 
-**Next — a production, cloud-deployable system (Part III).** Phase 0 (adapters + cost + tracing) is
-done; the next phase is the **amd64 worker image → GHCR** pipeline, then the DOKS cluster foundation,
-per-run **`Job`s** + namespaces, **`CronJob`/webhook** triggers, and **Secrets** — running many jobs
-in production with per-run namespacing, budget ceilings, and shipped logs/traces. Safety (Ch 16) must
+**Next — run the cloud system live (Part III).** Phases 0–6 are built and tested without tokens, and
+CI builds the **worker image** (amd64 and arm64) and pushes it to GHCR. The rest waits on a DOKS cluster: the
+cluster foundation, per-run **`Job`s** + namespaces, **`CronJob`/webhook** triggers, and per-submitter
+**Secrets** are built but not yet applied live. Safety (Ch 16) must
 hold at cloud scale: least-privilege ServiceAccounts, the pre-tool-use hook, branch-only pushes. The
 full plan + current state: [`docs/part-iii-resume.md`](docs/part-iii-resume.md) and the architecture
 wiki [`docs/architecture/`](docs/architecture/README.md).
